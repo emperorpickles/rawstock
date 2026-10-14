@@ -45,6 +45,9 @@ CPU, GPU, preview, and export share this order:
    encoding (sRGB, Display P3, and others).
 9. **Export.**
 
+[Film pipeline](FILM_PIPELINE.md) records what each stage does in the code
+today, and which pull request adds the stages that are not on `main` yet.
+
 ## Lab
 
 Core writes a linear ACEScg dump after as-shot white balance and exposure.

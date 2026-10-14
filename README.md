@@ -25,6 +25,7 @@ rawstock develop IMG.RAF --stock <name> -o out.jpg   # target shape
 
 - [Architecture](docs/ARCHITECTURE.md)
 - [Plan](docs/PLAN.md)
+- [Film pipeline](docs/FILM_PIPELINE.md)
 - [Stock format](stocks/README.md)
 
 ## License
