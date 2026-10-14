@@ -50,6 +50,7 @@ density = [0.15, 0.30]        # density, must not decrease
 # [grain.red]                     # green and blue use the same keys
 # density = [0.0, 1.0, 2.0]
 # rms = [3.0, 5.0, 4.0]
+# size_mm = 0.028                 # optional dye-cloud size; red > green > blue
 
 # Optional. Omit the whole table for no halation. radius is the Gaussian
 # sigma as a fraction of the shorter image side. weight is the red, green,
@@ -71,9 +72,13 @@ is the same file older stocks already use, so `schema_version` stays 1.
 `[grain]` holds one RMS-granularity-versus-density table per layer, the
 shape of a Kodak Vision3 datasheet: read density, then the Sigma D scale,
 and store Sigma D × 1000 as `rms`. The loader does not resample it. Density
-must strictly increase; rms may rise and fall. The grain cell is that
-datasheet's 48 µm aperture. `frame_mm` (default 35) is the physical width
-of the image, so the cell grows in pixels as the export gets wider.
+must strictly increase; rms may rise and fall. The 48 µm figure is the
+measurement aperture that sets the amplitude. It is not a tile. Grain is a
+Poisson field of overlapping dye clouds, placed in millimetres on
+`frame_mm` (default 35), so a wider export grows the clouds in pixels
+instead of revealing a finer noise. Layers share some clouds and keep some
+of their own. Optional `size_mm` is that layer's characteristic cloud size;
+omitted layers use the built-in sizes, with red coarser than blue.
 `[halation]` is a threshold on the peak scene-linear channel, a blur whose
 sigma is `radius` times the shorter side, and a red-weighted add-back.
 

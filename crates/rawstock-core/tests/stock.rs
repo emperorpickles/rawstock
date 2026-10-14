@@ -163,6 +163,7 @@ fn grain_and_halation_tables_load_on_schema_1() {
     let grain = stock.parameters().grain().expect("grain");
     assert_eq!(grain.frame_mm(), Grain::FRAME_MM);
     assert_eq!(grain.seed(), 7);
+    assert_eq!(grain.size_mm(), Grain::DEFAULT_SIZE_MM);
     let red: Vec<_> = grain.layers()[0].points().collect();
     assert_eq!(red, vec![(0.0, 2.0), (1.0, 5.0), (2.0, 3.5)]);
     // RMS is allowed to fall after the peak. That is the Vision3 curve shape.
@@ -187,6 +188,26 @@ fn omitted_grain_frame_uses_35_mm() {
         stock.parameters().grain().unwrap().frame_mm(),
         Grain::FRAME_MM
     );
+}
+
+#[test]
+fn grain_size_is_optional_per_layer() {
+    let text = (neutral_text() + GRAIN_AND_HALATION).replace(
+        "[grain.red]\ndensity = [0.0, 1.0, 2.0]",
+        "[grain.red]\nsize_mm = 0.04\ndensity = [0.0, 1.0, 2.0]",
+    );
+    let stock = load_text(&text).unwrap();
+    let size = stock.parameters().grain().unwrap().size_mm();
+    assert!((size[0] - 0.04).abs() < 1.0e-6);
+    assert_eq!(size[1], Grain::DEFAULT_SIZE_MM[1]);
+    assert_eq!(size[2], Grain::DEFAULT_SIZE_MM[2]);
+
+    let text = (neutral_text() + GRAIN_AND_HALATION).replace(
+        "[grain.green]\ndensity = [0, 1, 2]",
+        "[grain.green]\nsize_mm = 0\ndensity = [0, 1, 2]",
+    );
+    let err = load_text(&text).unwrap_err();
+    assert!(matches!(err, StockError::Model(ModelError::GrainSize)));
 }
 
 #[test]

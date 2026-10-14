@@ -6,8 +6,8 @@
 //! 2. [`Halation`](crate::stock::Halation), when the stock sets it: a threshold,
 //!    a wide blur, and a red-weighted add-back, still in scene-linear exposure
 //! 3. [`FilmModel`](crate::stock::FilmModel): exposure to per-layer density
-//! 4. [`Grain`](crate::stock::Grain), when the stock sets it: per-layer density
-//!    noise
+//! 4. [`Grain`](crate::stock::Grain), when the stock sets it: per-layer dye-cloud
+//!    noise in density
 //! 5. print/scan: density back to display-referred linear RGB
 //! 6. output transform: ACEScg to encoded sRGB, clipping out-of-gamut channels
 //! 7. export: orientation, an sRGB ICC profile, 8-bit JPEG or 16-bit TIFF
