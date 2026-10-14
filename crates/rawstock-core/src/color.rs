@@ -10,9 +10,12 @@
 use std::path::Path;
 
 use rawler::imgop::develop::{Intermediate, ProcessingStep, RawDevelop};
+use rawler::imgop::sensor::Demosaic;
+use rawler::imgop::sensor::xtrans::markesteijn::XTransMarkesteijnDemosaic;
+use rawler::rawimage::RawPhotometricInterpretation;
 use thiserror::Error;
 
-use crate::decode::RawImage;
+use crate::decode::{CfaKind, RawImage};
 use crate::matrices;
 
 /// Failure while developing a RAW file to scene-linear ACEScg or writing it.
@@ -200,9 +203,13 @@ impl RawImage {
     /// into ACEScg. White balance is already in the samples, so the matrix
     /// sees an identity balance.
     pub fn develop_linear(&self) -> Result<LinearImage, DevelopError> {
-        let developed = RawDevelop::new_with(&[ProcessingStep::Rescale, ProcessingStep::Demosaic])
-            .develop_intermediate(self.decoded())
-            .map_err(|source| DevelopError::Demosaic { source })?;
+        let developed = if self.cfa() == CfaKind::XTrans {
+            self.demosaic_xtrans()?
+        } else {
+            RawDevelop::new_with(&[ProcessingStep::Rescale, ProcessingStep::Demosaic])
+                .develop_intermediate(self.decoded())
+                .map_err(|source| DevelopError::Demosaic { source })?
+        };
 
         let (width, height, mut samples) = match developed {
             Intermediate::ThreeColor(pixels) => take_rgb(pixels)?,
@@ -219,6 +226,29 @@ impl RawImage {
         let transform = acescg_transform(self.camera_matrix(), [1.0, 1.0, 1.0, 0.0])?;
         apply_transform(&mut samples, transform);
         LinearImage::new(width, height, samples)
+    }
+}
+
+impl RawImage {
+    /// Rescale, then demosaic X-Trans with 3-pass Markesteijn.
+    ///
+    /// `rawler`'s own develop path uses bilinear for X-Trans, which zippers
+    /// and fringes on high-contrast edges. Its Markesteijn demosaic is
+    /// directional and works in CIELab, so edges stay clean.
+    fn demosaic_xtrans(&self) -> Result<Intermediate, DevelopError> {
+        let scaled = RawDevelop::new_with(&[ProcessingStep::Rescale])
+            .develop_intermediate(self.decoded())
+            .map_err(|source| DevelopError::Demosaic { source })?;
+        let Intermediate::Monochrome(mosaic) = scaled else {
+            return Err(DevelopError::UnexpectedChannels { channels: 0 });
+        };
+        let RawPhotometricInterpretation::Cfa(config) = &self.decoded().photometric else {
+            return Err(DevelopError::UnexpectedChannels { channels: 0 });
+        };
+        let roi = mosaic.rect();
+        Ok(Intermediate::ThreeColor(
+            XTransMarkesteijnDemosaic::new_pass_3().demosaic(&mosaic, &config.cfa, &config.colors, roi),
+        ))
     }
 }
 
