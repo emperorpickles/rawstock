@@ -34,6 +34,116 @@ impl fmt::Display for CfaKind {
     }
 }
 
+/// How the camera asked for the sensor image to be displayed.
+///
+/// Values follow the EXIF Orientation tag. [`Self::apply_rgb`] bakes that
+/// transform into pixels at export, so the file itself is stored upright.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Orientation {
+    /// Tag 1. No transform.
+    Normal,
+    /// Tag 2.
+    HorizontalFlip,
+    /// Tag 3.
+    Rotate180,
+    /// Tag 4.
+    VerticalFlip,
+    /// Tag 5. Mirror across the diagonal.
+    Transpose,
+    /// Tag 6. 90 degrees clockwise.
+    Rotate90,
+    /// Tag 7.
+    Transverse,
+    /// Tag 8. 90 degrees counter-clockwise.
+    Rotate270,
+    /// Missing or unrecognized tag. Treated as [`Self::Normal`].
+    Unknown,
+}
+
+impl Orientation {
+    /// Width and height after this orientation is applied.
+    pub fn dimensions(self, width: u32, height: u32) -> (u32, u32) {
+        if self.transposes() {
+            (height, width)
+        } else {
+            (width, height)
+        }
+    }
+
+    /// Bake this orientation into interleaved RGB samples.
+    ///
+    /// Flips happen before the transpose, matching EXIF display orientation.
+    pub(crate) fn apply_rgb<T: Copy>(
+        self,
+        width: u32,
+        height: u32,
+        pixels: &[T],
+    ) -> (u32, u32, Vec<T>) {
+        let (out_width, out_height) = self.dimensions(width, height);
+        if pixels.is_empty() {
+            return (out_width, out_height, Vec::new());
+        }
+        let (transpose, flip_horizontal, flip_vertical) = self.flips();
+        if !transpose && !flip_horizontal && !flip_vertical {
+            return (width, height, pixels.to_vec());
+        }
+        debug_assert_eq!(pixels.len(), width as usize * height as usize * 3);
+        let mut out = vec![pixels[0]; pixels.len()];
+        for y in 0..height {
+            for x in 0..width {
+                let flipped_x = if flip_horizontal { width - 1 - x } else { x };
+                let flipped_y = if flip_vertical { height - 1 - y } else { y };
+                let (dest_x, dest_y) = if transpose {
+                    (flipped_y, flipped_x)
+                } else {
+                    (flipped_x, flipped_y)
+                };
+                let source = (y as usize * width as usize + x as usize) * 3;
+                let dest = (dest_y as usize * out_width as usize + dest_x as usize) * 3;
+                out[dest..dest + 3].copy_from_slice(&pixels[source..source + 3]);
+            }
+        }
+        (out_width, out_height, out)
+    }
+
+    fn transposes(self) -> bool {
+        matches!(
+            self,
+            Self::Transpose | Self::Rotate90 | Self::Transverse | Self::Rotate270
+        )
+    }
+
+    /// `(transpose, flip horizontal, flip vertical)`.
+    fn flips(self) -> (bool, bool, bool) {
+        match self {
+            Self::Normal | Self::Unknown => (false, false, false),
+            Self::VerticalFlip => (false, false, true),
+            Self::HorizontalFlip => (false, true, false),
+            Self::Rotate180 => (false, true, true),
+            Self::Transpose => (true, false, false),
+            Self::Rotate90 => (true, false, true),
+            Self::Rotate270 => (true, true, false),
+            Self::Transverse => (true, true, true),
+        }
+    }
+}
+
+impl fmt::Display for Orientation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Normal => "normal",
+            Self::HorizontalFlip => "flip horizontal",
+            Self::Rotate180 => "rotate 180",
+            Self::VerticalFlip => "flip vertical",
+            Self::Transpose => "transpose",
+            Self::Rotate90 => "rotate 90 CW",
+            Self::Transverse => "transverse",
+            Self::Rotate270 => "rotate 90 CCW",
+            Self::Unknown => "unknown",
+        })
+    }
+}
+
 /// Failure while opening a RAW file or reading the metadata we keep.
 #[derive(Debug, Error)]
 pub enum DecodeError {
@@ -78,6 +188,7 @@ pub struct RawImage {
     width: u32,
     height: u32,
     cfa: CfaKind,
+    orientation: Orientation,
     black_levels: Vec<f32>,
     white_levels: Vec<f32>,
     /// As-shot white balance in RGBE order, as encoded by the file.
@@ -108,6 +219,13 @@ impl RawImage {
     /// Color-filter layout, or linear DNG when the file is already demosaiced.
     pub fn cfa(&self) -> CfaKind {
         self.cfa
+    }
+
+    /// Display orientation stored in the file.
+    ///
+    /// Sensor samples are not rotated. Export applies this to the pixels.
+    pub fn orientation(&self) -> Orientation {
+        self.orientation
     }
 
     /// Black levels in the order `rawler` reports them.
@@ -179,6 +297,7 @@ impl RawImage {
             cfa: Self::cfa_kind(&decoded).ok_or_else(|| DecodeError::UnsupportedLayout {
                 path: path.to_owned(),
             })?,
+            orientation: orientation_from(decoded.orientation),
             black_levels,
             white_levels,
             as_shot_wb: decoded.wb_coeffs,
@@ -244,6 +363,7 @@ impl fmt::Debug for RawImage {
             .field("width", &self.width)
             .field("height", &self.height)
             .field("cfa", &self.cfa)
+            .field("orientation", &self.orientation)
             .field("black_levels", &self.black_levels)
             .field("white_levels", &self.white_levels)
             .field("as_shot_wb", &self.as_shot_wb)
@@ -257,6 +377,7 @@ impl fmt::Display for RawImage {
         let (width, height) = self.dimensions();
         writeln!(f, "dimensions: {width}x{height}")?;
         writeln!(f, "cfa: {}", self.cfa())?;
+        writeln!(f, "orientation: {}", self.orientation())?;
         writeln!(f, "black: {}", Self::format_levels(self.black_levels()))?;
         writeln!(f, "white: {}", Self::format_levels(self.white_levels()))?;
         let [red, green, blue, extra] = self.as_shot_wb();
@@ -271,5 +392,70 @@ impl fmt::Display for RawImage {
             }
         }
         Ok(())
+    }
+}
+
+fn orientation_from(orientation: rawler::Orientation) -> Orientation {
+    match orientation {
+        rawler::Orientation::Normal => Orientation::Normal,
+        rawler::Orientation::HorizontalFlip => Orientation::HorizontalFlip,
+        rawler::Orientation::Rotate180 => Orientation::Rotate180,
+        rawler::Orientation::VerticalFlip => Orientation::VerticalFlip,
+        rawler::Orientation::Transpose => Orientation::Transpose,
+        rawler::Orientation::Rotate90 => Orientation::Rotate90,
+        rawler::Orientation::Transverse => Orientation::Transverse,
+        rawler::Orientation::Rotate270 => Orientation::Rotate270,
+        rawler::Orientation::Unknown => Orientation::Unknown,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 2×2 image, red channel holding the pixel id:
+    ///
+    /// ```text
+    /// 10 20
+    /// 30 40
+    /// ```
+    fn square() -> Vec<u8> {
+        let mut pixels = Vec::new();
+        for id in [10u8, 20, 30, 40] {
+            pixels.extend([id, 0, 0]);
+        }
+        pixels
+    }
+
+    fn reds(pixels: &[u8]) -> Vec<u8> {
+        pixels.iter().step_by(3).copied().collect()
+    }
+
+    #[test]
+    fn orientation_matches_exif_display_transforms() {
+        let cases = [
+            (Orientation::Normal, 2, 2, vec![10, 20, 30, 40]),
+            (Orientation::HorizontalFlip, 2, 2, vec![20, 10, 40, 30]),
+            (Orientation::Rotate180, 2, 2, vec![40, 30, 20, 10]),
+            (Orientation::VerticalFlip, 2, 2, vec![30, 40, 10, 20]),
+            (Orientation::Transpose, 2, 2, vec![10, 30, 20, 40]),
+            (Orientation::Rotate90, 2, 2, vec![30, 10, 40, 20]),
+            (Orientation::Rotate270, 2, 2, vec![20, 40, 10, 30]),
+            (Orientation::Transverse, 2, 2, vec![40, 20, 30, 10]),
+            (Orientation::Unknown, 2, 2, vec![10, 20, 30, 40]),
+        ];
+        for (orientation, width, height, expected) in cases {
+            let (got_w, got_h, pixels) = orientation.apply_rgb(2, 2, &square());
+            assert_eq!((got_w, got_h), (width, height), "{orientation}");
+            assert_eq!(reds(&pixels), expected, "{orientation}");
+        }
+    }
+
+    #[test]
+    fn rotate90_swaps_a_wide_frame() {
+        let pixels = [1u8, 0, 0, 0, 1, 0];
+        let (width, height, out) = Orientation::Rotate90.apply_rgb(2, 1, &pixels);
+        assert_eq!((width, height), (1, 2));
+        assert_eq!(out, [1, 0, 0, 0, 1, 0]);
     }
 }

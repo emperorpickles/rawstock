@@ -7,8 +7,11 @@ license.workspace = true
 
 [dependencies]
 exr = "1.73"
+image = { version = "0.25", default-features = false, features = ["jpeg", "tiff"] }
 rawler = "0.8"
+serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2"
+toml = "1.1.8"
 
 # `uuid` (via rawler) has no randomness source on wasm32-unknown-unknown
 # unless `js` is enabled. That feature is its WebCrypto backend.
