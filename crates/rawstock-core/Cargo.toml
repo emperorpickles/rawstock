@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+exr = "1.73"
 rawler = "0.8"
 thiserror = "2"
 
