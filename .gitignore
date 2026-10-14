@@ -1,0 +1,28 @@
+# Rust
+target/
+
+# Node
+node_modules/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# RAW files and sample images — never commit these
+*.RAF
+*.DNG
+*.CR3
+*.NEF
+*.ARW
+*.raf
+*.dng
+*.cr3
+*.nef
+*.arw
+test-images/

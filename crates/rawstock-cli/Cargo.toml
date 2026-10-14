@@ -1,0 +1,13 @@
+[package]
+name = "rawstock-cli"
+description = "Command-line front end for Rawstock"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "rawstock"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+rawstock-core = { path = "../rawstock-core" }

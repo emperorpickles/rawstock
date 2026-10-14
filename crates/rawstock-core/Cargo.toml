@@ -1,0 +1,7 @@
+[package]
+name = "rawstock-core"
+description = "Shared core for Rawstock: RAW decode, color pipeline, stocks, rendering"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

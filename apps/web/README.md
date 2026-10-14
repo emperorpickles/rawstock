@@ -1,0 +1,7 @@
+# apps/web
+
+Future web app: `rawstock-core` compiled to WebAssembly, rendering with
+WebGPU. Phase 5 in [PLAN](../../docs/PLAN.md).
+
+Images are processed entirely client-side and never uploaded to a server.
+The Svelte UI is shared with `apps/desktop`. No code yet.
