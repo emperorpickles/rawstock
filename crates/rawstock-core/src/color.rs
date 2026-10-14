@@ -12,6 +12,7 @@ use std::path::Path;
 use rawler::imgop::develop::{Intermediate, ProcessingStep, RawDevelop};
 use rawler::imgop::sensor::Demosaic;
 use rawler::imgop::sensor::xtrans::markesteijn::XTransMarkesteijnDemosaic;
+use rawler::imgop::{Point, Rect};
 use rawler::rawimage::RawPhotometricInterpretation;
 use thiserror::Error;
 
@@ -245,15 +246,34 @@ impl RawImage {
         let RawPhotometricInterpretation::Cfa(config) = &self.decoded().photometric else {
             return Err(DevelopError::UnexpectedChannels { channels: 0 });
         };
-        let roi = mosaic.rect();
-        Ok(Intermediate::ThreeColor(
-            XTransMarkesteijnDemosaic::new_pass_3().demosaic(
-                &mosaic,
-                &config.cfa,
-                &config.colors,
-                roi,
-            ),
-        ))
+        // Demosaic the active area only: the sensor strip outside it is
+        // optical black and would bleed into the edge pixels.
+        let decoded = self.decoded();
+        let full = mosaic.rect();
+        let active = decoded.active_area.unwrap_or(full);
+        let rgb = XTransMarkesteijnDemosaic::new_pass_3().demosaic(
+            &mosaic,
+            &config.cfa,
+            &config.colors,
+            active,
+        );
+        // Then the camera's default crop, which sits in full-sensor
+        // coordinates, so the result matches the camera's own JPEG framing.
+        let Some(crop) = decoded.crop_area else {
+            return Ok(Intermediate::ThreeColor(rgb));
+        };
+        let inside = crop.p.x >= active.p.x
+            && crop.p.y >= active.p.y
+            && crop.p.x + crop.d.w <= active.p.x + active.d.w
+            && crop.p.y + crop.d.h <= active.p.y + active.d.h;
+        if !inside {
+            return Ok(Intermediate::ThreeColor(rgb));
+        }
+        let local = Rect::new(
+            Point::new(crop.p.x - active.p.x, crop.p.y - active.p.y),
+            crop.d,
+        );
+        Ok(Intermediate::ThreeColor(rgb.crop(local)))
     }
 }
 
