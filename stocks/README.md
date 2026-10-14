@@ -150,8 +150,9 @@ readings, a paper curve, or a published granularity table. Comments in the
 TOML mark each of those values the same way. The dye wavelengths still come
 from the importer's split of midscale-minus-D-min. Grain uses a
 Vision3-style RMS-versus-density shape (rises, then falls; blue grainiest)
-at a level chosen so the 48 µm cell is visible at 100%. Halation is a faint
-red fringe, because this film has an anti-halation layer.
+and per-layer `size_mm` dye-cloud sizes, chosen by eye for a fine ISO 400
+color negative. Halation is a faint red fringe, because this film has an
+anti-halation layer.
 
 Portra is a Kodak trademark. This file is an attributed transcription of
 published curves, not an invented look. Invented looks still need original
