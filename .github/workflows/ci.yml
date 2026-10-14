@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: fmt, clippy, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: cargo test
+        env:
+          RAWSTOCK_REQUIRE_FIXTURES: "1"
+        run: cargo test --workspace
+
+  wasm:
+    name: wasm32-unknown-unknown
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Check rawstock-core for wasm32-unknown-unknown
+        run: |
+          if ! cargo check -p rawstock-core --target wasm32-unknown-unknown; then
+            echo "::error::rawstock-core does not build for wasm32-unknown-unknown. The compiler error above is from rawler or one of its dependencies. No cfg, feature, or stub was added to work around it."
+            exit 1
+          fi
