@@ -3,22 +3,33 @@
 This is the path from a RAW file to a developed JPEG or TIFF. It is the
 pipeline in [Architecture](ARCHITECTURE.md), filled in from the code.
 
-`main` decodes Fuji X-Trans RAF and iPhone ProRAW metadata and then stops.
-`rawstock develop` still exits with "not implemented yet". Everything after
-metadata lives on a stack of open pull requests. Each section below names
-the pull request that adds that stage. Later pull requests contain the
-earlier ones, so the spectral branch is the whole CPU path:
+`main` ends at the merge of
+[#3](https://github.com/emperorpickles/rawstock/pull/3). That is rawler
+decode, demosaic, as-shot white balance, the camera → ACEScg conversion,
+and `dump-linear`. `rawstock develop` on `main` still exits with "not
+implemented yet".
 
-| Pull request | Branch | What it adds |
-| --- | --- | --- |
-| [#3](https://github.com/emperorpickles/rawstock/pull/3) | `cursor/scene-linear-acescg-5a2e` | Demosaic, as-shot white balance, camera → ACEScg, OpenEXR dump |
-| [#4](https://github.com/emperorpickles/rawstock/pull/4) | `cursor/parametric-film-pipeline-c5fe` | `FilmModel::Parametric`, print/scan, sRGB output, JPEG/TIFF export |
-| [#5](https://github.com/emperorpickles/rawstock/pull/5) | `cursor/load-parametric-stocks-1849` | Schema 1 TOML loader, `stocks/neutral.stock.toml` |
-| [#6](https://github.com/emperorpickles/rawstock/pull/6) | `cursor/film-grain-halation-1141` | Optional halation and density grain |
-| [#7](https://github.com/emperorpickles/rawstock/pull/7) | `cursor/spectral-portra-5a13` | `FilmModel::Spectral`, eye-tuned Portra 400 |
+[#4](https://github.com/emperorpickles/rawstock/pull/4) (the parametric
+pipeline and export) merged into the scene-linear stack branch, and
+[#5](https://github.com/emperorpickles/rawstock/pull/5) (schema 1 TOML)
+merged into the parametric stack branch. Neither merge is on `main`.
+[#6](https://github.com/emperorpickles/rawstock/pull/6)
+(`cursor/film-grain-halation-1141`, open against `main`) carries that
+work, plus halation and the dye-cloud grain at `a883587`.
+[#7](https://github.com/emperorpickles/rawstock/pull/7) stacks the spectral
+model on the previous #6 and does not contain `a883587`.
 
-The CPU entry point, once those land, is `Pipeline::develop` in
-`crates/rawstock-core/src/render.rs`. The CLI is:
+| Where the code is | What it adds |
+| --- | --- |
+| `main` (#2 and #3) | Decode, demosaic, as-shot white balance, camera → ACEScg, OpenEXR dump |
+| #6, from #4 | `FilmModel::Parametric`, print/scan, sRGB output, JPEG/TIFF export |
+| #6, from #5 | Schema 1 TOML loader, `stocks/neutral.stock.toml` |
+| #6 at `a883587` | Optional halation, and dye-cloud grain |
+| #7 | `FilmModel::Spectral`, eye-tuned Portra 400. Its grain is the older per-cell hash |
+
+The CPU entry point on #6 is `Pipeline::develop` in
+`crates/rawstock-core/src/render.rs`. On `main` the working commands are
+`inspect` and `dump-linear`. `develop` below is the #6 CLI:
 
 ```text
 rawstock develop IMG.RAF --stock stocks/neutral.stock.toml -o out.jpg
@@ -46,7 +57,7 @@ flowchart TD
   upsample --> sense["integrate layer sensitivities"]
   layers --> curves["coupling, then D-logH curves"]
   sense --> curves
-  curves --> grain["6. density grain"]
+  curves --> grain["6. dye-cloud grain"]
   grain --> dyes{"dye spectra?"}
   dyes -->|yes| printing["transmittance to printing density"]
   dyes -->|no| print["7. print curve, then 10 to the minus density"]
@@ -56,13 +67,14 @@ flowchart TD
   model -.-> cube["optional .cube bake<br/>ACEScct shaper, not in the tree"]
 ```
 
-Solid arrows are `Pipeline::develop` on the spectral branch. The OpenEXR
-dump leaves before exposure. The `.cube` bake is only a plan; nothing
-writes one.
+Solid arrows through print are `Pipeline::develop` on #6. The spectral
+upsample and the dye-density print are #7, which has not rebased onto
+`a883587`. The OpenEXR dump leaves before exposure. The `.cube` bake is
+only a plan; nothing writes one.
 
 ## 1. rawler decode
 
-**On `main` (pull request #2), plus demosaic on #3.**
+**On `main`. Metadata is pull request #2. Demosaic is #3, which `main` includes.**
 
 `rawler` is the decoder because it is pure Rust and the same crate can
 compile for the CLI and for wasm. LibRaw is a contingency outside core, if
@@ -84,11 +96,8 @@ DNG color matrix among illuminants D65, D50, D55, and A. A file that is
 not X-Trans, Bayer, or linear DNG is rejected, as is a file with no levels
 or no usable matrix.
 
-On `main` the sample buffer is checked against width × height × components
-and then dropped. `rawstock inspect` prints the metadata. Color work has
-nothing to read yet.
-
-**#3** keeps that decoded image. `RawImage::develop_linear` in
+`rawstock inspect` prints the metadata. #3 keeps the decoded image, so
+`RawImage::develop_linear` in
 `crates/rawstock-core/src/color.rs` runs rawler's `RawDevelop` with only
 two steps:
 
@@ -103,7 +112,7 @@ output is interleaved f32 RGB in camera space, still at sensor orientation.
 
 ## 2. As-shot white balance and exposure
 
-**White balance is on #3. The exposure knob is on #4.** The architecture
+**White balance is on `main` (#3). The exposure knob is on #6, from #4.** The architecture
 lists them as one step. The code splits them, because they live in
 different spaces.
 
@@ -113,8 +122,8 @@ camera scaled red, green, and blue so a neutral surface in the scene
 would land on equal camera RGB. They are divided by the green coefficient
 so green stays 1. Rescale has already mapped a saturated photosite to
 about 1, and a green coefficient of 1 leaves that green sample there. The
-fourth (RGBE) coefficient is ignored, because
-demosaic returns three channels. A missing, non-positive, or non-finite
+fourth (RGBE) coefficient is ignored, because demosaic returns three
+channels. A missing, non-positive, or non-finite
 coefficient is an error. The three scales are baked into the camera →
 ACEScg matrix as a column scale, so each pixel is white-balanced and
 converted in one multiply.
@@ -132,7 +141,7 @@ correction is part of development, not part of the dump.
 
 ## 3. Camera to ACEScg
 
-**On #3.** `crates/rawstock-core/src/matrices.rs` and
+**On `main` (#3).** `crates/rawstock-core/src/matrices.rs` and
 `acescg_transform` in `color.rs`.
 
 **ACEScg** is the working space for every creative stage. It is
@@ -162,7 +171,7 @@ and the primaries.
 
 `LinearImage::write_exr` writes this buffer as 32-bit float OpenEXR, channels
 `R`, `G`, `B`, with no display transform. `rawstock dump-linear` refuses
-any output that is not `.exr`. `lab/read_linear.py` (added on #3) reads it
+any output that is not `.exr`. `lab/read_linear.py` (on `main`, from #3) reads it
 back as a float32 NumPy array of shape `(height, width, 3)`. The lab does
 not decode; it consumes this dump so a look and the Rust model see the
 same pixels.
@@ -205,7 +214,7 @@ faint red fringe: threshold 0.25 (middle gray after its exposure is about
 
 ## 5. The film model
 
-**`FilmModel::Parametric` is on #4. `FilmModel::Spectral` is on #7.** Both
+**`FilmModel::Parametric` is on #6, from #4. `FilmModel::Spectral` is on #7.** Both
 live in `crates/rawstock-core/src/stock.rs`. The enum is preferred over a
 trait object: the two variants are known, and a `match` keeps the shared
 tail obvious. `Spectral` is boxed so the wavelength tables do not inflate
@@ -297,47 +306,92 @@ the same `log10` → coupling → `Curve::eval` path as the parametric model.
 
 ## 6. Density-space grain
 
-**On #6.** `Grain` and `Granularity` in `stock.rs`. Omit `[grain]` and the
-stage is skipped.
+**On #6 at `a883587`.** `Grain` and `Granularity` in `stock.rs`. Omit
+`[grain]` and the stage is skipped. #7 still has the previous model, one
+hashed value per 48 µm cell. That read as digital noise. This section is
+the replacement.
 
-Grain is the random density variation from the halide crystals. It is
-applied to density, after the film model and before print. Adding noise in
-ACEScg or in sRGB would scale with the display encoding instead of with
-how dense the negative is.
+Grain is the density variation from dye clouds in the emulsion. It runs
+after the film model and before print, in density. Adding the same noise
+in ACEScg or in sRGB would follow the display encoding instead of how
+dense the negative is.
 
-Kodak quotes **RMS granularity**: 1000 times the standard deviation of
-density measured through a 48 µm aperture. `Granularity` is a table of
-`(density, rms)` in that datasheet number. Density must strictly increase.
-RMS may rise and then fall, which is the shape of a Vision3 sheet. Outside
-the knots, evaluation clamps to the end RMS. `Grain` divides by 1000 when
-it builds the noise.
+The pattern is a **Boolean model**: a Poisson field of independent compact
+grains, summed where they overlap. That is the construction in Newson,
+Delon, and Galerne, "A Stochastic Film Grain Model for
+Resolution-Independent Rendering", Computer Graphics Forum 36(8), 2017
+(doi:10.1111/cgf.13159). They place Poisson centers and i.i.d. compact
+grains in millimetres, so the look does not depend on the pixel grid.
+agx-emulsion (now spektrafilm) is prior art for doing that on a negative.
+`Grain::apply` is an original shot-noise sum. It is not either of those
+implementations.
 
-The image width is taken to span `frame_mm` millimetres (default 35, the
-film gauge). The grain cell in pixels is:
+Each grain is a soft elliptical cloud. Inside the ellipse the kernel is
+`amplitude * (1 - d²)`, where `d` is the distance from the center in units
+of the ellipse; outside, it is zero. The aspect ratio is log-uniform from
+1 up to a per-process maximum (about 2.1 to 2.8), and the orientation is a
+uniform angle, so the blob is an ellipse rather than a disc. The radius is
+log-uniform between two scales of that layer's `size_mm`. The strength of
+one cloud is uniform on `[0.45, 1]`.
 
-```text
-cell_px = width * 0.048 / frame_mm
-```
+The field is **multi-scale**. `DYE_CLOUDS` is six Poisson processes. Three
+of them are shared by all three dye layers, at cell sizes 0.012 mm (fine),
+0.020 mm (mid), and 0.046 mm (coarse). Their variances are 0.22, 0.40, and
+0.18. Each layer also has a private process at 0.016 mm with variance
+0.20. Variances on one layer sum to 1.
 
-Pixels in one cell share a hash, so the grain has a physical size. A wider
-export gets a larger cell in pixels and the same cell on the frame. While
-the cell covers at least one pixel, the density standard deviation is
-`rms / 1000`, independent of resolution. Below one pixel per aperture, each
-pixel averages several apertures and the standard deviation scales with
+The layers are **partially correlated**. A shared process uses one set of
+centers for red, green, and blue, and only the radius changes per layer,
+so a clump shows up in every channel. A private process stamps one layer.
+Most of the variance (0.80) is shared centers; the rest (0.20) is that
+layer alone.
+
+Positions are in millimetres on the frame. The image width spans
+`frame_mm` (default 35, the film gauge). Pixel pitch is `frame_mm / width`
+millimetres. Each process tiles the film plane into cells of its own
+`cell_mm`. A cell draws a Poisson count with mean `mu` (Knuth's generator:
+a product of uniform draws until it falls below `e^{-mu}`, capped at 64)
+and places that many centers uniformly inside the cell. Cells extend past
+the frame by the largest cloud, so a center just outside still stamps
+pixels inside. A wider export grows the same clouds in pixels. It does not
+reveal a finer noise.
+
+The **48 µm aperture** sets the RMS amplitude and nothing else. Kodak
+quotes RMS granularity as 1000 times the standard deviation of density
+read through a 48 µm window. `Granularity` stores that datasheet number as
+`(density, rms)`. Density must strictly increase. RMS may rise and then
+fall, the shape of a Vision3 sheet. Outside the knots, evaluation clamps
+to the end RMS. `cell_px = width * 0.048 / frame_mm` is how many pixels
+that window covers. It is not a tile, and pixels in it do not share one
+hash. While the window covers at least one pixel, the density standard
+deviation is `rms / 1000`. Below one pixel per aperture, each pixel
+averages several windows and the standard deviation scales with
 `sqrt(cell_px)`.
 
-The hash is `Grain::hash(cell_x, cell_y, layer, seed)`. It is the PCG hash
-from Jarzynski and Hill, "Hash Functions for GPU Rendering", JCGT 2020.
-Only wrapping `u32` arithmetic is used. There is no `rand` and no
-floating-point inside the hash, so a later WGSL port can match it bit for
-bit. The top 24 bits become a uniform `[0, 1)` sample, then
-`(u - 0.5) * sqrt(12)` makes it zero-mean with variance 1. That unit noise
-is multiplied by `rms * scale`. Mean density is unchanged in expectation.
-The same density, seed, and dimensions produce the same picture.
+`Grain::apply` splats every process into a density field, then subtracts
+the analytical mean and divides by the analytical standard deviation of
+that layer. The result is zero-mean with unit variance, then multiplied by
+`rms * scale`. Mean density is unchanged in expectation. The amplitude of
+each process is chosen so its variance matches the number in `DYE_CLOUDS`
+before that normalisation.
+
+`size_mm` is the characteristic cloud size of a layer, in millimetres.
+The default is `[0.028, 0.019, 0.013]`: cyan dye (the red record) is the
+coarsest, yellow dye (the blue record) the finest. A stock can set
+`size_mm` on `[grain.red]`, `[grain.green]`, or `[grain.blue]`. An omitted
+layer keeps its default. A non-positive size is a load error.
+
+The draws come from `Grain::hash`, the PCG hash of Jarzynski and Hill,
+"Hash Functions for GPU Rendering", JCGT 2020. The inputs are the integer
+cell coordinate (negative cells pass their wrapping `u32` bits), a stream
+index, and `seed` plus a per-process salt. Only wrapping `u32` arithmetic
+is used. There is no `rand` and no floating-point inside the hash, so a
+later WGSL port can match the draws bit for bit. The same seed, frame
+width, and pixel dimensions produce the same picture.
 
 ## 7. Print/scan
 
-**The per-channel print is on #4. The dye-spectrum print is on #7.**
+**The per-channel print is on #6, from #4. The dye-spectrum print is on #7.**
 
 A negative is dark where the scene was bright. Printing shines light
 through it onto paper. This stage is that inversion, done in math, back
@@ -386,7 +440,7 @@ also a load error, because the white normalisation would divide by zero.
 
 ## 8. Gamut compression and output transform
 
-**The output transform is on #4. Gamut compression, beyond a clip, is not.**
+**The output transform is on #6, from #4. Gamut compression, beyond a clip, is not.**
 
 `encode_srgb` in `color.rs` is the whole output transform:
 
@@ -405,7 +459,7 @@ the code. There is one output encoding, sRGB.
 
 ## 9. Export, and the optional .cube bake
 
-**JPEG and TIFF export are on #4. The `.cube` bake is not in the tree.**
+**JPEG and TIFF export are on #6, from #4. The `.cube` bake is not in the tree.**
 
 `SrgbImage::write` (`render.rs`):
 
@@ -458,7 +512,7 @@ the film model.
 
 ## Stock TOML schema
 
-**Parametric schema 1 is on #5. Grain and halation keys are on #6.
+**Parametric schema 1 is on #6, from #5. Grain and halation keys are on #6.
 Spectral keys are on #7.** The format sketch on `main`
 (`stocks/example.stock.toml`, with `format_version` and a separate
 `curves.json`) is not what the loader reads.
@@ -488,8 +542,11 @@ Optional tables, all schema 1. Leaving one out is the same file an older
 parametric stock already uses, so the version stays 1:
 
 - `[coupling]` with a row-major `matrix`. Absent means independent layers.
-- `[grain]` with `frame_mm` (default 35), `seed` (default 0), and per-layer
-  `density` / `rms`. Density must strictly increase; rms may rise and fall.
+- `[grain]` with `frame_mm` (default 35), `seed` (default 0), per-layer
+  `density` / `rms`, and optional per-layer `size_mm`. Omitted sizes use
+  0.028, 0.019, and 0.013 mm (red, green, blue). Density must strictly
+  increase; rms may rise and fall. `size_mm` is the dye-cloud size. The
+  48 µm aperture is not a file field.
 - `[halation]` with `threshold`, `radius`, and `weight` of length 3.
 
 `model = "spectral"` adds:
@@ -511,14 +568,14 @@ grain, or spectrum checks.
 `Stock` holds the metadata plus one `Parameters`. There is no second
 parameter type. `into_parameters` is what the CLI passes to `Pipeline`.
 
-`stocks/neutral.stock.toml` (on #5) is a synthetic reference: the same
+`stocks/neutral.stock.toml` (on #6, from #5) is a synthetic reference: the same
 D-logH curve on each layer, no coupling, no grain, no halation, license
 CC0-1.0. The numbers were written for rawstock. They are not a measurement
 of a manufactured film. A gray stays gray.
 
 ### Adding a stock
 
-1. Copy `stocks/neutral.stock.toml` once #5 is merged, or write a file
+1. Copy `stocks/neutral.stock.toml` from the #6 branch, or write a file
    with `schema_version = 1`.
 2. Set `name`, `source`, `license`, and `revision`. An invented look needs
    an original name. A file that transcribes one published film may use
@@ -568,16 +625,18 @@ characteristic density as-is".
 ## Determinism and wasm
 
 The pixel path is a function of the file, the stock, and the image
-dimensions. Grain is the piece that looks random and is not. `Grain::hash`
-depends on the cell coordinate, the layer index, and the stock's `seed`.
-Run it twice on the same buffer and the pixels match. Preview and export
-share that grain when they share a frame width, because `cell_px` is
-derived from the width and `frame_mm`, not from a random offset. Halation's
-radius is a fraction of the shorter side for the same reason.
+dimensions. Grain looks random and is not. `Grain::hash` draws the Poisson
+count, the center, and the shape of each cloud from the cell coordinate, a
+stream index, and the stock seed mixed with a per-process salt. Run it
+twice on the same buffer and the pixels match. Preview and export share
+that grain when they share a frame width, because the clouds are placed in
+millimetres on `frame_mm`. The 48 µm aperture only scales the amplitude.
+Halation's radius is a fraction of the shorter side, so its glow scales
+the same way.
 
-Nothing in the hash reads the clock, a thread id, or `rand`. The unit-noise
-float is derived from the hash bits. The coefficient table and the CIE
-tables sit behind `OnceLock` and are constant after the first use.
+Nothing in the hash reads the clock, a thread id, or `rand`. The
+coefficient table and the CIE tables sit behind `OnceLock` and are
+constant after the first use.
 
 Wasm constraints that already show up in the code and in CI:
 
@@ -595,8 +654,9 @@ Wasm constraints that already show up in the code and in CI:
   upload images; processing stays client-side.
 - The spectral table is `include_bytes!` of a 9.4 MB file. A wasm build of
   the spectral model carries that table in the module.
-- `image` (jpeg and tiff only) and `exr` join the core crate on #3 and #4.
-  They are pure Rust. The wasm check is what guards them.
+- `exr` is on `main` (#3). `image` (jpeg and tiff only) joins the core
+  crate on #6, from #4. Both are pure Rust. The wasm check is what guards
+  them.
 - The grain hash was written so a WGSL port can match it with integer
   ops. That port is not started.
 
@@ -634,8 +694,10 @@ curve, or a published RMS table:
   `print_exposure` 1.28 so middle gray sits on the open part of that curve.
 - Mild coupling, each row summing to 1.
 - A Vision3-style RMS-versus-density grain shape (rises, then falls; blue
-  grainiest) at a level chosen so the 48 µm cell is visible at 100% in an
-  8-bit JPEG. The magnitudes are higher than a real datasheet RMS.
+  grainiest) at a level chosen so grain is visible at 100% in an 8-bit
+  JPEG. The magnitudes are higher than a real datasheet RMS. The #7 file
+  still describes that as a 48 µm cell. That is the per-cell grain on #7,
+  not the dye-cloud model on #6 at `a883587`.
 - A faint red halation fringe. Portra has an anti-halation layer, so the
   effect is a fringe, not a glow.
 
@@ -673,12 +735,13 @@ fields.
   that is good enough, and when a desktop LibRaw fallback would exist
   outside core, is unchanged from the plan.
 - **Export.** 8-bit JPEG and 16-bit TIFF with an sRGB ICC profile are
-  implemented on #4. The open-question list on `main` still calls 16-bit
+  implemented on #6, from #4. The open-question list on `main` still calls 16-bit
   TIFF and embedded ICC undecided. PNG, HEIF/AVIF, and a choice of output
   color space are still open.
-- **GPU.** No wgpu pipeline. The grain hash is the piece that has to match
-  bit for bit. Halation's box blur has to match within the documented
-  parity tolerance, which is not written down as a number yet.
+- **GPU.** No wgpu pipeline. The grain hash is integer and has to match
+  bit for bit. The cloud splat is floating-point and has to match the CPU
+  sum. Halation's box blur has to match within the documented parity
+  tolerance, which is not written down as a number yet.
 - **Lab.** `read_linear.py` reads a dump. It does not run the film model,
   and there is no numeric comparison against Rust yet.
 - **Licenses.** GPL-3.0-or-later for the program, with the rawler
