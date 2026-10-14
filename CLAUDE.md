@@ -9,13 +9,17 @@ scaffolding (see docs/PLAN.md for phases).
   client-side; never upload images.
 - GPU via wgpu (same shaders on Metal/DX12/Vulkan/WebGPU); keep a CPU
   reference path for testing and parity checks.
-- RAW decode: `rawler` first; LibRaw is desktop fallback for Fuji X-Trans/RAF.
-- Color: linear wide-gamut working space; convert to output space last.
-- Stocks are data (base .cube LUT + tone/grain/halation params), not code.
-  Names must be original: no trademarked names (Velvia, Portra, Classic
-  Chrome, etc.).
+- RAW decode: `rawler` only in core (pure Rust, wasm-friendly). LibRaw is a
+  contingency outside core, never a core dependency. First cameras: Fuji
+  X-Trans RAF and iPhone ProRAW DNG.
+- Color: linear ACEScg; gamut compression and the output transform last.
+- Stocks are parametric or spectral film models (`FilmModel` enum: scene
+  exposure → layer densities), not LUTs. A 3D LUT is only an optional bake
+  for `.cube` export or preview caching. First stock: Kodak Portra 400 from
+  the E-4050 datasheet.
 - UI: TypeScript + Svelte, shared by desktop and web.
-- Look development happens in the Python sandbox (`lab/`) before porting to Rust.
+- The Python lab (`lab/`) reads linear dumps from core and compares model
+  math only, within a numeric tolerance. It does not decode.
 - Vocabulary: looks are "stocks"; processing a file is "developing".
 - Keep dependencies minimal (currently clap only).
 - License: GPL-3.0-or-later (goal: no reuse in closed-source projects). New

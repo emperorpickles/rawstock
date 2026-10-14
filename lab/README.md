@@ -1,7 +1,12 @@
 # lab
 
-Python look-development sandbox. Stocks are prototyped here (rawpy, numpy,
-colour-science) before being ported to Rust. Nothing here ships.
+Python sandbox for film-model math (numpy, colour-science). A prototype is
+ported to Rust once it matches. Nothing here ships.
+
+The lab reads linear dumps from core: scene-referred ACEScg after `rawler`
+decode, as-shot white balance, and exposure. It does not decode with rawpy.
+Lab and Rust compare the model math on those dumps, within a numeric
+tolerance, so a decoder difference cannot show up as a model difference.
 
 ## Setup
 

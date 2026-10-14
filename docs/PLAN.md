@@ -1,53 +1,71 @@
 # Plan
 
-## Phase 0: Scaffolding
-**Goal:** repo, workspace, docs, placeholders.
-**Done when:** `cargo build` and `cargo test` pass; `rawstock develop` prints
-"not implemented yet"; docs and READMEs exist; single initial commit.
+Scaffolding is done: the workspace builds and tests, and `rawstock develop`
+is a stub. Phases from here:
 
-## Phase 1: Look lab
-**Goal:** decode Fuji RAFs in Python, build a linear pipeline, prototype 2–3
-stocks, compare against camera JPEGs.
-**Done when:** `lab/` decodes sample RAFs; a linear pipeline produces a neutral
-developed image; 2–3 original stocks exist as LUT + parameters; side-by-side
-comparisons with the in-camera JPEGs are reviewed; the pipeline is documented
-well enough to port.
+## Phase 1: Decode
+**Goal:** `rawler` decode for the first cameras, plus linear dumps for the lab.
+**Done when:** Fuji X-Trans RAF and iPhone ProRAW DNG decode in core to
+scene-referred linear RGB and metadata; LibRaw is not a core dependency.
 
-## Phase 2: Core + CLI
-**Goal:** real decode, color pipeline, stock loading, CPU reference render,
-JPEG/TIFF export.
-**Done when:** `rawstock develop IMG.RAF --stock <name> -o out.jpg` works on
-RAFs; stock files load and validate; CPU output closely matches the Phase 1
-prototypes; tests cover decode, color, and stock parsing.
+## Phase 2: Shared pipeline (Parametric)
+**Goal:** the CPU pipeline in [Architecture](ARCHITECTURE.md), driven by
+`FilmModel::Parametric`.
+**Done when:** `rawstock develop IMG.RAF --stock <name> -o out.jpg` runs that
+pipeline through export on the Phase 1 cameras; a versioned parametric stock
+loads and validates; tests cover decode, the parametric model, and stock
+parsing.
 
-## Phase 3: GPU renderer (wgpu)
-**Goal:** wgpu renderer running the same pipeline as the CPU path.
-**Done when:** CPU/GPU parity tests pass within a documented tolerance on
-Metal/DX12/Vulkan backends available in CI or locally; GPU path is used by
-the CLI optionally.
+## Phase 3: Portra 400 (Spectral)
+**Goal:** Kodak Portra 400 as `FilmModel::Spectral`, from Kodak publication
+E-4050.
+**Done when:** spectral sensitivity, characteristic curves, and dye density
+come from E-4050; grain, interlayer coupling, and print/scan are calibrated
+from chart or step-wedge scans; on the same linear dumps, lab and Rust model
+math agree within a numeric tolerance.
 
-## Phase 4: Desktop app (Tauri + Svelte)
+## Phase 4: GPU (wgpu)
+**Goal:** the same pipeline on GPU, grain hash included.
+**Done when:** CPU/GPU parity holds within a documented tolerance on the
+Metal, DX12, and Vulkan backends available in CI or locally; preview and
+export match the CPU grain; the CLI can select the GPU path.
+
+## Phase 5: Desktop (Tauri + Svelte)
 **Goal:** open a RAW, pick a stock, preview, export.
-**Done when:** app builds and runs on macOS, Windows, and Linux; preview uses
-the GPU renderer; export matches CLI output.
+**Done when:** the app builds and runs on macOS, Windows, and Linux; preview
+uses the GPU renderer; export matches the CLI.
 
-## Phase 5: Web app (wasm + WebGPU)
+## Phase 6: Web (wasm + WebGPU)
 **Goal:** the same experience in the browser, fully client-side.
-**Done when:** core compiles to wasm; Svelte UI is shared with desktop; RAW
-decode and rendering work in WebGPU browsers; verified that no image data is
-sent to a server.
+**Done when:** core compiles to wasm; the Svelte UI is shared with desktop;
+decode and rendering work in WebGPU browsers; no image data is sent to a
+server.
+
+## Decisions
+- Stocks are parametric or spectral film models. A 3D LUT is only an optional
+  bake for `.cube` export or preview caching. Desktop hardware is the target,
+  so compute is not a constraint.
+- `FilmModel` maps scene exposure to layer densities. `Parametric` and
+  `Spectral` are enum variants. Prefer the enum over a trait object unless
+  there is a stated reason not to.
+- Decode stays on `rawler` (pure Rust, wasm-friendly). LibRaw is a
+  contingency only, never in core.
+- The lab reads linear dumps from core and compares model math only, within
+  a numeric tolerance.
+- First cameras: Fuji X-Trans RAF and iPhone ProRAW DNG. First stock: Kodak
+  Portra 400 from E-4050. Grain, interlayer coupling, and print/scan are
+  calibrated from scans.
+  [agx-emulsion](https://github.com/andreavolpato/agx-emulsion) (GPL-3.0; the
+  repository is now spektrafilm) is reference prior art, compatible because
+  rawstock is GPL-3.0-or-later.
+- Stock files are versioned data (TOML or JSON plus numeric arrays) with
+  `source` and `license` fields. See [stocks/](../stocks/README.md).
 
 ## Open questions
-- **License (decided: GPL-3.0-or-later):** confirm `-or-later` vs
-  `-only`; revisit AGPL-3.0 if hosted server-side use becomes a concern;
-  license for stock definitions (e.g. CC-BY-SA-4.0) is undecided. `rawler` is
-  LGPL-2.1-only, which can be linked from a GPL-3.0 program under LGPL §6, but
-  have this confirmed before the first release. Audit the full dependency
-  tree (e.g. with `cargo deny`) once `rawler` is added.
-- **rawler vs LibRaw:** does rawler handle Fuji X-Trans/RAF well enough
-  (demosaic quality, color matrices)? When to fall back to LibRaw on desktop?
-- **Stock file format:** TOML vs other; how to express tone curve, grain, and
-  halation; LUT input space; versioning; bundled vs user-installed stocks.
-- **Export formats:** JPEG and TIFF are planned; 16-bit TIFF, PNG, HEIF/AVIF,
-  and embedded ICC profiles TBD.
-- **Working space:** exact wide-gamut primaries and LUT input encoding.
+- **Export:** JPEG and TIFF first; 16-bit TIFF, PNG, HEIF/AVIF, and embedded
+  ICC profiles are undecided.
+- **Program license:** GPL-3.0-or-later stands. Revisit `-only` versus
+  `-or-later`, and AGPL-3.0, only if hosted server-side use becomes a
+  concern. `rawler` is LGPL-2.1-only; confirm the LGPL §6 link before the
+  first release, and audit the tree (for example with `cargo deny`) once
+  `rawler` is added.
