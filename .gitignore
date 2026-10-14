@@ -3,6 +3,8 @@ target/
 
 # Node
 node_modules/
+dist/
+apps/desktop/src-tauri/gen/
 
 # Python
 .venv/

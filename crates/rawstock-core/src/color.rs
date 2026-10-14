@@ -64,6 +64,10 @@ pub enum DevelopError {
         #[source]
         source: exr::error::Error,
     },
+
+    /// A fit proxy was asked for a long edge of zero.
+    #[error("proxy long edge must be positive")]
+    EmptyProxy,
 }
 
 /// Scene-linear ACEScg image, interleaved f32 RGB, row-major.
@@ -126,6 +130,45 @@ impl LinearImage {
         &self.pixels
     }
 
+    /// Width and height of a proxy whose longer side is `long_edge`.
+    ///
+    /// The shorter side is rounded to the nearest pixel and is at least 1.
+    /// An image already smaller than `long_edge` keeps its size. `long_edge`
+    /// of zero yields `(0, 0)`.
+    pub fn proxy_dimensions(width: u32, height: u32, long_edge: u32) -> (u32, u32) {
+        if width == 0 || height == 0 || long_edge == 0 {
+            return (0, 0);
+        }
+        let long = width.max(height);
+        if long <= long_edge {
+            return (width, height);
+        }
+        if width >= height {
+            let short = round_div(u64::from(height) * u64::from(long_edge), u64::from(width));
+            (long_edge, short)
+        } else {
+            let short = round_div(u64::from(width) * u64::from(long_edge), u64::from(height));
+            (short, long_edge)
+        }
+    }
+
+    /// Area-downsample so the longer side is `long_edge`.
+    ///
+    /// Each output pixel is the mean of the source rectangle that maps onto
+    /// it, weighted by coverage. This runs after demosaic, so X-Trans and
+    /// ProRAW share one proxy. An image already within `long_edge` is cloned.
+    pub fn area_downsample(&self, long_edge: u32) -> Result<Self, DevelopError> {
+        if long_edge == 0 {
+            return Err(DevelopError::EmptyProxy);
+        }
+        let (width, height) = Self::proxy_dimensions(self.width, self.height, long_edge);
+        if width == self.width && height == self.height {
+            return Ok(self.clone());
+        }
+        let pixels = area_box(&self.pixels, self.width, self.height, width, height);
+        Self::new(width, height, pixels)
+    }
+
     /// Write scene-linear ACEScg RGB as a 32-bit float OpenEXR file.
     ///
     /// Channels are `R`, `G`, and `B`. The encoding is linear: nothing in
@@ -147,11 +190,15 @@ impl RawImage {
     ///
     /// Black/white normalization and demosaic are `rawler`'s rescale and
     /// demosaic steps (Bayer via PPG, X-Trans via bilinear, linear DNG
-    /// unchanged). As-shot white balance is applied in camera RGB, normalized
-    /// so green stays at the sensor white level. The D65 camera matrix is
-    /// row-scaled so D65 maps to camera white, inverted, then a Bradford
-    /// adaptation takes D65 to the ACES white and AP1 takes that XYZ into
-    /// ACEScg.
+    /// unchanged). Rescale does not clip above the white level, so highlights
+    /// are cut to that level in camera RGB, white-balanced with green at 1,
+    /// then cut again at the smallest multiplier. That second cut is what
+    /// keeps a clipped neutral from turning magenta: the short channel would
+    /// otherwise be the only one still at the sensor white. The D65 camera
+    /// matrix is row-scaled so D65 maps to camera white, inverted, then a
+    /// Bradford adaptation takes D65 to the ACES white and AP1 takes that XYZ
+    /// into ACEScg. White balance is already in the samples, so the matrix
+    /// sees an identity balance.
     pub fn develop_linear(&self) -> Result<LinearImage, DevelopError> {
         let developed = RawDevelop::new_with(&[ProcessingStep::Rescale, ProcessingStep::Demosaic])
             .develop_intermediate(self.decoded())
@@ -167,10 +214,71 @@ impl RawImage {
             }
         };
 
-        let transform = acescg_transform(self.camera_matrix(), self.as_shot_wb())?;
+        let white_balance = normalized_white_balance(self.as_shot_wb())?;
+        recover_highlights(&mut samples, white_balance);
+        let transform = acescg_transform(self.camera_matrix(), [1.0, 1.0, 1.0, 0.0])?;
         apply_transform(&mut samples, transform);
         LinearImage::new(width, height, samples)
     }
+}
+
+fn round_div(numerator: u64, denominator: u64) -> u32 {
+    let value = (numerator + denominator / 2) / denominator;
+    u32::try_from(value.max(1)).unwrap_or(u32::MAX)
+}
+
+fn area_box(src: &[f32], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Vec<f32> {
+    let src_w = src_w as usize;
+    let src_h = src_h as usize;
+    let dst_w = dst_w as usize;
+    let dst_h = dst_h as usize;
+    let mut out = vec![0.0f32; dst_w * dst_h * 3];
+    let src_wf = src_w as f64;
+    let src_hf = src_h as f64;
+    let dst_wf = dst_w as f64;
+    let dst_hf = dst_h as f64;
+    for y in 0..dst_h {
+        let y0 = y as f64 * src_hf / dst_hf;
+        let y1 = (y + 1) as f64 * src_hf / dst_hf;
+        let y_start = y0.floor() as usize;
+        let y_end = (y1.ceil() as usize).min(src_h);
+        for x in 0..dst_w {
+            let x0 = x as f64 * src_wf / dst_wf;
+            let x1 = (x + 1) as f64 * src_wf / dst_wf;
+            let x_start = x0.floor() as usize;
+            let x_end = (x1.ceil() as usize).min(src_w);
+            let mut acc = [0.0f64; 3];
+            let mut weight = 0.0f64;
+            for sy in y_start..y_end {
+                let row_weight = coverage(sy as f64, sy as f64 + 1.0, y0, y1);
+                if row_weight == 0.0 {
+                    continue;
+                }
+                for sx in x_start..x_end {
+                    let covered = row_weight * coverage(sx as f64, sx as f64 + 1.0, x0, x1);
+                    if covered == 0.0 {
+                        continue;
+                    }
+                    let index = (sy * src_w + sx) * 3;
+                    acc[0] += f64::from(src[index]) * covered;
+                    acc[1] += f64::from(src[index + 1]) * covered;
+                    acc[2] += f64::from(src[index + 2]) * covered;
+                    weight += covered;
+                }
+            }
+            let index = (y * dst_w + x) * 3;
+            if weight > 0.0 {
+                out[index] = (acc[0] / weight) as f32;
+                out[index + 1] = (acc[1] / weight) as f32;
+                out[index + 2] = (acc[2] / weight) as f32;
+            }
+        }
+    }
+    out
+}
+
+fn coverage(start: f64, end: f64, window_start: f64, window_end: f64) -> f64 {
+    (end.min(window_end) - start.max(window_start)).max(0.0)
 }
 
 fn take_rgb(pixels: rawler::pixarray::RgbF32) -> Result<(u32, u32, Vec<f32>), DevelopError> {
@@ -226,6 +334,31 @@ fn normalized_white_balance(as_shot_wb: [f32; 4]) -> Result<[f64; 3], DevelopErr
     }
     let green = f64::from(rgb[1]);
     Ok([f64::from(rgb[0]) / green, 1.0, f64::from(rgb[2]) / green])
+}
+
+/// Clip photosites to the white level, apply white balance, then clip to the
+/// first channel that would have clipped on a neutral.
+///
+/// `white_balance` is green-normalized. A fully exposed neutral is `(1, 1, 1)`
+/// on the sensor. Multiplying by a balance whose red or blue coefficient is
+/// above 1, then by the color matrix, leaves green short and the highlight
+/// encodes magenta. Cutting every balanced channel at `min(white_balance)`
+/// pulls that neutral back to camera white. A colorful pixel that only clips
+/// one channel stays colorful: only the channels past the cap move.
+fn recover_highlights(samples: &mut [f32], white_balance: [f64; 3]) {
+    let wb = white_balance.map(|channel| channel as f32);
+    let cap = wb[0].min(wb[1]).min(wb[2]);
+    for pixel in samples.as_chunks_mut::<3>().0 {
+        for channel in 0..3 {
+            let sensor = pixel[channel];
+            let sensor = if sensor.is_finite() {
+                sensor.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            pixel[channel] = (sensor * wb[channel]).min(cap);
+        }
+    }
 }
 
 fn apply_transform(samples: &mut [f32], matrix: [[f32; 3]; 3]) {
@@ -345,6 +478,47 @@ mod tests {
     }
 
     #[test]
+    fn clipped_highlight_stays_neutral_under_fuji_balance() {
+        // X-S10 matrix and an as-shot balance in the same shape as the CC0
+        // fixture (green already 1, blue the largest coefficient).
+        let xyz_to_camera = [
+            [1.3426, -0.6334, -0.1177],
+            [-0.4244, 1.2136, 0.2371],
+            [-0.058, 0.1303, 0.598],
+            [0.0, 0.0, 0.0],
+        ];
+        let balance = normalized_white_balance([1.6953642, 1.0, 2.3509934, f32::NAN]).unwrap();
+        let matrix = acescg_transform(xyz_to_camera, [1.0, 1.0, 1.0, 0.0]).unwrap();
+
+        let mut white = vec![1.4, 1.2, 1.8];
+        recover_highlights(&mut white, balance);
+        apply_transform(&mut white, matrix);
+        assert_white([white[0], white[1], white[2]]);
+        let encoded = encode_srgb(&white);
+        for channel in &encoded {
+            assert!((channel - 1.0).abs() < 1.0e-4, "{encoded:?}");
+        }
+
+        // A red that only just clips stays red. Baking the balance into the
+        // matrix and clipping after it paints this pixel magenta.
+        let mut red = vec![1.0, 0.25, 0.20];
+        recover_highlights(&mut red, balance);
+        apply_transform(&mut red, matrix);
+        assert!(
+            red[0] > red[1] + 0.15 && red[0] > red[2] + 0.05,
+            "clipped red went magenta: {red:?}"
+        );
+
+        // A gray below the cap is only white-balanced, not crushed.
+        let level = 0.4_f32;
+        let mut gray = vec![level / balance[0] as f32, level, level / balance[2] as f32];
+        recover_highlights(&mut gray, balance);
+        for channel in &gray {
+            assert!((channel - level).abs() < 1.0e-5, "{gray:?}");
+        }
+    }
+
+    #[test]
     fn missing_white_balance_is_an_error() {
         let xyz_to_camera = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0; 3]];
         let err = acescg_transform(xyz_to_camera, [1.0, f32::NAN, 1.0, 0.0]).unwrap_err();
@@ -388,6 +562,30 @@ mod tests {
     fn negative_acescg_clips_to_black() {
         let encoded = encode_srgb(&[-1.0, -1.0, -1.0]);
         assert_eq!(encoded, vec![0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn proxy_long_edge_rounds_the_fixture_frames() {
+        assert_eq!(LinearImage::proxy_dimensions(6384, 4182, 720), (720, 472));
+        assert_eq!(LinearImage::proxy_dimensions(6384, 4182, 1440), (1440, 943));
+        assert_eq!(LinearImage::proxy_dimensions(4032, 3024, 720), (720, 540));
+        assert_eq!(LinearImage::proxy_dimensions(8, 4, 100), (8, 4));
+    }
+
+    #[test]
+    fn area_downsample_averages_coverage() {
+        let image = LinearImage::new(
+            2,
+            2,
+            vec![0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 4.0, 0.0, 0.0, 0.0, 8.0],
+        )
+        .unwrap();
+        let proxy = image.area_downsample(1).unwrap();
+        assert_eq!((proxy.width(), proxy.height()), (1, 1));
+        let pixel = proxy.pixels();
+        assert!((pixel[0] - 0.5).abs() < 1.0e-5, "{pixel:?}");
+        assert!((pixel[1] - 1.0).abs() < 1.0e-5, "{pixel:?}");
+        assert!((pixel[2] - 2.0).abs() < 1.0e-5, "{pixel:?}");
     }
 
     fn assert_white(rgb: [f32; 3]) {

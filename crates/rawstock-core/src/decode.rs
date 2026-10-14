@@ -70,15 +70,76 @@ impl Orientation {
         }
     }
 
-    /// Bake this orientation into interleaved RGB samples.
+    /// Map an axis-aligned display rectangle back to sensor pixels.
     ///
-    /// Flips happen before the transpose, matching EXIF display orientation.
-    pub(crate) fn apply_rgb<T: Copy>(
+    /// `x`, `y`, `width`, and `height` are in the oriented image, the same
+    /// space [`Self::apply_rgb`] writes. The returned `(x, y, width, height)`
+    /// is the sensor rectangle that displays there. A rect that misses the
+    /// image comes back empty.
+    pub fn display_to_sensor(
+        self,
+        sensor_width: u32,
+        sensor_height: u32,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> (u32, u32, u32, u32) {
+        if sensor_width == 0 || sensor_height == 0 || width == 0 || height == 0 {
+            return (0, 0, 0, 0);
+        }
+        let (display_width, display_height) = self.dimensions(sensor_width, sensor_height);
+        if x >= display_width || y >= display_height {
+            return (0, 0, 0, 0);
+        }
+        let width = width.min(display_width - x);
+        let height = height.min(display_height - y);
+        let (x0, y0) = self.display_pixel_to_sensor(sensor_width, sensor_height, x, y);
+        let (x1, y1) = self.display_pixel_to_sensor(
+            sensor_width,
+            sensor_height,
+            x + width - 1,
+            y + height - 1,
+        );
+        let left = x0.min(x1);
+        let top = y0.min(y1);
+        let right = x0.max(x1);
+        let bottom = y0.max(y1);
+        (left, top, right - left + 1, bottom - top + 1)
+    }
+
+    fn display_pixel_to_sensor(
         self,
         width: u32,
         height: u32,
-        pixels: &[T],
-    ) -> (u32, u32, Vec<T>) {
+        dest_x: u32,
+        dest_y: u32,
+    ) -> (u32, u32) {
+        let (transpose, flip_horizontal, flip_vertical) = self.flips();
+        let (flipped_x, flipped_y) = if transpose {
+            (dest_y, dest_x)
+        } else {
+            (dest_x, dest_y)
+        };
+        let x = if flip_horizontal {
+            width - 1 - flipped_x
+        } else {
+            flipped_x
+        };
+        let y = if flip_vertical {
+            height - 1 - flipped_y
+        } else {
+            flipped_y
+        };
+        (x, y)
+    }
+
+    /// Bake this orientation into interleaved RGB samples.
+    ///
+    /// Flips happen before the transpose, matching EXIF display orientation.
+    /// `T` is one channel sample, and samples are interleaved RGB, so a pixel
+    /// is three consecutive values. The preview shell uses this on 8-bit RGB.
+    pub fn apply_rgb<T: Copy>(self, width: u32, height: u32, pixels: &[T]) -> (u32, u32, Vec<T>) {
         let (out_width, out_height) = self.dimensions(width, height);
         if pixels.is_empty() {
             return (out_width, out_height, Vec::new());
@@ -448,6 +509,34 @@ mod tests {
             let (got_w, got_h, pixels) = orientation.apply_rgb(2, 2, &square());
             assert_eq!((got_w, got_h), (width, height), "{orientation}");
             assert_eq!(reds(&pixels), expected, "{orientation}");
+        }
+    }
+
+    #[test]
+    fn display_rect_maps_back_to_the_sensor_pixel() {
+        let ids = [10u8, 20, 30, 40];
+        for orientation in [
+            Orientation::Normal,
+            Orientation::HorizontalFlip,
+            Orientation::Rotate180,
+            Orientation::VerticalFlip,
+            Orientation::Transpose,
+            Orientation::Rotate90,
+            Orientation::Rotate270,
+            Orientation::Transverse,
+            Orientation::Unknown,
+        ] {
+            let (_width, _height, displayed) = orientation.apply_rgb(2, 2, &square());
+            let (display_w, display_h) = orientation.dimensions(2, 2);
+            for y in 0..display_h {
+                for x in 0..display_w {
+                    let shown = displayed[((y * display_w + x) * 3) as usize];
+                    let (sx, sy, w, h) = orientation.display_to_sensor(2, 2, x, y, 1, 1);
+                    assert_eq!((w, h), (1, 1), "{orientation} {x},{y}");
+                    let id = ids[(sy * 2 + sx) as usize];
+                    assert_eq!(shown, id, "{orientation} display {x},{y}");
+                }
+            }
         }
     }
 
