@@ -37,12 +37,15 @@ CPU, GPU, preview, and export share this order:
    the output transform.
 4. **Halation**, when the stock sets it. A threshold, a wide blur, and a
    red-weighted add-back, still in scene-linear exposure.
-5. **Film model** (`stock`). Characteristic (D-logH) curves produce per-layer
-   density, then interlayer coupling.
+5. **Film model** (`stock`). A parametric model reads scene RGB as three layer
+   exposures. A spectral model upsamples that RGB and integrates it against
+   per-layer sensitivities. Both then use the same characteristic curves and
+   interlayer coupling.
 6. **Grain**, when the stock sets it. Per-layer dye-cloud noise in density,
    seeded and sized to the physical frame so CPU, GPU, preview, and export
    match.
-7. **Print/scan.**
+7. **Print/scan.** Dye spectra, when the stock has them, replace the
+   per-channel inversion.
 8. **Gamut compression and output transform** (`color`), into the output
    encoding (sRGB, Display P3, and others).
 9. **Export.**

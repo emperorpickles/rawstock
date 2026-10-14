@@ -52,6 +52,37 @@ fn develop_with_stock_writes_the_fixture() {
     let _ = std::fs::remove_file(output);
 }
 
+#[test]
+fn develop_portra_400_writes_the_fixture() {
+    let Some(input) = IPHONE_12_PRO.prepare() else {
+        return;
+    };
+    let stock = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stocks/portra400.stock.toml");
+    let output = std::env::temp_dir().join(format!("rawstock-portra-{}.jpg", std::process::id()));
+    let bin = env!("CARGO_BIN_EXE_rawstock");
+    let run = Command::new(bin)
+        .arg("develop")
+        .arg(&input)
+        .arg("--stock")
+        .arg(&stock)
+        .arg("--out")
+        .arg(&output)
+        .output()
+        .expect("rawstock failed to start");
+    assert!(
+        run.status.success(),
+        "develop --stock portra400 failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        jpeg_dimensions(&output),
+        IPHONE_12_PRO.export_dimensions,
+        "developed jpeg dimensions"
+    );
+    let _ = std::fs::remove_file(output);
+}
+
 impl Fixture {
     fn prepare(&self) -> Option<PathBuf> {
         let path = std::env::temp_dir()

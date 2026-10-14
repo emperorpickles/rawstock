@@ -8,7 +8,9 @@
 //! 3. [`FilmModel`](crate::stock::FilmModel): exposure to per-layer density
 //! 4. [`Grain`](crate::stock::Grain), when the stock sets it: per-layer dye-cloud
 //!    noise in density
-//! 5. print/scan: density back to display-referred linear RGB
+//! 5. print/scan: density back to display-referred linear RGB. A spectral
+//!    stock with dye curves first turns those curves into the density this
+//!    step sees; every other stock passes the characteristic density through.
 //! 6. output transform: ACEScg to encoded sRGB, clipping out-of-gamut channels
 //! 7. export: orientation, an sRGB ICC profile, 8-bit JPEG or 16-bit TIFF
 //!
@@ -186,10 +188,11 @@ impl Pipeline {
         if let Some(grain) = &self.parameters.grain {
             grain.apply(&mut density, image.width(), image.height());
         }
+        let scanned = self.parameters.film.printing_density(&density);
         let linear = print_scan(
             self.parameters.print_exposure,
             &self.parameters.print_curve,
-            &density,
+            scanned.as_deref().unwrap_or(&density),
         );
         SrgbImage {
             width: image.width(),

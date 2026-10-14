@@ -1,10 +1,13 @@
 //! Film model: scene exposure to per-layer density, and the stock files that
 //! fill [`Parameters`](crate::render::Parameters).
 //!
-//! Spectral (wavelength sensitivity and dye density) is intentionally not a
-//! variant yet. The only model is [`FilmModel::Parametric`]. A stock file
-//! names that choice with [`StockModel`], so a later `spectral` tag can be
-//! added without changing the `parametric` tag existing files already use.
+//! [`FilmModel::Parametric`] reads scene RGB as three layer exposures.
+//! [`FilmModel::Spectral`] replaces that step: ACEScg is upsampled to a
+//! spectrum and integrated against per-layer sensitivities. Both then use the
+//! same D-logH curves, coupling, and grain. A spectral stock that also stores
+//! dye-density curves turns those densities into a print exposure; otherwise
+//! the print stage is the existing per-channel inversion. A stock file names
+//! the choice with [`StockModel`]. `parametric` is unchanged.
 //!
 //! Optional `[grain]` and `[halation]` tables are part of schema 1. A file
 //! that omits them still loads; the pipeline then skips that stage.
@@ -17,6 +20,7 @@ use serde::de::{self, DeserializeSeed, Deserializer, SeqAccess, Visitor};
 use thiserror::Error;
 
 use crate::render::Parameters;
+use crate::spectrum::{self, Observer};
 
 /// A monotone D-logH characteristic curve.
 ///
@@ -40,11 +44,39 @@ pub struct Parametric {
     coupling: Option<[[f32; 3]; 3]>,
 }
 
+/// Per-layer spectral film.
+///
+/// Sensitivities are non-negative and each integrates to 1 on `wavelengths`,
+/// so a flat spectrum of level 1 exposes every layer equally. The D-logH
+/// curves then carry the relative layer speed. `dye_density`, when present,
+/// is the spectral density of one unit of that layer's characteristic
+/// density. The print stage integrates `10` to the power of minus the summed
+/// dye density against a D65 / CIE 1931 observer.
+#[derive(Debug, Clone)]
+pub struct Spectral {
+    wavelengths: Vec<f32>,
+    /// `sensitivity[layer][i] * trapezoid weight[i]`, so exposure is a dot product.
+    weighted_sensitivity: [Vec<f32>; 3],
+    sensitivity: [Vec<f32>; 3],
+    dye_density: Option<[Vec<f32>; 3]>,
+    /// Scan weights. `None` when the stock has no dye curves.
+    observer: Option<Observer>,
+    /// Subtracted from the scanned density so `reference_log_exposure` prints neutral.
+    scan_balance: [f32; 3],
+    reference_log_exposure: Option<f32>,
+    curves: [Curve; 3],
+    coupling: Option<[[f32; 3]; 3]>,
+}
+
 /// Maps scene-linear exposure to per-layer density.
 #[derive(Debug, Clone)]
 pub enum FilmModel {
     /// Per-layer D-logH curves and optional log-exposure coupling.
     Parametric(Parametric),
+    /// Spectral sensitivities into the same curves, plus optional dye spectra.
+    ///
+    /// Boxed so the wavelength tables do not inflate every parametric stock.
+    Spectral(Box<Spectral>),
 }
 
 /// A film or print parameter that cannot be evaluated.
@@ -99,6 +131,32 @@ pub enum ModelError {
     /// A dye-cloud size was missing, zero, or not finite.
     #[error("grain size must be a positive finite number of millimetres")]
     GrainSize,
+
+    /// The shared wavelength grid was too short, non-finite, or not increasing.
+    #[error("wavelength samples must be finite and strictly increasing, with at least two samples")]
+    WavelengthGrid,
+
+    /// A sensitivity sample was negative, non-finite, the wrong length, or not normalised.
+    #[error(
+        "sensitivity samples must be finite and non-negative, match the wavelength grid, and integrate to 1"
+    )]
+    Sensitivity,
+
+    /// A dye-density sample was negative, non-finite, or the wrong length.
+    #[error("dye density samples must be finite and non-negative and match the wavelength grid")]
+    DyeDensity,
+
+    /// The printer-balance log exposure was NaN or infinite.
+    #[error("reference log exposure must be finite")]
+    ReferenceExposure,
+
+    /// A reference log exposure was set without dye curves to balance.
+    #[error("reference log exposure is only valid with dye density curves")]
+    ReferenceWithoutDye,
+
+    /// The wavelength grid missed the visible observer, so dye density cannot be scanned.
+    #[error("wavelength grid does not meet the visible scan observer")]
+    Observer,
 }
 
 /// Exposures at or below this are lifted before `log10`.
@@ -194,6 +252,207 @@ impl Parametric {
     }
 }
 
+impl Spectral {
+    /// `sensitivity` and `curves` are red, green, and blue, in that order.
+    ///
+    /// Each sensitivity is non-negative and integrates to 1 with the
+    /// trapezoidal rule on `wavelengths`. `dye_density` uses the same grid
+    /// and the same channel order. `reference_log_exposure`, when dye curves
+    /// are present, is the log exposure the print balances to neutral.
+    pub fn new(
+        wavelengths: Vec<f32>,
+        sensitivity: [Vec<f32>; 3],
+        dye_density: Option<[Vec<f32>; 3]>,
+        curves: [Curve; 3],
+        coupling: Option<[[f32; 3]; 3]>,
+        reference_log_exposure: Option<f32>,
+    ) -> Result<Self, ModelError> {
+        if wavelengths.len() < 2
+            || wavelengths
+                .windows(2)
+                .any(|pair| !pair[0].is_finite() || !pair[1].is_finite() || pair[1] <= pair[0])
+        {
+            return Err(ModelError::WavelengthGrid);
+        }
+        for layer in &sensitivity {
+            if layer.len() != wavelengths.len()
+                || layer
+                    .iter()
+                    .any(|sample| !sample.is_finite() || *sample < 0.0)
+                || (integrate(&wavelengths, layer) - 1.0).abs() > 1.0e-3
+            {
+                return Err(ModelError::Sensitivity);
+            }
+        }
+        if let Some(dyes) = &dye_density {
+            for layer in dyes {
+                if layer.len() != wavelengths.len()
+                    || layer
+                        .iter()
+                        .any(|sample| !sample.is_finite() || *sample < 0.0)
+                {
+                    return Err(ModelError::DyeDensity);
+                }
+            }
+        }
+        if let Some(exposure) = reference_log_exposure {
+            if !exposure.is_finite() {
+                return Err(ModelError::ReferenceExposure);
+            }
+            if dye_density.is_none() {
+                return Err(ModelError::ReferenceWithoutDye);
+            }
+        }
+        if let Some(matrix) = coupling
+            && matrix.iter().flatten().any(|entry| !entry.is_finite())
+        {
+            return Err(ModelError::NonFiniteCoupling);
+        }
+        let weights = trapezoid_weights(&wavelengths);
+        let weighted_sensitivity = sensitivity.clone().map(|layer| {
+            layer
+                .iter()
+                .zip(&weights)
+                .map(|(sample, weight)| sample * weight)
+                .collect()
+        });
+        let observer = if dye_density.is_some() {
+            Some(Observer::acescg_d65(&wavelengths).ok_or(ModelError::Observer)?)
+        } else {
+            None
+        };
+        let mut model = Self {
+            wavelengths,
+            weighted_sensitivity,
+            sensitivity,
+            dye_density,
+            observer,
+            scan_balance: [0.0; 3],
+            reference_log_exposure,
+            curves,
+            coupling,
+        };
+        if let Some(log_h) = reference_log_exposure {
+            let density = [
+                model.curves[0].eval(log_h),
+                model.curves[1].eval(log_h),
+                model.curves[2].eval(log_h),
+            ];
+            let effective = model.scanned_density(density);
+            let mean = (effective[0] + effective[1] + effective[2]) / 3.0;
+            model.scan_balance = effective.map(|channel| channel - mean);
+        }
+        Ok(model)
+    }
+
+    /// Shared wavelength grid, in nanometres.
+    pub fn wavelengths(&self) -> &[f32] {
+        &self.wavelengths
+    }
+
+    /// Red, green, and blue sensitivities. Each integrates to 1.
+    pub fn sensitivities(&self) -> &[Vec<f32>; 3] {
+        &self.sensitivity
+    }
+
+    /// Spectral dye density per unit characteristic density, when the stock has it.
+    pub fn dye_density(&self) -> Option<&[Vec<f32>; 3]> {
+        self.dye_density.as_ref()
+    }
+
+    /// The red, green, and blue characteristic curves.
+    pub fn curves(&self) -> &[Curve; 3] {
+        &self.curves
+    }
+
+    /// Log-exposure mixing, when the layers are not independent.
+    pub fn coupling(&self) -> Option<[[f32; 3]; 3]> {
+        self.coupling
+    }
+
+    /// Log exposure the spectral print balances to a neutral, when set.
+    pub fn reference_log_exposure(&self) -> Option<f32> {
+        self.reference_log_exposure
+    }
+
+    fn density(&self, exposure: &[f32]) -> Vec<f32> {
+        let mut spectrum = vec![0.0f32; self.wavelengths.len()];
+        let mut density = Vec::with_capacity(exposure.len());
+        for pixel in exposure.as_chunks::<3>().0 {
+            spectrum::fill_scene_spectrum(*pixel, &self.wavelengths, &mut spectrum);
+            let mut log_h = [0.0f32; 3];
+            for (layer, log_exposure) in log_h.iter_mut().enumerate() {
+                let mut layer_exposure = 0.0f32;
+                for (sample, weight) in spectrum.iter().zip(&self.weighted_sensitivity[layer]) {
+                    layer_exposure += sample * weight;
+                }
+                *log_exposure = layer_exposure.max(EXPOSURE_FLOOR).log10();
+            }
+            if let Some(matrix) = self.coupling {
+                log_h = mix(matrix, log_h);
+            }
+            density.extend([
+                self.curves[0].eval(log_h[0]),
+                self.curves[1].eval(log_h[1]),
+                self.curves[2].eval(log_h[2]),
+            ]);
+        }
+        density
+    }
+
+    /// Equivalent per-channel density for the existing print curve.
+    ///
+    /// `None` when this stock has no dye spectra: the characteristic density
+    /// is already what the print curve expects.
+    fn printing_density(&self, density: &[f32]) -> Option<Vec<f32>> {
+        let dyes = self.dye_density.as_ref()?;
+        let observer = self.observer.as_ref()?;
+        let mut transmittance = vec![0.0f32; self.wavelengths.len()];
+        let mut printed = Vec::with_capacity(density.len());
+        for pixel in density.as_chunks::<3>().0 {
+            for index in 0..transmittance.len() {
+                let optical = dyes[0][index] * pixel[0]
+                    + dyes[1][index] * pixel[1]
+                    + dyes[2][index] * pixel[2];
+                transmittance[index] = 10f32.powf(-optical);
+            }
+            let scanned = observer
+                .apply(&transmittance)
+                .map(|channel| -channel.max(EXPOSURE_FLOOR).log10());
+            printed.extend([
+                scanned[0] - self.scan_balance[0],
+                scanned[1] - self.scan_balance[1],
+                scanned[2] - self.scan_balance[2],
+            ]);
+        }
+        Some(printed)
+    }
+
+    /// Density of a neutral filter with the same ACEScg transmittance.
+    ///
+    /// Balance is not applied. The caller subtracts [`Self::scan_balance`].
+    fn scanned_density(&self, density: [f32; 3]) -> [f32; 3] {
+        let dyes = self
+            .dye_density
+            .as_ref()
+            .expect("scanned density is only used when dye curves exist");
+        let observer = self
+            .observer
+            .as_ref()
+            .expect("dye curves build a scan observer");
+        let mut transmittance = vec![0.0f32; self.wavelengths.len()];
+        for index in 0..transmittance.len() {
+            let optical = dyes[0][index] * density[0]
+                + dyes[1][index] * density[1]
+                + dyes[2][index] * density[2];
+            transmittance[index] = 10f32.powf(-optical);
+        }
+        observer
+            .apply(&transmittance)
+            .map(|channel| -channel.max(EXPOSURE_FLOOR).log10())
+    }
+}
+
 impl FilmModel {
     /// Per-layer density for interleaved scene-linear RGB exposure.
     ///
@@ -202,6 +461,18 @@ impl FilmModel {
     pub fn density(&self, exposure: &[f32]) -> Vec<f32> {
         match self {
             Self::Parametric(model) => model.density(exposure),
+            Self::Spectral(model) => model.density(exposure),
+        }
+    }
+
+    /// Density the print curve should see when dye spectra change the exposure.
+    ///
+    /// `None` means `density` is already that input. Parametric stocks, and
+    /// spectral stocks without dye curves, return `None`.
+    pub fn printing_density(&self, density: &[f32]) -> Option<Vec<f32>> {
+        match self {
+            Self::Parametric(_) => None,
+            Self::Spectral(model) => model.printing_density(density),
         }
     }
 }
@@ -840,13 +1111,15 @@ fn stamp_cloud(field: &mut [f32], width: u32, rows: usize, pitch: f32, stamp: St
 
 /// On-disk model tag.
 ///
-/// `Spectral` is not a variant yet. Existing files say `parametric`, and that
-/// tag stays valid when a spectral variant is added.
+/// `parametric` stays the tag existing files already use. `spectral` adds
+/// sensitivity samples, and dye density when the stock has it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StockModel {
     /// Per-layer D-logH curves and optional log-exposure coupling.
     Parametric,
+    /// Spectral sensitivities into those same curves, plus optional dye density.
+    Spectral,
 }
 
 /// A stock file loaded into [`Parameters`].
@@ -957,6 +1230,31 @@ pub enum StockError {
         /// Number of values found.
         len: usize,
     },
+
+    /// A spectral stock omitted a table the model needs.
+    #[error("spectral stock is missing {field}")]
+    MissingSpectral {
+        /// `wavelength_nm` or `sensitivity`.
+        field: &'static str,
+    },
+
+    /// A parametric stock set a field only the spectral model reads.
+    #[error("parametric stock cannot include {field}")]
+    NotParametric {
+        /// The field that does not belong on a parametric stock.
+        field: &'static str,
+    },
+
+    /// A spectral array does not match the shared wavelength grid.
+    #[error("{field} has {len} samples, expected {expected}")]
+    SpectralLength {
+        /// Which array was the wrong length.
+        field: &'static str,
+        /// Samples found.
+        len: usize,
+        /// Samples the wavelength grid requires.
+        expected: usize,
+    },
 }
 
 /// Parser input. Not a second public parameter type: [`Stock::load`] turns it
@@ -984,6 +1282,30 @@ struct StockFile {
     grain: Option<GrainSamples>,
     #[serde(default)]
     halation: Option<HalationSamples>,
+    /// Shared wavelength grid, in nanometres. Spectral stocks only.
+    #[serde(default, deserialize_with = "de_option_f32_vec")]
+    wavelength_nm: Option<Vec<f32>>,
+    /// Per-layer spectral sensitivity. Spectral stocks only.
+    #[serde(default)]
+    sensitivity: Option<RgbSamples>,
+    /// Per-layer spectral dye density. Optional on a spectral stock.
+    #[serde(default)]
+    dye_density: Option<RgbSamples>,
+    /// Log exposure the spectral print balances to neutral.
+    #[serde(default, deserialize_with = "de_option_f32")]
+    reference_log_exposure: Option<f32>,
+}
+
+/// Three sampled spectra on the stock's wavelength grid.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RgbSamples {
+    #[serde(deserialize_with = "de_f32_vec")]
+    red: Vec<f32>,
+    #[serde(deserialize_with = "de_f32_vec")]
+    green: Vec<f32>,
+    #[serde(deserialize_with = "de_f32_vec")]
+    blue: Vec<f32>,
 }
 
 /// Optional per-layer grain. Absent means the pipeline adds none.
@@ -1131,11 +1453,45 @@ impl Stock {
         let green = curve_from_samples("green", &file.green)?;
         let blue = curve_from_samples("blue", &file.blue)?;
         let print = curve_from_samples("print", &file.print)?;
-        let coupling = file.coupling.map(|coupling| coupling.matrix);
+        let coupling = file.coupling.as_ref().map(|coupling| coupling.matrix);
         let film = match file.model {
-            StockModel::Parametric => FilmModel::Parametric(
-                Parametric::new([red, green, blue], coupling).map_err(StockError::Model)?,
-            ),
+            StockModel::Parametric => {
+                reject_spectral_fields(&file)?;
+                FilmModel::Parametric(
+                    Parametric::new([red, green, blue], coupling).map_err(StockError::Model)?,
+                )
+            }
+            StockModel::Spectral => {
+                let wavelengths =
+                    file.wavelength_nm
+                        .clone()
+                        .ok_or(StockError::MissingSpectral {
+                            field: "wavelength_nm",
+                        })?;
+                let sensitivity = file
+                    .sensitivity
+                    .as_ref()
+                    .ok_or(StockError::MissingSpectral {
+                        field: "sensitivity",
+                    })?;
+                let sensitivity = rgb_samples("sensitivity", sensitivity, wavelengths.len())?;
+                let dye_density = file
+                    .dye_density
+                    .as_ref()
+                    .map(|samples| rgb_samples("dye_density", samples, wavelengths.len()))
+                    .transpose()?;
+                FilmModel::Spectral(Box::new(
+                    Spectral::new(
+                        wavelengths,
+                        sensitivity,
+                        dye_density,
+                        [red, green, blue],
+                        coupling,
+                        file.reference_log_exposure,
+                    )
+                    .map_err(StockError::Model)?,
+                ))
+            }
         };
         let mut parameters = Parameters::new(file.exposure_ev, film, file.print_exposure, print)
             .map_err(StockError::Model)?;
@@ -1311,6 +1667,76 @@ fn box_blur_vertical(src: &[f32], dst: &mut [f32], width: usize, height: usize, 
     }
 }
 
+fn reject_spectral_fields(file: &StockFile) -> Result<(), StockError> {
+    if file.wavelength_nm.is_some() {
+        return Err(StockError::NotParametric {
+            field: "wavelength_nm",
+        });
+    }
+    if file.sensitivity.is_some() {
+        return Err(StockError::NotParametric {
+            field: "sensitivity",
+        });
+    }
+    if file.dye_density.is_some() {
+        return Err(StockError::NotParametric {
+            field: "dye_density",
+        });
+    }
+    if file.reference_log_exposure.is_some() {
+        return Err(StockError::NotParametric {
+            field: "reference_log_exposure",
+        });
+    }
+    Ok(())
+}
+
+fn rgb_samples(
+    table: &'static str,
+    samples: &RgbSamples,
+    expected: usize,
+) -> Result<[Vec<f32>; 3], StockError> {
+    for (name, values) in [
+        ("red", &samples.red),
+        ("green", &samples.green),
+        ("blue", &samples.blue),
+    ] {
+        if values.len() != expected {
+            return Err(StockError::SpectralLength {
+                field: match (table, name) {
+                    ("sensitivity", "red") => "sensitivity.red",
+                    ("sensitivity", "green") => "sensitivity.green",
+                    ("sensitivity", "blue") => "sensitivity.blue",
+                    ("dye_density", "red") => "dye_density.red",
+                    ("dye_density", "green") => "dye_density.green",
+                    _ => "dye_density.blue",
+                },
+                len: values.len(),
+                expected,
+            });
+        }
+    }
+    Ok([
+        samples.red.clone(),
+        samples.green.clone(),
+        samples.blue.clone(),
+    ])
+}
+
+fn de_option_f32<'de, D>(deserializer: D) -> Result<Option<f32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    de_f32(deserializer).map(Some)
+}
+
+fn de_option_f32_vec<'de, D>(deserializer: D) -> Result<Option<Vec<f32>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    de_f32_vec(deserializer).map(Some)
+}
+
 fn de_f32<'de, D>(deserializer: D) -> Result<f32, D::Error>
 where
     D: Deserializer<'de>,
@@ -1383,6 +1809,25 @@ impl<'de> DeserializeSeed<'de> for F32Seed {
     {
         de_f32(deserializer)
     }
+}
+
+fn trapezoid_weights(wavelengths: &[f32]) -> Vec<f32> {
+    let mut weights = vec![0.0f32; wavelengths.len()];
+    for index in 0..wavelengths.len() - 1 {
+        let half = 0.5 * (wavelengths[index + 1] - wavelengths[index]);
+        weights[index] += half;
+        weights[index + 1] += half;
+    }
+    weights
+}
+
+fn integrate(wavelengths: &[f32], values: &[f32]) -> f32 {
+    let mut total = 0.0f32;
+    for index in 0..wavelengths.len() - 1 {
+        let half = 0.5 * (wavelengths[index + 1] - wavelengths[index]);
+        total += half * (values[index] + values[index + 1]);
+    }
+    total
 }
 
 fn mix(matrix: [[f32; 3]; 3], value: [f32; 3]) -> [f32; 3] {
@@ -1472,5 +1917,129 @@ mod tests {
         assert!((density[0] - log_h[1]).abs() < 1.0e-5, "{density:?}");
         assert!((density[1] - log_h[0]).abs() < 1.0e-5, "{density:?}");
         assert!((density[2] - log_h[2]).abs() < 1.0e-5, "{density:?}");
+    }
+
+    fn flat_sensitivity(wavelengths: &[f32]) -> Vec<f32> {
+        let integral = integrate(wavelengths, &vec![1.0; wavelengths.len()]);
+        vec![1.0 / integral; wavelengths.len()]
+    }
+
+    #[test]
+    fn spectral_neutral_gray_matches_parametric() {
+        use crate::color::LinearImage;
+        use crate::render::{Parameters, Pipeline};
+
+        let wavelengths: Vec<f32> = (0..41).map(|index| 380.0 + index as f32 * 10.0).collect();
+        let flat = flat_sensitivity(&wavelengths);
+        let curve = sample_curve();
+        let print = Curve::new([(-1.5, 0.05), (0.0, 0.50), (1.0, 1.30), (2.5, 2.40)]).unwrap();
+        let spectral = FilmModel::Spectral(Box::new(
+            Spectral::new(
+                wavelengths,
+                [flat.clone(), flat.clone(), flat],
+                None,
+                [curve.clone(), curve.clone(), curve.clone()],
+                None,
+                None,
+            )
+            .unwrap(),
+        ));
+        let parametric = FilmModel::Parametric(
+            Parametric::new([curve.clone(), curve.clone(), curve], None).unwrap(),
+        );
+        let levels = [0.02_f32, 0.18, 0.5, 1.0, 2.5];
+        let mut pixels = Vec::new();
+        for gray in levels {
+            pixels.extend([gray, gray, gray]);
+        }
+        let image = LinearImage::new(levels.len() as u32, 1, pixels).unwrap();
+        let spectral = Pipeline::new(Parameters::new(0.0, spectral, 0.8, print.clone()).unwrap())
+            .develop(&image);
+        let parametric =
+            Pipeline::new(Parameters::new(0.0, parametric, 0.8, print).unwrap()).develop(&image);
+        for (got, want) in spectral.pixels().iter().zip(parametric.pixels()) {
+            assert!(
+                (got - want).abs() < 1.0e-4,
+                "spectral gray {got} diverged from parametric {want}"
+            );
+        }
+        for pixel in spectral.pixels().as_chunks::<3>().0 {
+            let spread =
+                pixel[0].max(pixel[1]).max(pixel[2]) - pixel[0].min(pixel[1]).min(pixel[2]);
+            assert!(spread < 1.0e-4, "spectral gray drifted: {pixel:?}");
+        }
+    }
+
+    #[test]
+    fn spectral_color_follows_sensitivity() {
+        let wavelengths: Vec<f32> = (0..41).map(|index| 380.0 + index as f32 * 10.0).collect();
+        let mut red = vec![0.0f32; wavelengths.len()];
+        let mut blue = vec![0.0f32; wavelengths.len()];
+        for (index, wave) in wavelengths.iter().enumerate() {
+            if *wave >= 600.0 {
+                red[index] = 1.0;
+            }
+            if *wave <= 480.0 {
+                blue[index] = 1.0;
+            }
+        }
+        let red = {
+            let scale = integrate(&wavelengths, &red);
+            red.iter().map(|sample| sample / scale).collect::<Vec<_>>()
+        };
+        let blue = {
+            let scale = integrate(&wavelengths, &blue);
+            blue.iter().map(|sample| sample / scale).collect::<Vec<_>>()
+        };
+        let green = flat_sensitivity(&wavelengths);
+        let curve = Curve::new([(-4.0, -4.0), (4.0, 4.0)]).unwrap();
+        let model = Spectral::new(
+            wavelengths,
+            [red, green, blue],
+            None,
+            [curve.clone(), curve.clone(), curve],
+            None,
+            None,
+        )
+        .unwrap();
+        // ACEScg red should put more exposure on the long-wavelength layer
+        // than on the short-wavelength layer. The identity curve reports
+        // log-exposure as density.
+        let density = FilmModel::Spectral(Box::new(model)).density(&[1.0, 0.0, 0.0]);
+        assert!(
+            density[0] > density[2] + 0.3,
+            "red light did not prefer the red layer: {density:?}"
+        );
+    }
+
+    #[test]
+    fn sensitivity_must_be_normalized_and_non_negative() {
+        let wavelengths = vec![400.0, 500.0, 600.0, 700.0];
+        let flat = flat_sensitivity(&wavelengths);
+        let curve = sample_curve();
+        let curves = [curve.clone(), curve.clone(), curve];
+        let mut negative = flat.clone();
+        negative[0] = -0.01;
+        let err = Spectral::new(
+            wavelengths.clone(),
+            [negative, flat.clone(), flat.clone()],
+            None,
+            curves.clone(),
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ModelError::Sensitivity));
+
+        let err = Spectral::new(
+            wavelengths,
+            [vec![1.0, 1.0, 1.0, 1.0], flat.clone(), flat],
+            None,
+            curves,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ModelError::Sensitivity));
     }
 }
