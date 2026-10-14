@@ -32,6 +32,7 @@ rawstock dump-linear IMG.RAF out.exr
 - [Architecture](docs/ARCHITECTURE.md)
 - [Plan](docs/PLAN.md)
 - [Film pipeline](docs/FILM_PIPELINE.md)
+- [UI plan](docs/UI_PLAN.md)
 - [Stock format](stocks/README.md)
 
 ## License

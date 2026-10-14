@@ -36,6 +36,9 @@ export match the CPU grain; the CLI can select the GPU path.
 **Done when:** the app builds and runs on macOS, Windows, and Linux; preview
 uses the GPU renderer; export matches the CLI.
 
+The first slice is a CPU stock tuner, before the GPU renderer. See
+[UI plan](UI_PLAN.md).
+
 ## Phase 6: Web (wasm + WebGPU)
 **Goal:** the same experience in the browser, fully client-side.
 **Done when:** core compiles to wasm; the Svelte UI is shared with desktop;
