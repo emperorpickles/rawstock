@@ -26,3 +26,7 @@ rawstock develop IMG.RAF --stock <name> -o out.jpg   # target shape
 - [Architecture](docs/ARCHITECTURE.md)
 - [Plan](docs/PLAN.md)
 - [Stock format](stocks/README.md)
+
+## License
+
+GPL-3.0-or-later. See [LICENSE](LICENSE).

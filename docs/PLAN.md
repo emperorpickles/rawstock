@@ -38,7 +38,12 @@ decode and rendering work in WebGPU browsers; verified that no image data is
 sent to a server.
 
 ## Open questions
-- **License:** which license (permissive vs copyleft)? LICENSE not yet added.
+- **License (decided: GPL-3.0-or-later):** confirm `-or-later` vs
+  `-only`; revisit AGPL-3.0 if hosted server-side use becomes a concern;
+  license for stock definitions (e.g. CC-BY-SA-4.0) is undecided. `rawler` is
+  LGPL-2.1-only, which can be linked from a GPL-3.0 program under LGPL §6, but
+  have this confirmed before the first release. Audit the full dependency
+  tree (e.g. with `cargo deny`) once `rawler` is added.
 - **rawler vs LibRaw:** does rawler handle Fuji X-Trans/RAF well enough
   (demosaic quality, color matrices)? When to fall back to LibRaw on desktop?
 - **Stock file format:** TOML vs other; how to express tone curve, grain, and

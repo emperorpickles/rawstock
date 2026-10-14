@@ -17,8 +17,10 @@ scaffolding (see docs/PLAN.md for phases).
 - UI: TypeScript + Svelte, shared by desktop and web.
 - Look development happens in the Python sandbox (`lab/`) before porting to Rust.
 - Vocabulary: looks are "stocks"; processing a file is "developing".
-- Keep dependencies minimal (currently clap only). No LICENSE yet: the
-  license is undecided.
+- Keep dependencies minimal (currently clap only).
+- License: GPL-3.0-or-later (goal: no reuse in closed-source projects). New
+  dependencies must be GPL-3.0-compatible (MIT/Apache/BSD/LGPL are fine;
+  check before adding anything else). `rawler` is LGPL-2.1-only: OK to link.
 
 ## Layout
 `crates/rawstock-core` (decode, color, stock, render), `crates/rawstock-cli`
