@@ -15,7 +15,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use rawstock_core::decode::RawImage;
+use rawstock_core::decode::{Orientation, RawImage};
 use rawstock_core::render::{Cancelled, DevelopControl, Stage};
 use rawstock_core::session::{DRAG_LONG_EDGE, DisplayRect, PreviewSession, ScanMode};
 use rawstock_core::stock::{Stock, StockMeta};
@@ -23,6 +23,7 @@ use tauri::{AppHandle, Emitter};
 
 use crate::api::{
     ControlEdit, DevelopRequest, ProgressEvent, RenderView, SaveRequest, SessionState, StockState,
+    TurnDirection,
 };
 use crate::catalog::StockCatalog;
 use crate::frame::FrameBytes;
@@ -59,6 +60,10 @@ enum Job {
         path: PathBuf,
         epoch: u64,
         reply: Reply<()>,
+    },
+    Rotate {
+        direction: TurnDirection,
+        reply: Reply<SessionState>,
     },
     Save {
         request: SaveRequest,
@@ -153,6 +158,16 @@ impl WorkerHandle {
         wait(rx).await
     }
 
+    pub async fn rotate(&self, direction: TurnDirection) -> Result<SessionState, String> {
+        self.bump();
+        let (tx, rx) = mpsc::channel();
+        self.send(Job::Rotate {
+            direction,
+            reply: tx,
+        })?;
+        wait(rx).await
+    }
+
     pub async fn export(&self, path: PathBuf) -> Result<(), String> {
         let epoch = self.bump();
         let (tx, rx) = mpsc::channel();
@@ -238,6 +253,7 @@ impl Worker {
                 let mut progress = self.control(epoch);
                 finish(self.studio.export(path, &mut progress), reply);
             }
+            Job::Rotate { direction, reply } => finish(self.studio.rotate(direction), reply),
             Job::Save { request, reply } => finish(self.studio.save(request), reply),
         }
     }
@@ -434,26 +450,30 @@ impl Studio {
             return Err(Cancelled.into());
         }
         let image = self.render_view(request.view, request.compare, progress)?;
-        let orientation = self
-            .session
-            .as_ref()
-            .context("Open a RAW file first.")?
-            .orientation();
-        Ok(FrameBytes::from_image(request.ticket, orientation, &image))
+        Ok(FrameBytes::from_image(request.ticket, &image))
     }
 
     fn export(&mut self, path: PathBuf, progress: &mut JobControl) -> Result<()> {
         let path = DevelopPaths::ensure_jpeg(path);
         let session = self.require_ready()?;
-        let orientation = session.orientation();
         let image = session.render_full(progress)?;
         if progress.cancelled() {
             return Err(Cancelled.into());
         }
+        // The session image is already oriented. Tag 1 keeps the pixels upright.
         image
-            .write(&path, orientation)
+            .write(&path, Orientation::Normal)
             .with_context(|| format!("export {}", path.display()))?;
         Ok(())
+    }
+
+    fn rotate(&mut self, direction: TurnDirection) -> Result<SessionState> {
+        let session = self.session.as_mut().context("Open a RAW file first.")?;
+        match direction {
+            TurnDirection::Clockwise => session.rotate_clockwise()?,
+            TurnDirection::CounterClockwise => session.rotate_counterclockwise()?,
+        }
+        self.ready_state()
     }
 
     fn save(&mut self, request: SaveRequest) -> Result<StockState> {
@@ -570,7 +590,7 @@ impl Studio {
 
     fn session_state(&self, session: &PreviewSession) -> SessionState {
         let path = self.raw_path.clone().unwrap_or_default();
-        let (sensor_width, sensor_height) = session.dimensions();
+        let (sensor_width, sensor_height) = session.sensor_dimensions();
         let (display_width, display_height) = session.display_dimensions();
         SessionState {
             file_name: file_name(&path),
@@ -580,6 +600,7 @@ impl Studio {
             display_width,
             display_height,
             orientation: session.orientation().to_string(),
+            quarter_turns: session.quarter_turns(),
             stock: self.stock.as_ref().map(|stock| describe(stock, session)),
         }
     }

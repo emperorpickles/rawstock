@@ -12,13 +12,13 @@
 //!    stock with dye curves first turns those curves into the density this
 //!    step sees; every other stock passes the characteristic density through.
 //! 6. output transform: ACEScg to encoded sRGB, clipping out-of-gamut channels
-//! 7. export: orientation, an sRGB ICC profile, 8-bit JPEG or 16-bit TIFF
+//! 7. export: baked orientation (JPEG tag 1), an sRGB ICC profile, 8-bit JPEG or 16-bit TIFF
 //!
 //! A GPU path is not part of this pipeline. The grain hash is integer-only so
 //! a later WGSL port can match it bit for bit.
 
 use std::fs::File;
-use std::io::BufWriter;
+use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use image::codecs::jpeg::JpegEncoder;
@@ -152,6 +152,16 @@ pub enum ExportError {
     /// The output file could not be created.
     #[error("failed to create {path}")]
     Create {
+        /// The output path.
+        path: String,
+        /// The filesystem error.
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// The encoded bytes could not be written.
+    #[error("failed to write {path}")]
+    Write {
         /// The output path.
         path: String,
         /// The filesystem error.
@@ -303,10 +313,10 @@ impl Pipeline {
     /// Run exposure, halation, the film model, grain, print/scan, and the
     /// sRGB output transform.
     ///
-    /// Halation and grain run only when the parameters carry them. The result
-    /// stays in sensor orientation. [`SrgbImage::write`] applies the camera
-    /// orientation while exporting. This is the exact path: the dye scan is
-    /// never the preview lookup table.
+    /// Halation and grain run only when the parameters carry them, in whatever
+    /// orientation `image` already has. [`SrgbImage::write`] can still rotate
+    /// for a caller that held the sensor frame, and the JPEG tag is always 1.
+    /// This is the exact path: the dye scan is never the preview lookup table.
     pub fn develop(&self, image: &LinearImage) -> SrgbImage {
         self.develop_controlled(image, &mut NopControl)
             .expect("nop control does not cancel")
@@ -411,7 +421,10 @@ impl SrgbImage {
         OutputFormat::from_path(path).is_some()
     }
 
-    /// Write JPEG (8-bit) or TIFF (16-bit), oriented, with an sRGB ICC profile.
+    /// Write JPEG (8-bit) or TIFF (16-bit), with an sRGB ICC profile.
+    ///
+    /// `orientation` is baked into the samples. The JPEG EXIF orientation tag
+    /// is 1, because a second rotation would turn an upright file sideways.
     pub fn write(
         &self,
         path: impl AsRef<Path>,
@@ -433,11 +446,21 @@ impl SrgbImage {
                 let samples = quantize_u8(&self.pixels);
                 let (width, height, samples) =
                     orientation.apply_rgb(self.width, self.height, &samples);
-                let mut encoder = JpegEncoder::new_with_quality(&mut writer, 90);
+                let mut buffer = Vec::new();
+                let mut encoder = JpegEncoder::new_with_quality(&mut buffer, 90);
                 encoder.set_icc_profile(profile).map_err(ExportError::Icc)?;
                 encoder
                     .write_image(&samples, width, height, ExtendedColorType::Rgb8)
                     .map_err(|source| ExportError::Encode {
+                        path: path.display().to_string(),
+                        source,
+                    })?;
+                // Pixels are already upright. The tag stays 1 so a viewer does
+                // not rotate them a second time.
+                let stamped = ExifOrientation::stamp(&buffer);
+                writer
+                    .write_all(&stamped)
+                    .map_err(|source| ExportError::Write {
                         path: path.display().to_string(),
                         source,
                     })?;
@@ -641,6 +664,104 @@ impl OutputFormat {
     }
 }
 
+/// EXIF Orientation tag written as 1.
+///
+/// The samples are already rotated, so the tag must not ask for another turn.
+struct ExifOrientation;
+
+impl ExifOrientation {
+    fn app1() -> &'static [u8] {
+        &[
+            0xff, 0xe1, 0x00, 0x22, b'E', b'x', b'i', b'f', 0x00, 0x00, b'I', b'I', 0x2a, 0x00,
+            0x08, 0x00, 0x00, 0x00, 0x01, 0x00, 0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00,
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ]
+    }
+
+    fn stamp(jpeg: &[u8]) -> Vec<u8> {
+        if jpeg.len() < 2 || jpeg[0] != 0xff || jpeg[1] != 0xd8 {
+            return jpeg.to_vec();
+        }
+        let segment = Self::app1();
+        let mut out = Vec::with_capacity(jpeg.len() + segment.len());
+        out.extend_from_slice(&jpeg[..2]);
+        out.extend_from_slice(segment);
+        out.extend_from_slice(&jpeg[2..]);
+        out
+    }
+
+    #[cfg(test)]
+    fn read(jpeg: &[u8]) -> Option<u16> {
+        let mut index = 0;
+        while index + 4 < jpeg.len() {
+            if jpeg[index] != 0xff {
+                index += 1;
+                continue;
+            }
+            let marker = jpeg[index + 1];
+            if marker == 0xd8 || marker == 0xd9 || (0xd0..=0xd7).contains(&marker) {
+                index += 2;
+                continue;
+            }
+            let length = u16::from_be_bytes([jpeg[index + 2], jpeg[index + 3]]) as usize;
+            if length < 2 || index + 2 + length > jpeg.len() {
+                return None;
+            }
+            if marker == 0xe1
+                && let Some(value) = Self::orientation_in_exif(&jpeg[index + 4..index + 2 + length])
+            {
+                return Some(value);
+            }
+            index += 2 + length;
+        }
+        None
+    }
+
+    #[cfg(test)]
+    fn orientation_in_exif(segment: &[u8]) -> Option<u16> {
+        if segment.len() < 14 || &segment[..6] != b"Exif\0\0" {
+            return None;
+        }
+        let tiff = &segment[6..];
+        let little = match &tiff[..2] {
+            b"II" => true,
+            b"MM" => false,
+            _ => return None,
+        };
+        let u16_at = |offset: usize| -> Option<u16> {
+            let bytes = tiff.get(offset..offset + 2)?;
+            Some(if little {
+                u16::from_le_bytes([bytes[0], bytes[1]])
+            } else {
+                u16::from_be_bytes([bytes[0], bytes[1]])
+            })
+        };
+        let u32_at = |offset: usize| -> Option<u32> {
+            let bytes = tiff.get(offset..offset + 4)?;
+            Some(if little {
+                u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+            } else {
+                u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+            })
+        };
+        if u16_at(2)? != 42 {
+            return None;
+        }
+        let mut entry = u32_at(4)? as usize;
+        let count = u16_at(entry)? as usize;
+        entry += 2;
+        for _ in 0..count {
+            let tag = u16_at(entry)?;
+            let kind = u16_at(entry + 2)?;
+            if tag == 0x0112 && kind == 3 {
+                return u16_at(entry + 8);
+            }
+            entry += 12;
+        }
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -769,6 +890,8 @@ mod tests {
         let profile = decoder.icc_profile().unwrap().expect("jpeg icc");
         assert_eq!(&profile[36..40], b"acsp");
         assert_eq!(&profile[16..20], b"RGB ");
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(ExifOrientation::read(&bytes), Some(1));
         let _ = std::fs::remove_file(path);
     }
 

@@ -1,13 +1,14 @@
 //! Cached develop session for the live tuner.
 //!
 //! The session holds one full-resolution ACEScg image and a fit proxy. It
-//! does not open files, draw a window, or start a thread. A tweak dirties
-//! the first stage it affects; earlier buffers stay. The fit view's dye
-//! scan can use a lookup table. Export and a settled 100% crop use the
-//! exact scan.
+//! does not open files, draw a window, or start a thread. The camera
+//! orientation, and any manual quarter-turn, is baked in after demosaic and
+//! before the proxy. A tweak dirties the first stage it affects; earlier
+//! buffers stay. The fit view's dye scan can use a lookup table. Export and
+//! a settled 100% crop use the exact scan.
 
 use crate::color::{DevelopError, LinearImage};
-use crate::decode::Orientation;
+use crate::decode::{FrameOrientation, Orientation};
 use crate::render::{self, Cancelled, DevelopControl, Fidelity, Parameters, SrgbImage, Stage};
 use crate::stock::{FilmModel, Grain, Halation, ModelError};
 
@@ -31,6 +32,32 @@ pub struct DisplayRect {
     pub width: u32,
     /// Height in the oriented image.
     pub height: u32,
+}
+
+impl DisplayRect {
+    /// Intersection with an image of `width` by `height`. Empty when it misses.
+    pub fn clamped(self, width: u32, height: u32) -> Self {
+        if width == 0
+            || height == 0
+            || self.width == 0
+            || self.height == 0
+            || self.x >= width
+            || self.y >= height
+        {
+            return Self {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            };
+        }
+        Self {
+            x: self.x,
+            y: self.y,
+            width: self.width.min(width - self.x),
+            height: self.height.min(height - self.y),
+        }
+    }
 }
 
 /// How a render treats spectral dye curves.
@@ -59,10 +86,15 @@ pub struct HalationControls {
 ///
 /// `new` does not copy a stock in. Call [`Self::set_parameters`] before
 /// rendering. The full ACEScg buffer stays until the session is dropped;
-/// switching stocks does not decode again.
+/// switching stocks does not decode again. Turning the image reuses that
+/// buffer and rebuilds the proxy.
 pub struct PreviewSession {
+    /// Demosaic size, kept so a turn can report the sensor frame.
+    sensor_width: u32,
+    sensor_height: u32,
+    /// Camera tag plus manual quarter-turns. Already baked into `full`.
+    view: FrameOrientation,
     full: LinearImage,
-    orientation: Orientation,
     proxy_long_edge: u32,
     proxy: LinearImage,
     current: Option<LoadedStock>,
@@ -268,17 +300,26 @@ impl RegionCache {
 impl PreviewSession {
     /// Cache `linear` and build the fit proxy.
     ///
-    /// `proxy_long_edge` is the proxy's longer side in pixels. The image
-    /// stays in sensor orientation.
+    /// `orientation` is the camera EXIF tag. It is applied to `linear`
+    /// before the proxy, so portrait files are already upright and grain
+    /// is generated in that frame. `proxy_long_edge` is the proxy's longer
+    /// side in those oriented pixels.
     pub fn new(
         linear: LinearImage,
         orientation: Orientation,
         proxy_long_edge: u32,
     ) -> Result<Self, DevelopError> {
-        let proxy = linear.area_downsample(proxy_long_edge)?;
+        let sensor_width = linear.width();
+        let sensor_height = linear.height();
+        let view = FrameOrientation::new(orientation);
+        let mut full = linear;
+        full.apply_orientation(view.composed());
+        let proxy = full.area_downsample(proxy_long_edge)?;
         Ok(Self {
-            full: linear,
-            orientation,
+            sensor_width,
+            sensor_height,
+            view,
+            full,
             proxy_long_edge,
             proxy,
             current: None,
@@ -291,20 +332,59 @@ impl PreviewSession {
         })
     }
 
-    /// Sensor width and height.
+    /// Width and height of the oriented working image.
     pub fn dimensions(&self) -> (u32, u32) {
         (self.full.width(), self.full.height())
     }
 
-    /// Width and height after the camera orientation.
-    pub fn display_dimensions(&self) -> (u32, u32) {
-        self.orientation
-            .dimensions(self.full.width(), self.full.height())
+    /// Width and height of the demosaiced frame, before orientation.
+    pub fn sensor_dimensions(&self) -> (u32, u32) {
+        (self.sensor_width, self.sensor_height)
     }
 
-    /// Camera orientation. Caches stay in sensor orientation.
+    /// Width and height of the oriented image the preview and export share.
+    pub fn display_dimensions(&self) -> (u32, u32) {
+        self.dimensions()
+    }
+
+    /// Camera tag composed with the manual quarter-turns.
     pub fn orientation(&self) -> Orientation {
-        self.orientation
+        self.view.composed()
+    }
+
+    /// EXIF orientation stored in the file.
+    pub fn camera_orientation(&self) -> Orientation {
+        self.view.camera()
+    }
+
+    /// Clockwise quarter-turns added on top of the camera tag, in `0..4`.
+    pub fn quarter_turns(&self) -> u8 {
+        self.view.turns()
+    }
+
+    /// Turn the working image 90° clockwise and rebuild the proxy.
+    ///
+    /// The demosaic buffer is not decoded again. Stage caches are dropped
+    /// because every pixel moved.
+    pub fn rotate_clockwise(&mut self) -> Result<(), DevelopError> {
+        self.reorient(self.view.rotate_clockwise())
+    }
+
+    /// Turn the working image 90° counter-clockwise and rebuild the proxy.
+    pub fn rotate_counterclockwise(&mut self) -> Result<(), DevelopError> {
+        self.reorient(self.view.rotate_counterclockwise())
+    }
+
+    fn reorient(&mut self, next: FrameOrientation) -> Result<(), DevelopError> {
+        let delta = self.view.delta_to(next);
+        self.full.apply_orientation(delta);
+        self.view = next;
+        self.proxy = self.full.area_downsample(self.proxy_long_edge)?;
+        self.proxy_cache = FrameCache::fresh();
+        self.baseline_proxy = FrameCache::fresh();
+        self.region = None;
+        self.baseline_region = None;
+        Ok(())
     }
 
     /// Proxy width and height at the current long edge.
@@ -555,10 +635,11 @@ impl PreviewSession {
         self.render_fit(true, control)
     }
 
-    /// 100% crop. `rect` is in display space. `scan` selects the dye path.
+    /// 100% crop. `rect` is in the oriented image. `scan` selects the dye path.
     ///
-    /// Halation's sigma and grain's cell come from the full frame. Grain's
-    /// hash uses the crop origin in that frame.
+    /// Halation's sigma and grain's cell come from the oriented full frame.
+    /// Grain's hash uses the crop origin in that frame, so the crop matches
+    /// the same pixels of an export.
     pub fn render_region(
         &mut self,
         rect: DisplayRect,
@@ -621,14 +702,8 @@ impl PreviewSession {
         control: &mut dyn DevelopControl,
     ) -> Result<SrgbImage, Cancelled> {
         let parameters = self.stock(baseline).parameters.clone();
-        let (origin_x, origin_y, width, height) = self.orientation.display_to_sensor(
-            self.full.width(),
-            self.full.height(),
-            rect.x,
-            rect.y,
-            rect.width,
-            rect.height,
-        );
+        let rect = rect.clamped(self.full.width(), self.full.height());
+        let (origin_x, origin_y, width, height) = (rect.x, rect.y, rect.width, rect.height);
         if width == 0 || height == 0 {
             return Ok(SrgbImage::from_encoded(0, 0, Vec::new(), Fidelity::Exact));
         }

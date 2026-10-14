@@ -167,6 +167,84 @@ impl Orientation {
         (out_width, out_height, out)
     }
 
+    /// EXIF Orientation tag, 1 through 8. [`Self::Unknown`] is reported as 1.
+    pub fn exif_value(self) -> u16 {
+        match self {
+            Self::Normal | Self::Unknown => 1,
+            Self::HorizontalFlip => 2,
+            Self::Rotate180 => 3,
+            Self::VerticalFlip => 4,
+            Self::Transpose => 5,
+            Self::Rotate90 => 6,
+            Self::Transverse => 7,
+            Self::Rotate270 => 8,
+        }
+    }
+
+    /// EXIF Orientation tag. A value outside 1..=8 is [`Self::Unknown`].
+    pub fn from_exif(value: u16) -> Self {
+        match value {
+            1 => Self::Normal,
+            2 => Self::HorizontalFlip,
+            3 => Self::Rotate180,
+            4 => Self::VerticalFlip,
+            5 => Self::Transpose,
+            6 => Self::Rotate90,
+            7 => Self::Transverse,
+            8 => Self::Rotate270,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// Pixels stay where they are. A missing tag is included.
+    pub fn is_identity(self) -> bool {
+        matches!(self, Self::Normal | Self::Unknown)
+    }
+
+    /// `turns` clockwise quarter-turns. Zero is [`Self::Normal`].
+    pub fn quarters(turns: u8) -> Self {
+        match turns % 4 {
+            0 => Self::Normal,
+            1 => Self::Rotate90,
+            2 => Self::Rotate180,
+            _ => Self::Rotate270,
+        }
+    }
+
+    /// This orientation, then `next`, in the image `next` sees.
+    ///
+    /// Manual rotation uses this: the camera tag runs first, and a quarter
+    /// turn is applied to that upright image.
+    pub fn then(self, next: Self) -> Self {
+        if next.is_identity() {
+            return self.canonical();
+        }
+        if self.is_identity() {
+            return next.canonical();
+        }
+        let source = Self::probe();
+        let (width, height, once) = self.apply_rgb(Self::PROBE_WIDTH, Self::PROBE_HEIGHT, &source);
+        let (_, _, twice) = next.apply_rgb(width, height, &once);
+        Self::matching(&source, &twice)
+    }
+
+    /// Orientation that puts pixels back where this one moved them.
+    pub fn inverse(self) -> Self {
+        match self {
+            Self::Rotate90 => Self::Rotate270,
+            Self::Rotate270 => Self::Rotate90,
+            other => other.canonical(),
+        }
+    }
+
+    fn canonical(self) -> Self {
+        if self == Self::Unknown {
+            Self::Normal
+        } else {
+            self
+        }
+    }
+
     fn transposes(self) -> bool {
         matches!(
             self,
@@ -186,6 +264,99 @@ impl Orientation {
             Self::Rotate270 => (true, true, false),
             Self::Transverse => (true, true, true),
         }
+    }
+
+    const PROBE_WIDTH: u32 = 3;
+    const PROBE_HEIGHT: u32 = 2;
+
+    /// 3×2 image whose red channel is the pixel index. Wide enough that a
+    /// transpose is not the same byte string as the source.
+    fn probe() -> Vec<u8> {
+        let mut pixels = Vec::with_capacity(18);
+        for id in 0..6u8 {
+            pixels.extend([id, 0, 0]);
+        }
+        pixels
+    }
+
+    fn matching(source: &[u8], displayed: &[u8]) -> Self {
+        for candidate in Self::catalog() {
+            let (_, _, out) = candidate.apply_rgb(Self::PROBE_WIDTH, Self::PROBE_HEIGHT, source);
+            if out == displayed {
+                return candidate;
+            }
+        }
+        Self::Normal
+    }
+
+    fn catalog() -> [Self; 8] {
+        [
+            Self::Normal,
+            Self::HorizontalFlip,
+            Self::Rotate180,
+            Self::VerticalFlip,
+            Self::Transpose,
+            Self::Rotate90,
+            Self::Transverse,
+            Self::Rotate270,
+        ]
+    }
+}
+
+/// Camera orientation plus the clockwise quarter-turns added in the tuner.
+///
+/// The camera tag is applied first, so a portrait file opens upright. Each
+/// manual turn is another 90° on that image. [`Self::delta_to`] is the
+/// geometric step between two of these: the demosaic buffer is not decoded
+/// again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameOrientation {
+    camera: Orientation,
+    turns: u8,
+}
+
+impl FrameOrientation {
+    /// No manual turn.
+    pub fn new(camera: Orientation) -> Self {
+        Self { camera, turns: 0 }
+    }
+
+    /// Orientation tag stored in the file, including [`Orientation::Unknown`].
+    pub fn camera(self) -> Orientation {
+        self.camera
+    }
+
+    /// Clockwise quarter-turns added on top of the camera tag, in `0..4`.
+    pub fn turns(self) -> u8 {
+        self.turns
+    }
+
+    /// One EXIF orientation: camera tag, then the manual turns.
+    pub fn composed(self) -> Orientation {
+        self.camera
+            .canonical()
+            .then(Orientation::quarters(self.turns))
+    }
+
+    /// One more clockwise quarter-turn.
+    pub fn rotate_clockwise(self) -> Self {
+        Self {
+            turns: (self.turns + 1) % 4,
+            ..self
+        }
+    }
+
+    /// One more counter-clockwise quarter-turn.
+    pub fn rotate_counterclockwise(self) -> Self {
+        Self {
+            turns: (self.turns + 3) % 4,
+            ..self
+        }
+    }
+
+    /// Transform that takes pixels already oriented as `self` into `next`.
+    pub fn delta_to(self, next: Self) -> Orientation {
+        self.composed().inverse().then(next.composed())
     }
 }
 
@@ -282,9 +453,10 @@ impl RawImage {
         self.cfa
     }
 
-    /// Display orientation stored in the file.
+    /// EXIF Orientation tag, as `rawler` read it from the file.
     ///
-    /// Sensor samples are not rotated. Export applies this to the pixels.
+    /// RAF and ProRAW DNG both carry the tag. Sensor samples are not rotated;
+    /// [`Orientation::apply_rgb`] and [`crate::session::PreviewSession`] apply it.
     pub fn orientation(&self) -> Orientation {
         self.orientation
     }
@@ -546,5 +718,99 @@ mod tests {
         let (width, height, out) = Orientation::Rotate90.apply_rgb(2, 1, &pixels);
         assert_eq!((width, height), (1, 2));
         assert_eq!(out, [1, 0, 0, 0, 1, 0]);
+    }
+
+    #[test]
+    fn exif_tags_round_trip_through_all_eight_values() {
+        for value in 1..=8 {
+            let orientation = Orientation::from_exif(value);
+            assert_eq!(orientation.exif_value(), value, "tag {value}");
+            assert_eq!(
+                Orientation::from_exif(orientation.exif_value()),
+                orientation
+            );
+        }
+        assert_eq!(Orientation::from_exif(0), Orientation::Unknown);
+        assert_eq!(Orientation::from_exif(9), Orientation::Unknown);
+        assert_eq!(Orientation::Unknown.exif_value(), 1);
+    }
+
+    #[test]
+    fn quarter_turns_compose_after_every_camera_orientation() {
+        let source = Orientation::probe();
+        let cameras = [
+            Orientation::Normal,
+            Orientation::HorizontalFlip,
+            Orientation::Rotate180,
+            Orientation::VerticalFlip,
+            Orientation::Transpose,
+            Orientation::Rotate90,
+            Orientation::Transverse,
+            Orientation::Rotate270,
+            Orientation::Unknown,
+        ];
+        for camera in cameras {
+            let (width, height, upright) =
+                camera.apply_rgb(Orientation::PROBE_WIDTH, Orientation::PROBE_HEIGHT, &source);
+            let mut view = FrameOrientation::new(camera);
+            for turns in 0..4u8 {
+                assert_eq!(view.turns(), turns, "{camera} after {turns}");
+                let (turned_w, turned_h, turned) =
+                    Orientation::quarters(turns).apply_rgb(width, height, &upright);
+                let (got_w, got_h, got) = view.composed().apply_rgb(
+                    Orientation::PROBE_WIDTH,
+                    Orientation::PROBE_HEIGHT,
+                    &source,
+                );
+                assert_eq!(
+                    (got_w, got_h),
+                    (turned_w, turned_h),
+                    "{camera} turns {turns}"
+                );
+                assert_eq!(got, turned, "{camera} turns {turns}");
+                view = view.rotate_clockwise();
+            }
+            assert_eq!(view.turns(), 0);
+            assert_eq!(view.composed(), camera.canonical());
+        }
+    }
+
+    #[test]
+    fn every_orientation_inverts_and_a_manual_turn_is_a_delta() {
+        let source = Orientation::probe();
+        for orientation in Orientation::catalog() {
+            let (width, height, once) =
+                orientation.apply_rgb(Orientation::PROBE_WIDTH, Orientation::PROBE_HEIGHT, &source);
+            let (back_w, back_h, back) = orientation.inverse().apply_rgb(width, height, &once);
+            assert_eq!(
+                (back_w, back_h),
+                (Orientation::PROBE_WIDTH, Orientation::PROBE_HEIGHT)
+            );
+            assert_eq!(back, source, "{orientation}");
+            assert_eq!(
+                orientation.then(orientation.inverse()),
+                Orientation::Normal,
+                "{orientation}"
+            );
+        }
+
+        let camera = Orientation::Rotate90;
+        let start = FrameOrientation::new(camera);
+        let next = start.rotate_clockwise();
+        let (width, height, current) = start.composed().apply_rgb(
+            Orientation::PROBE_WIDTH,
+            Orientation::PROBE_HEIGHT,
+            &source,
+        );
+        let (_, _, stepped) = start.delta_to(next).apply_rgb(width, height, &current);
+        let (_, _, direct) =
+            next.composed()
+                .apply_rgb(Orientation::PROBE_WIDTH, Orientation::PROBE_HEIGHT, &source);
+        assert_eq!(stepped, direct);
+        assert_eq!(next.composed(), Orientation::Rotate180);
+        assert_eq!(
+            start.rotate_counterclockwise().composed(),
+            Orientation::Normal
+        );
     }
 }
