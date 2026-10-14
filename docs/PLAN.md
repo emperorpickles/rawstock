@@ -1,7 +1,8 @@
 # Plan
 
 Scaffolding is done: the workspace builds and tests, and `rawstock develop`
-is a stub. Phases from here:
+is a stub. What each pipeline stage does in the code, and which open pull
+request adds it, is in [Film pipeline](FILM_PIPELINE.md). Phases from here:
 
 ## Phase 1: Decode
 **Goal:** `rawler` decode for the first cameras, plus linear dumps for the lab.
