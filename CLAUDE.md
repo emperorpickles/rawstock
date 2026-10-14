@@ -32,7 +32,7 @@ scaffolding (see docs/PLAN.md for phases).
 
 ## Commands
 - `cargo build` / `cargo test` (workspace, edition 2024)
-- `cargo run -p rawstock-cli -- develop IMG.RAF --stock <name> -o out.jpg`
+- `cargo run -p rawstock-cli -- develop IMG.RAF --stock <stock.toml> -o out.jpg`
 - Lab: `cd lab && python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt`
 
 ## Rules

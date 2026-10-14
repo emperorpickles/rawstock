@@ -13,3 +13,6 @@ path = "src/main.rs"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 rawstock-core = { path = "../rawstock-core" }
+
+[dev-dependencies]
+sha2 = "0.10"

@@ -26,8 +26,8 @@ use crate::stock::{Curve, FilmModel, ModelError};
 
 /// Parameters for one development.
 ///
-/// This is a plain struct. Nothing here reads a stock file; a caller builds
-/// the values. Tests keep their own neutral set rather than a library default.
+/// A plain struct. [`Stock::load`](crate::stock::Stock::load) fills one from a
+/// stock file. Tests build their own values rather than a library default.
 #[derive(Debug, Clone)]
 pub struct Parameters {
     exposure_ev: f32,
