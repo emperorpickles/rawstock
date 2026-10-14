@@ -8,29 +8,52 @@ thin layer over it:
 ```
 rawstock-core (Rust)
  ├─ rawstock-cli      native binary `rawstock`          (Phase 2)
- ├─ apps/desktop      Tauri, native core + wgpu         (Phase 4)
- └─ apps/web          core → WebAssembly, WebGPU        (Phase 5)
+ ├─ apps/desktop      Tauri, native core + wgpu         (Phase 5)
+ └─ apps/web          core → WebAssembly, WebGPU        (Phase 6)
 ```
 
 The desktop and web UIs are TypeScript + Svelte, shared between both builds.
 The web app processes images entirely client-side; nothing is uploaded.
 
+## Film model
+
+`FilmModel` maps scene exposure to layer densities. `Parametric` and
+`Spectral` are variants of one enum. Prefer the enum over a trait object
+unless there is a stated reason not to.
+
+A stock is that model, stored as data (see [stocks/](../stocks/README.md)).
+A 3D LUT is only an optional bake for `.cube` export or preview caching.
+Desktop hardware is the target, so the model runs directly.
+
 ## Pipeline
 
-1. **Decode** (`decode`): RAW file → sensor data and metadata. Starts with the
-   pure-Rust `rawler` (easiest for wasm); LibRaw is the desktop fallback if
-   Fuji X-Trans/RAF support falls short. Includes demosaicing.
-2. **Linear color** (`color`): camera RGB → a linear, wide-gamut working
-   space. All creative work happens in linear light.
-3. **Stock** (`stock`, `render`): apply the stock: base 3D LUT (.cube), tone
-   curve, grain, halation. Stocks are data files, not code (see
-   [stocks/](../stocks/README.md)).
-4. **Output transform** (`color`): working space → output space (sRGB,
-   Display P3, ...) with encoding, then export (JPEG/TIFF).
+CPU, GPU, preview, and export share this order:
+
+1. **Decode** (`decode`). `rawler` only: pure Rust, so native and wasm use the
+   same decoder. LibRaw is a contingency outside core, never a core
+   dependency. First cameras are Fuji X-Trans RAF and iPhone ProRAW DNG.
+2. **As-shot white balance and exposure.**
+3. **Linear ACEScg** (`color`). Later stages stay in this working space until
+   the output transform.
+4. **Halation and bloom**, on linear exposure.
+5. **Film model** (`stock`). Characteristic (D-logH) curves produce per-layer
+   density, then interlayer coupling.
+6. **Grain**, in density space, scaled to the physical frame size. A seeded
+   coordinate hash makes CPU, GPU, preview, and export deterministic.
+7. **Print/scan.**
+8. **Gamut compression and output transform** (`color`), into the output
+   encoding (sRGB, Display P3, and others).
+9. **Export.**
+
+## Lab
+
+Core writes a linear ACEScg dump after as-shot white balance and exposure.
+The Python lab reads that dump and compares model math with Rust, within a
+numeric tolerance. See [lab/](../lab/README.md).
 
 ## Why wgpu
 
 wgpu runs one set of shaders (WGSL) on Metal, DX12, and Vulkan natively and on
-WebGPU in the browser, so desktop and web share the same renderer. A CPU
-reference path in `render` is the source of truth for correctness; the GPU path
-is tested for parity against it within a tolerance.
+WebGPU in the browser, so desktop and web share the same renderer. The CPU
+path is the source of truth; the GPU path is tested for parity against it,
+including the grain hash.
