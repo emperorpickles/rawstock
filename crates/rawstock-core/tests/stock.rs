@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rawstock_core::render::Parameters;
-use rawstock_core::stock::{FilmModel, ModelError, Stock, StockError, StockModel};
+use rawstock_core::stock::{FilmModel, Grain, ModelError, Stock, StockError, StockModel};
 
 fn neutral_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stocks/neutral.stock.toml")
@@ -56,6 +56,8 @@ fn example_stock_round_trips_into_parameters() {
         &[-1.5, -0.5, 0.2, 1.0, 2.0],
         &[0.04, 0.20, 0.70, 1.50, 2.20],
     );
+    assert!(parameters.grain().is_none());
+    assert!(parameters.halation().is_none());
 }
 
 #[test]
@@ -153,6 +155,88 @@ fn rejects_arrays_of_different_lengths() {
         }
     ));
 }
+
+#[test]
+fn grain_and_halation_tables_load_on_schema_1() {
+    let stock = load_text(&format!("{}{GRAIN_AND_HALATION}", neutral_text())).unwrap();
+    assert_eq!(stock.schema_version(), 1);
+    let grain = stock.parameters().grain().expect("grain");
+    assert_eq!(grain.frame_mm(), Grain::FRAME_MM);
+    assert_eq!(grain.seed(), 7);
+    let red: Vec<_> = grain.layers()[0].points().collect();
+    assert_eq!(red, vec![(0.0, 2.0), (1.0, 5.0), (2.0, 3.5)]);
+    // RMS is allowed to fall after the peak. That is the Vision3 curve shape.
+    assert!((grain.layers()[0].eval(1.0) - 5.0).abs() < 1.0e-5);
+    assert!((grain.layers()[0].eval(1.5) - 4.25).abs() < 1.0e-4);
+    assert!((grain.layers()[2].eval(0.0) - 4.0).abs() < 1.0e-5);
+
+    let halation = stock.parameters().halation().expect("halation");
+    assert!((halation.threshold() - 1.25).abs() < 1.0e-6);
+    assert!((halation.radius() - 0.02).abs() < 1.0e-6);
+    assert_eq!(halation.weight(), [0.8, 0.15, 0.05]);
+    let short = 400u32;
+    assert!((halation.sigma_px(short * 2, short) - 0.02 * short as f32).abs() < 1.0e-4);
+}
+
+#[test]
+fn omitted_grain_frame_uses_35_mm() {
+    let text = neutral_text() + GRAIN_AND_HALATION;
+    let text = text.replace("frame_mm = 35\n", "");
+    let stock = load_text(&text).unwrap();
+    assert_eq!(
+        stock.parameters().grain().unwrap().frame_mm(),
+        Grain::FRAME_MM
+    );
+}
+
+#[test]
+fn rejects_a_falling_granularity_density() {
+    let text = (neutral_text() + GRAIN_AND_HALATION).replace(
+        "density = [0.0, 1.0, 2.0]\nrms = [2.0, 5.0, 3.5]",
+        "density = [0.0, 1.0, 1.0]\nrms = [2.0, 5.0, 3.5]",
+    );
+    let err = load_text(&text).unwrap_err();
+    assert!(matches!(
+        err,
+        StockError::Grain {
+            layer: "red",
+            source: ModelError::GranularityOrder,
+        }
+    ));
+}
+
+#[test]
+fn rejects_a_negative_halation_radius() {
+    let text = (neutral_text() + GRAIN_AND_HALATION).replace("radius = 0.02", "radius = -0.02");
+    let err = load_text(&text).unwrap_err();
+    assert!(matches!(
+        err,
+        StockError::Halation(ModelError::HalationParameters)
+    ));
+}
+
+const GRAIN_AND_HALATION: &str = r#"
+[grain]
+frame_mm = 35
+seed = 7
+
+[grain.red]
+density = [0.0, 1.0, 2.0]
+rms = [2.0, 5.0, 3.5]
+
+[grain.green]
+density = [0, 1, 2]
+rms = [2, 4, 3]
+
+[grain.blue]
+density = [0.0, 2.0]
+rms = [4.0, 4.0]
+
+[halation]
+threshold = 1.25
+radius = 0.02
+weight = [0.8, 0.15, 0.05]
+"#;
 
 #[test]
 fn rejects_an_unknown_field() {

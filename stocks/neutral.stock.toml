@@ -20,6 +20,9 @@ print_exposure = 0.9
 # [coupling]
 # matrix = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
 
+# Optional grain and halation. This reference leaves both out, so a gray
+# stays gray. See stocks/README.md for the table shape.
+
 [red]
 log_exposure = [-3.5, -2.0, -0.7, 0.0, 0.6, 1.5]
 density = [0.15, 0.30, 0.70, 1.15, 1.70, 2.05]

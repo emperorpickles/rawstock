@@ -3,12 +3,17 @@
 //! Stages, in order:
 //!
 //! 1. exposure, in scene-linear ACEScg
-//! 2. [`FilmModel`](crate::stock::FilmModel): exposure to per-layer density
-//! 3. print/scan: density back to display-referred linear RGB
-//! 4. output transform: ACEScg to encoded sRGB, clipping out-of-gamut channels
-//! 5. export: orientation, an sRGB ICC profile, 8-bit JPEG or 16-bit TIFF
+//! 2. [`Halation`](crate::stock::Halation), when the stock sets it: a threshold,
+//!    a wide blur, and a red-weighted add-back, still in scene-linear exposure
+//! 3. [`FilmModel`](crate::stock::FilmModel): exposure to per-layer density
+//! 4. [`Grain`](crate::stock::Grain), when the stock sets it: per-layer density
+//!    noise
+//! 5. print/scan: density back to display-referred linear RGB
+//! 6. output transform: ACEScg to encoded sRGB, clipping out-of-gamut channels
+//! 7. export: orientation, an sRGB ICC profile, 8-bit JPEG or 16-bit TIFF
 //!
-//! Grain, halation, and a GPU path are not part of this pipeline.
+//! A GPU path is not part of this pipeline. The grain hash is integer-only so
+//! a later WGSL port can match it bit for bit.
 
 use std::fs::File;
 use std::io::BufWriter;
@@ -22,7 +27,7 @@ use thiserror::Error;
 use crate::color::{self, LinearImage};
 use crate::decode::Orientation;
 use crate::icc;
-use crate::stock::{Curve, FilmModel, ModelError};
+use crate::stock::{Curve, FilmModel, Grain, Halation, ModelError};
 
 /// Parameters for one development.
 ///
@@ -31,7 +36,9 @@ use crate::stock::{Curve, FilmModel, ModelError};
 #[derive(Debug, Clone)]
 pub struct Parameters {
     exposure_ev: f32,
+    halation: Option<Halation>,
     film: FilmModel,
+    grain: Option<Grain>,
     print_exposure: f32,
     print_curve: Curve,
 }
@@ -106,10 +113,24 @@ impl Parameters {
         }
         Ok(Self {
             exposure_ev,
+            halation: None,
             film,
+            grain: None,
             print_exposure,
             print_curve,
         })
+    }
+
+    /// Attach highlight halation. It runs after exposure and before the film model.
+    pub fn with_halation(mut self, halation: Halation) -> Self {
+        self.halation = Some(halation);
+        self
+    }
+
+    /// Attach density grain. It runs after the film model and before print.
+    pub fn with_grain(mut self, grain: Grain) -> Self {
+        self.grain = Some(grain);
+        self
     }
 
     /// Exposure adjustment in stops.
@@ -117,9 +138,19 @@ impl Parameters {
         self.exposure_ev
     }
 
+    /// Highlight halation, when the stock sets it.
+    pub fn halation(&self) -> Option<&Halation> {
+        self.halation.as_ref()
+    }
+
     /// The film model that turns exposure into density.
     pub fn film(&self) -> &FilmModel {
         &self.film
+    }
+
+    /// Density grain, when the stock sets it.
+    pub fn grain(&self) -> Option<&Grain> {
+        self.grain.as_ref()
     }
 
     /// Log-exposure offset of the print stage.
@@ -139,14 +170,22 @@ impl Pipeline {
         Self { parameters }
     }
 
-    /// Run exposure, the film model, print/scan, and the sRGB output transform.
+    /// Run exposure, halation, the film model, grain, print/scan, and the
+    /// sRGB output transform.
     ///
-    /// The result stays in sensor orientation. [`SrgbImage::write`] applies
-    /// the camera orientation while exporting.
+    /// Halation and grain run only when the parameters carry them. The result
+    /// stays in sensor orientation. [`SrgbImage::write`] applies the camera
+    /// orientation while exporting.
     pub fn develop(&self, image: &LinearImage) -> SrgbImage {
         let mut exposure = image.pixels().to_vec();
         apply_exposure(&mut exposure, self.parameters.exposure_ev);
-        let density = self.parameters.film.density(&exposure);
+        if let Some(halation) = &self.parameters.halation {
+            halation.apply(&mut exposure, image.width(), image.height());
+        }
+        let mut density = self.parameters.film.density(&exposure);
+        if let Some(grain) = &self.parameters.grain {
+            grain.apply(&mut density, image.width(), image.height());
+        }
         let linear = print_scan(
             self.parameters.print_exposure,
             &self.parameters.print_curve,
@@ -314,7 +353,7 @@ impl OutputFormat {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stock::{Curve, FilmModel, Parametric};
+    use crate::stock::{Curve, FilmModel, Grain, Granularity, Halation, Parametric};
     use image::ImageDecoder;
 
     /// Neutral parameters used only by tests. The same curve on every layer
@@ -352,6 +391,42 @@ mod tests {
             bright > dark + 0.05,
             "print did not stay positive: dark {dark}, bright {bright}"
         );
+    }
+
+    #[test]
+    fn halation_sees_exposure_and_grain_repeats() {
+        let pixels = vec![0.6_f32; 8 * 8 * 3];
+        let image = LinearImage::new(8, 8, pixels).unwrap();
+        let halation = Halation::new(1.0, 0.0, [0.8, 0.1, 0.0]).unwrap();
+        let grain = flat_grain(4.0);
+
+        // 0.6 stays under the threshold, so halation is a no-op.
+        let plain = Pipeline::new(neutral()).develop(&image);
+        let with_halation =
+            Pipeline::new(neutral().with_halation(halation.clone())).develop(&image);
+        assert_eq!(plain.pixels(), with_halation.pixels());
+
+        // +1 stop lifts 0.6 to 1.2, which is above the threshold.
+        let exposed = Pipeline::new(neutral_at(1.0)).develop(&image);
+        let exposed_halation =
+            Pipeline::new(neutral_at(1.0).with_halation(halation)).develop(&image);
+        assert_ne!(exposed.pixels(), exposed_halation.pixels());
+
+        let once = Pipeline::new(neutral().with_grain(grain.clone())).develop(&image);
+        let twice = Pipeline::new(neutral().with_grain(grain)).develop(&image);
+        assert_eq!(once.pixels(), twice.pixels());
+        assert_ne!(once.pixels(), plain.pixels());
+    }
+
+    fn neutral_at(exposure_ev: f32) -> Parameters {
+        let mut parameters = neutral();
+        parameters.exposure_ev = exposure_ev;
+        parameters
+    }
+
+    fn flat_grain(rms: f32) -> Grain {
+        let layer = Granularity::new([(0.0, rms), (3.0, rms)]).unwrap();
+        Grain::new(Grain::FRAME_MM, 1, [layer.clone(), layer.clone(), layer]).unwrap()
     }
 
     #[test]

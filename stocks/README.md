@@ -10,8 +10,9 @@ there is a stated reason not to. Names must be original (no trademarked film
 names).
 
 `rawstock develop` loads one file into the existing
-[`Parameters`](../crates/rawstock-core/src/render.rs) struct: exposure, a
-parametric film model, print exposure, and a print curve.
+[`Parameters`](../crates/rawstock-core/src/render.rs) struct: exposure,
+optional halation, a parametric film model, optional grain, print exposure,
+and a print curve.
 
 ## Schema 1
 
@@ -37,6 +38,26 @@ density = [0.15, 0.30]        # density, must not decrease
 # the log-exposure column vector before the curves.
 # [coupling]
 # matrix = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+
+# Optional. Omit the whole table for no grain. frame_mm is the physical
+# width of the image, default 35. seed feeds the grain hash. Each layer is
+# an RMS-granularity-versus-density table: density may not decrease, rms may.
+# rms is the Kodak number, 1000 times the density standard deviation through
+# a 48 µm aperture (read Sigma D on a Vision3 sheet and multiply by 1000).
+# [grain]
+# frame_mm = 35
+# seed = 1
+# [grain.red]                     # green and blue use the same keys
+# density = [0.0, 1.0, 2.0]
+# rms = [3.0, 5.0, 4.0]
+
+# Optional. Omit the whole table for no halation. radius is the Gaussian
+# sigma as a fraction of the shorter image side. weight is the red, green,
+# and blue add-back; red is the large one.
+# [halation]
+# threshold = 1.0
+# radius = 0.02
+# weight = [0.6, 0.12, 0.04]
 ```
 
 `model` is an enum. The only tag schema 1 accepts is `parametric`. A later
@@ -44,6 +65,17 @@ density = [0.15, 0.30]        # density, must not decrease
 written today keep parsing. A spectral payload that needs new keys would
 arrive with a new `schema_version`; this reader rejects both unknown
 versions and unknown fields.
+
+`[grain]` and `[halation]` are optional schema 1 tables. Leaving them out
+is the same file older stocks already use, so `schema_version` stays 1.
+`[grain]` holds one RMS-granularity-versus-density table per layer, the
+shape of a Kodak Vision3 datasheet: read density, then the Sigma D scale,
+and store Sigma D × 1000 as `rms`. The loader does not resample it. Density
+must strictly increase; rms may rise and fall. The grain cell is that
+datasheet's 48 µm aperture. `frame_mm` (default 35) is the physical width
+of the image, so the cell grows in pixels as the export gets wider.
+`[halation]` is a threshold on the peak scene-linear channel, a blur whose
+sigma is `radius` times the shorter side, and a red-weighted add-back.
 
 Each curve is two arrays. Index `i` is one step-wedge reading, the pair
 `(log_exposure[i], density[i])`. Paste a measured table into those two

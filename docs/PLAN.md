@@ -59,7 +59,9 @@ server.
   repository is now spektrafilm) is reference prior art, compatible because
   rawstock is GPL-3.0-or-later.
 - Stock files are versioned data (TOML or JSON plus numeric arrays) with
-  `source` and `license` fields. See [stocks/](../stocks/README.md).
+  `source` and `license` fields. Schema 1 is TOML and may include optional
+  `[grain]` (RMS granularity versus density, per layer) and `[halation]`
+  tables. See [stocks/](../stocks/README.md).
 
 ## Open questions
 - **Export:** JPEG and TIFF first; 16-bit TIFF, PNG, HEIF/AVIF, and embedded
@@ -69,3 +71,5 @@ server.
   concern. `rawler` is LGPL-2.1-only; confirm the LGPL §6 link before the
   first release, and audit the tree (for example with `cargo deny`) once
   `rawler` is added.
+- **Stock packaging:** LUT input space, and bundled versus user-installed
+  stocks, are still open.

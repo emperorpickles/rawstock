@@ -35,11 +35,13 @@ CPU, GPU, preview, and export share this order:
 2. **As-shot white balance and exposure.**
 3. **Linear ACEScg** (`color`). Later stages stay in this working space until
    the output transform.
-4. **Halation and bloom**, on linear exposure.
+4. **Halation**, when the stock sets it. A threshold, a wide blur, and a
+   red-weighted add-back, still in scene-linear exposure.
 5. **Film model** (`stock`). Characteristic (D-logH) curves produce per-layer
    density, then interlayer coupling.
-6. **Grain**, in density space, scaled to the physical frame size. A seeded
-   coordinate hash makes CPU, GPU, preview, and export deterministic.
+6. **Grain**, when the stock sets it. Per-layer dye-cloud noise in density,
+   seeded and sized to the physical frame so CPU, GPU, preview, and export
+   match.
 7. **Print/scan.**
 8. **Gamut compression and output transform** (`color`), into the output
    encoding (sRGB, Display P3, and others).
