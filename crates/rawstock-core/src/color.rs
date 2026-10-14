@@ -247,7 +247,12 @@ impl RawImage {
         };
         let roi = mosaic.rect();
         Ok(Intermediate::ThreeColor(
-            XTransMarkesteijnDemosaic::new_pass_3().demosaic(&mosaic, &config.cfa, &config.colors, roi),
+            XTransMarkesteijnDemosaic::new_pass_3().demosaic(
+                &mosaic,
+                &config.cfa,
+                &config.colors,
+                roi,
+            ),
         ))
     }
 }
