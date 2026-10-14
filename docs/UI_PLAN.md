@@ -111,15 +111,15 @@ The film model, grain, dye scan, and print then run only on the visible
 crop. Grain walks only the Poisson cells that overlap that crop, plus
 the cloud margin.
 
-Grain is why 100% exists. Clouds are a fixed size in millimetres
-(`size_mm` on each layer; Portra is 0.070, 0.048, and 0.034). On the
-X-S10 they cover about 13, 9, and 6 pixels. On the 1440 proxy those same
-clouds cover about 3, 2, and 1.4 pixels. The 48 µm aperture only sets
-amplitude (`rms / 1000` while that window covers at least one pixel). It
-is not a tile. The fit view is for tone and color. The 100% view is for
-grain. The fit view says so on screen. The 720 px drag proxy puts the
-48 µm window just under one pixel, so amplitude there is a hair lower
-than at 1440; the settled proxy is the one to trust for amount.
+Grain is why 100% exists. `size_mm` is the primary dye-cloud sigma
+(Portra is 0.018, 0.013, and 0.010 mm). On the X-S10 those clouds are
+about 3.3, 2.4, and 1.8 pixels, and the shared field uses their geometric
+mean. On the 1440 proxy the same clouds are smaller than a pixel, so the
+fit view is for tone and color. The 100% view is for grain. The fit view
+says so on screen. The 48 µm aperture only sets amplitude (`rms / 1000`
+while that window covers at least one pixel). It is not a tile. The 720 px
+drag proxy puts that window just under one pixel, so amplitude there is a
+hair lower than at 1440; the settled proxy is the one to trust for amount.
 
 ### Which stage re-runs
 

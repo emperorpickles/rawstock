@@ -284,10 +284,8 @@ fn grain_has_no_grid_and_is_not_white() {
         equal_neighbor_fraction_of(&field, width) < 0.01,
         "exact neighbor copies"
     );
-    assert!(
-        block_variance_fraction(&field, width, 8) > 0.25,
-        "8x8 blocks are flat"
-    );
+    let blocks = block_variance_fraction(&field, width, 8);
+    assert!(blocks > 0.08, "8x8 blocks are flat ({blocks})");
 
     let low = mean_acf(&field, width, 1);
     let mid = mean_acf(&field, width, 8);
@@ -305,8 +303,8 @@ fn grain_has_no_grid_and_is_not_white() {
 
     let corr = channel_correlation(&field);
     assert!(
-        corr > 0.15 && corr < 0.85,
-        "red/green correlation {corr} is not partial"
+        corr > 0.85,
+        "red/green correlation {corr} is not mostly shared luminance"
     );
 }
 
@@ -372,6 +370,130 @@ fn resolved_clouds_stay_soft_and_a_crop_matches() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn grain_variance_near_a_hard_edge_matches_the_flat_field() {
+    // RMS peaks in the midtones, so the two sides of the step are different
+    // and an edge halo would show up as extra variance on the seam.
+    let curve = Granularity::new([(0.2, 250.0), (1.0, 1600.0), (2.4, 400.0)]).unwrap();
+    let grain = Grain::new(35.0, 21, [curve.clone(), curve.clone(), curve]).unwrap();
+    let width = 180_u32;
+    let height = 240_u32;
+    let region = GrainRegion {
+        width,
+        height,
+        origin_x: 900,
+        origin_y: 700,
+        frame_width: 6160,
+    };
+    let left = 0.2_f32;
+    let right = 1.0_f32;
+    let mut edge = vec![0.0_f32; width as usize * height as usize * 3];
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            let density = if x < width as usize / 2 { left } else { right };
+            let index = (y * width as usize + x) * 3;
+            edge[index] = density;
+            edge[index + 1] = density;
+            edge[index + 2] = density;
+        }
+    }
+    let clean = edge.clone();
+    grain
+        .apply_region(&mut edge, region, &mut NopControl)
+        .unwrap();
+
+    let left_flat = flat_residual_std(&grain, region, left);
+    let right_flat = flat_residual_std(&grain, region, right);
+    let left_band = band_residual_std(&edge, &clean, width, width as usize / 2 - 28, 20);
+    let right_band = band_residual_std(&edge, &clean, width, width as usize / 2 + 4, 20);
+    assert!(
+        (left_band / left_flat - 1.0).abs() < 0.12,
+        "left of edge {left_band} flat {left_flat}"
+    );
+    assert!(
+        (right_band / right_flat - 1.0).abs() < 0.12,
+        "right of edge {right_band} flat {right_flat}"
+    );
+    let seam = band_residual_std(&edge, &clean, width, width as usize / 2 - 1, 2);
+    let cap = left_flat.max(right_flat) * 1.15;
+    assert!(
+        seam <= cap,
+        "seam variance {seam} exceeds flat-field cap {cap}"
+    );
+}
+
+#[test]
+fn chroma_grain_is_a_fraction_of_luma_grain() {
+    let grain = grain(35.0, 21, 1000.0);
+    let width = 280_u32;
+    let height = 160_u32;
+    let mut density = vec![1.0_f32; width as usize * height as usize * 3];
+    grain
+        .apply_region(
+            &mut density,
+            GrainRegion {
+                width,
+                height,
+                origin_x: 1400,
+                origin_y: 900,
+                frame_width: 6160,
+            },
+            &mut NopControl,
+        )
+        .unwrap();
+    let mut luma = Vec::new();
+    let mut chroma = Vec::new();
+    for pixel in density.as_chunks::<3>().0 {
+        let red = pixel[0] - 1.0;
+        let green = pixel[1] - 1.0;
+        let blue = pixel[2] - 1.0;
+        luma.push(0.2126 * red + 0.7152 * green + 0.0722 * blue);
+        chroma.push(red - green);
+    }
+    let luma_std = mean_std(&luma).1;
+    let chroma_std = mean_std(&chroma).1;
+    let ratio = chroma_std / luma_std;
+    assert!(
+        (0.12..0.50).contains(&ratio),
+        "chroma/luma {ratio} (chroma {chroma_std}, luma {luma_std})"
+    );
+}
+
+#[test]
+fn grain_spectrum_has_no_grid_peak() {
+    let grain = grain(35.0, 8, 1000.0);
+    let width = 384_u32;
+    let height = 48_u32;
+    let mut density = vec![1.0_f32; width as usize * height as usize * 3];
+    grain
+        .apply_region(
+            &mut density,
+            GrainRegion {
+                width,
+                height,
+                origin_x: 2000,
+                origin_y: 1200,
+                frame_width: 6160,
+            },
+            &mut NopControl,
+        )
+        .unwrap();
+    // A smooth spectrum decays, so the loudest bin in a wide band is not a
+    // grid. A lattice spike stands far above the bins next to it.
+    let peak = narrow_spectral_peak(&density, width);
+    assert!(
+        peak < 14.0,
+        "narrow periodogram peak {peak} looks like a grid"
+    );
+    for lag in 2..24 {
+        let corr = mean_acf(&density, width, lag);
+        assert!(
+            corr > -0.20,
+            "lag {lag} autocorrelation {corr} oscillates like a grid"
+        );
     }
 }
 
@@ -595,6 +717,79 @@ fn channel_std(density: &[f32]) -> [f32; 3] {
         columns[index % 3].push(*sample);
     }
     columns.map(|column| mean_std(&column).1)
+}
+
+fn flat_residual_std(grain: &Grain, region: GrainRegion, density: f32) -> f32 {
+    let mut field = vec![density; region.width as usize * region.height as usize * 3];
+    grain
+        .apply_region(&mut field, region, &mut NopControl)
+        .unwrap();
+    let mut acc = 0.0_f64;
+    for sample in &field {
+        let delta = f64::from(*sample - density);
+        acc += delta * delta;
+    }
+    (acc / field.len() as f64).sqrt() as f32
+}
+
+fn band_residual_std(grained: &[f32], clean: &[f32], width: u32, x0: usize, cols: usize) -> f32 {
+    let width = width as usize;
+    let height = grained.len() / 3 / width;
+    let mut acc = 0.0_f64;
+    let mut count = 0.0_f64;
+    for y in 0..height {
+        for x in x0..x0 + cols {
+            for channel in 0..3 {
+                let index = (y * width + x) * 3 + channel;
+                let delta = f64::from(grained[index] - clean[index]);
+                acc += delta * delta;
+                count += 1.0;
+            }
+        }
+    }
+    (acc / count).sqrt() as f32
+}
+
+fn narrow_spectral_peak(density: &[f32], width: u32) -> f32 {
+    let width = width as usize;
+    let y = density.len() / 3 / width / 2;
+    let row: Vec<f64> = (0..width)
+        .map(|x| f64::from(density[(y * width + x) * 3]))
+        .collect();
+    let mean = row.iter().sum::<f64>() / row.len() as f64;
+    let n = row.len();
+    let mut powers = Vec::new();
+    for k in 1..n / 2 {
+        let mut re = 0.0;
+        let mut im = 0.0;
+        for (t, sample) in row.iter().enumerate() {
+            let angle = -std::f64::consts::TAU * k as f64 * t as f64 / n as f64;
+            re += (sample - mean) * angle.cos();
+            im += (sample - mean) * angle.sin();
+        }
+        powers.push(re * re + im * im);
+    }
+    let start = n / 10;
+    let mut worst = 1.0_f64;
+    for index in start..powers.len() {
+        let mut neighbors = Vec::new();
+        let lo = index.saturating_sub(4);
+        let hi = (index + 4).min(powers.len() - 1);
+        for (other, power) in powers.iter().enumerate().take(hi + 1).skip(lo) {
+            if other != index && other >= start {
+                neighbors.push(*power);
+            }
+        }
+        if neighbors.is_empty() {
+            continue;
+        }
+        neighbors.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = neighbors[neighbors.len() / 2];
+        if median > 0.0 {
+            worst = worst.max(powers[index] / median);
+        }
+    }
+    worst as f32
 }
 
 fn mean_std(samples: &[f32]) -> (f32, f32) {

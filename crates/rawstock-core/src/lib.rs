@@ -12,6 +12,7 @@
 mod cie1931;
 pub mod color;
 pub mod decode;
+mod grain;
 mod icc;
 mod matrices;
 pub mod render;

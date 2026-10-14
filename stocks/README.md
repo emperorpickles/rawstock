@@ -106,8 +106,9 @@ measurement aperture that sets the amplitude. It is not a tile. Grain is a
 Poisson field of overlapping dye clouds, placed in millimetres on
 `frame_mm` (default 35), so a wider export grows the clouds in pixels
 instead of revealing a finer noise. Layers share some clouds and keep some
-of their own. Optional `size_mm` is that layer's characteristic cloud size;
-omitted layers use the built-in sizes, with red coarser than blue.
+of their own. Optional `size_mm` is that layer's primary dye-cloud sigma, in
+millimetres; omitted layers use the built-in sizes, with red coarser
+than blue.
 `[halation]` is a threshold on the peak scene-linear channel, a blur whose
 sigma is `radius` times the shorter side, and a red-weighted add-back.
 
