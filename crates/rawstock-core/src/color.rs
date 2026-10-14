@@ -1,10 +1,11 @@
-//! Scene-linear color: demosaiced camera RGB → ACEScg.
+//! Scene-linear color: demosaiced camera RGB → ACEScg, and the sRGB output transform.
 //!
 //! [`RawImage::develop_linear`](crate::decode::RawImage::develop_linear) asks
 //! [`rawler`] to rescale black/white levels and demosaic (PPG for Bayer,
 //! bilinear for X-Trans, pass-through for linear DNG). White balance and the
-//! camera → ACEScg matrix live here. No tone curve, stock, or output encoding
-//! is applied. ACEScg negatives are kept.
+//! camera → ACEScg matrix live here. ACEScg negatives are kept.
+//! [`encode_srgb`] is the output transform: ACEScg to encoded sRGB, applied
+//! after the film pipeline.
 
 use std::path::Path;
 
@@ -238,6 +239,38 @@ fn apply_transform(samples: &mut [f32], matrix: [[f32; 3]; 3]) {
     }
 }
 
+/// Encode scene-linear ACEScg as display-encoded sRGB.
+///
+/// Each pixel goes through the ACEScg → linear sRGB matrix, is clipped to
+/// `0..=1`, then through the IEC 61966-2-1 transfer function. Clipping is the
+/// gamut map: a channel outside sRGB is cut. A trailing incomplete pixel is
+/// omitted.
+pub fn encode_srgb(linear_acescg: &[f32]) -> Vec<f32> {
+    let matrix = crate::matrices::acescg_to_linear_srgb();
+    let mut encoded = Vec::with_capacity(linear_acescg.len());
+    for pixel in linear_acescg.as_chunks::<3>().0 {
+        let linear = pixel.map(f64::from);
+        encoded.extend(
+            crate::matrices::apply(matrix, linear).map(|channel| srgb_oetf(channel as f32)),
+        );
+    }
+    encoded
+}
+
+/// IEC 61966-2-1 encoding function. Input is clipped to `0..=1`.
+fn srgb_oetf(linear: f32) -> f32 {
+    let linear = if linear.is_finite() {
+        linear.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    if linear <= 0.0031308 {
+        12.92 * linear
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,6 +374,20 @@ mod tests {
         ];
         let camera = crate::matrices::apply(matrix, crate::matrices::d65_xyz());
         [camera[0] as f32, camera[1] as f32, camera[2] as f32]
+    }
+
+    #[test]
+    fn acescg_white_encodes_to_srgb_white() {
+        let encoded = encode_srgb(&[1.0, 1.0, 1.0]);
+        for channel in &encoded {
+            assert!((channel - 1.0).abs() < 1.0e-5, "{encoded:?}");
+        }
+    }
+
+    #[test]
+    fn negative_acescg_clips_to_black() {
+        let encoded = encode_srgb(&[-1.0, -1.0, -1.0]);
+        assert_eq!(encoded, vec![0.0, 0.0, 0.0]);
     }
 
     fn assert_white(rgb: [f32; 3]) {

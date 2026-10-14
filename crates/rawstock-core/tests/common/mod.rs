@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use rawstock_core::decode::{CfaKind, RawImage};
+use rawstock_core::decode::{CfaKind, Orientation, RawImage};
 use sha2::{Digest, Sha256};
 
 #[allow(dead_code)]
@@ -13,6 +13,10 @@ pub struct Fixture {
     pub sha256: &'static str,
     pub cfa: CfaKind,
     pub dimensions: (u32, u32),
+    /// EXIF orientation stored in the file.
+    pub orientation: Orientation,
+    /// Width and height after that orientation is applied at export.
+    pub export_dimensions: (u32, u32),
     pub black: f32,
     pub black_len: usize,
     pub white: f32,
@@ -125,6 +129,8 @@ pub const X_S10: Fixture = Fixture {
     sha256: "9419d1408ebf850395e5dd563beb96309466546252caf541466034c9cb7e9724",
     cfa: CfaKind::XTrans,
     dimensions: (6384, 4182),
+    orientation: Orientation::Normal,
+    export_dimensions: (6384, 4182),
     black: 1022.0,
     black_len: 36,
     white: 16382.0,
@@ -137,6 +143,8 @@ pub const IPHONE_12_PRO: Fixture = Fixture {
     sha256: "e91e77a4533ed7cce551d83330676ea5c47dd5e55fb38adda7819366afdbdfc2",
     cfa: CfaKind::LinearDng,
     dimensions: (4032, 3024),
+    orientation: Orientation::Rotate90,
+    export_dimensions: (3024, 4032),
     black: 0.0,
     black_len: 3,
     white: 65535.0,
