@@ -308,15 +308,24 @@ fn portra_400_loads_and_keeps_a_gray_near_neutral() {
     assert!(stock.source().contains("spectral_film_lut"));
     assert!(stock.source().contains("E-4050"));
     assert_eq!(stock.license(), "MIT");
-    assert!(stock.parameters().grain().is_none());
-    assert!(stock.parameters().halation().is_none());
+    assert!(stock.parameters().grain().is_some());
+    let halation = stock.parameters().halation().expect("portra halation");
+    assert!(halation.weight()[0] > halation.weight()[1]);
+    assert!(halation.weight()[1] >= halation.weight()[2]);
 
     let FilmModel::Spectral(model) = stock.parameters().film() else {
         panic!("portra is spectral");
     };
     assert!(model.wavelengths().len() >= 2);
     assert!(model.dye_density().is_some());
-    assert!(model.coupling().is_none());
+    let coupling = model.coupling().expect("portra coupling");
+    for row in coupling {
+        let sum = row.iter().sum::<f32>();
+        assert!(
+            (sum - 1.0).abs() < 1.0e-5,
+            "coupling row {row:?} sums to {sum}"
+        );
+    }
     assert!(model.reference_log_exposure().is_some());
     for layer in model.sensitivities() {
         assert_eq!(layer.len(), model.wavelengths().len());
@@ -346,14 +355,12 @@ fn portra_400_loads_and_keeps_a_gray_near_neutral() {
         spread < 0.03,
         "Portra reference gray is not near neutral: {pixel:?}"
     );
-    // The synthetic print curve's 0.2 step is density 0.7, so a balanced
-    // reference gray encodes near that transmission.
-    let middle = 10f32.powf(-0.7);
-    let expected = rawstock_core::color::encode_srgb(&[middle, middle, middle]);
-    for (got, want) in pixel.iter().zip(&expected) {
+    // The hand-tuned print curve holds this gray open, short of a crushed
+    // shadow and short of a blown highlight.
+    for &channel in pixel {
         assert!(
-            (got - want).abs() < 0.02,
-            "reference gray {pixel:?} is far from the print middle {expected:?}"
+            (0.45..0.62).contains(&channel),
+            "reference gray left the open midtone: {pixel:?}"
         );
     }
 }

@@ -139,14 +139,19 @@ MIT-licensed, copyright 2026 Jan Lohse:
 <https://github.com/JanLohse/spectral_film_lut/blob/main/LICENSE>
 
 `lab/import_spectral_film_lut.py` reads that package's Portra 400 module and
-writes the TOML. It does not vendor the package. Grain and halation are
-omitted: the module's RMS tables are copied from Kodak 5207 and its scalar
-`rms` is marked guessed, and this tree does not invent those numbers. The
-print curve is the synthetic scan curve from
-[neutral.stock.toml](neutral.stock.toml), not a paper measurement. The dye
-curves are the importer's split of the published midscale-minus-D-min
-spectrum, peak-normalized, not separately traced dyes. `agx-emulsion` data
-is not used.
+writes a stock. It does not vendor the package. The committed
+`portra400.stock.toml` keeps that importer's sensitivities and D-logH
+curves. Re-running the importer overwrites the file and drops the tuning
+below. `agx-emulsion` data is not used.
+
+The dye scales, print curve, interlayer coupling, grain, and halation are an
+**approximate aesthetic tuning**, shaped by eye. They are not densitometer
+readings, a paper curve, or a published granularity table. Comments in the
+TOML mark each of those values the same way. The dye wavelengths still come
+from the importer's split of midscale-minus-D-min. Grain uses a
+Vision3-style RMS-versus-density shape (rises, then falls; blue grainiest)
+at a level chosen so the 48 µm cell is visible at 100%. Halation is a faint
+red fringe, because this film has an anti-halation layer.
 
 Portra is a Kodak trademark. This file is an attributed transcription of
 published curves, not an invented look. Invented looks still need original

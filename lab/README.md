@@ -38,10 +38,15 @@ curve, or output encoding is applied on top of what the core already did.
 
 `import_spectral_film_lut.py` turns the MIT-licensed Portra 400 module from
 [JanLohse/spectral_film_lut](https://github.com/JanLohse/spectral_film_lut)
-into `stocks/portra400.stock.toml`. It uses only the Python standard library
-and reads the module as source text, so the package does not have to be
-installed. Grain and halation are left out. See the script's docstring and
+into a spectral stock. It uses only the Python standard library and reads
+the module as source text, so the package does not have to be installed.
+Grain and halation are left out. See the script's docstring and
 [stocks/README.md](../stocks/README.md) for what is copied and what is derived.
+
+The committed `stocks/portra400.stock.toml` keeps this script's sensitivities
+and D-logH curves, then adds an approximate aesthetic tuning (dye scale,
+print curve, coupling, grain, halation). Running the command below replaces
+that file and removes the tuning.
 
 ```bash
 python3 lab/import_spectral_film_lut.py \
