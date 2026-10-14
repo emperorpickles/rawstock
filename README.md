@@ -5,10 +5,13 @@ film simulations, called **stocks**, in the spirit of in-camera film
 simulations. A shared Rust core powers a CLI, a Tauri desktop app, and a web
 app that runs entirely client-side via WebAssembly and WebGPU.
 
-**Status:** early scaffolding. Nothing is implemented yet.
+**Status:** `develop` runs the parametric film pipeline (exposure, D-logH
+curves, print/scan, sRGB) and writes 8-bit JPEG or 16-bit TIFF. Stock files
+are not loaded yet.
 
 ```
-rawstock develop IMG.RAF --stock <name> -o out.jpg   # target shape
+rawstock develop IMG.RAF --out out.jpg
+rawstock dump-linear IMG.RAF out.exr
 ```
 
 ## Layout

@@ -41,6 +41,22 @@ pub(crate) const ACES_WHITE_XY: [f64; 2] = [0.32168, 0.33767];
 /// Source: ACEScg specification, "Color space chromaticities".
 pub(crate) const AP1_PRIMARIES_XY: [[f64; 2]; 3] = [[0.713, 0.293], [0.165, 0.830], [0.128, 0.044]];
 
+/// Linear sRGB → CIE XYZ under D65.
+///
+/// Source: Bruce Lindbloom, "RGB/XYZ Matrices", the IEC 61966-2-1 sRGB
+/// primaries carried past the four decimals in the specification
+/// (<http://www.brucelindbloom.com/Eqn_RGB_XYZ_Matrix.html>).
+const SRGB_TO_XYZ_D65: [[f64; 3]; 3] = [
+    [0.4124564, 0.3575761, 0.1804375],
+    [0.2126729, 0.7151522, 0.0721750],
+    [0.0193339, 0.1191920, 0.9503041],
+];
+
+/// ICC profile connection space white, CIE XYZ.
+///
+/// Source: ICC.1, the PCS D50 illuminant encoded as (0.9642, 1, 0.8249).
+pub(crate) const D50_XYZ: [f64; 3] = [0.9642, 1.0, 0.8249];
+
 /// CIE XYZ (Y = 1) of the D65 chromaticity in [`D65_XY`].
 pub(crate) fn d65_xyz() -> [f64; 3] {
     xy_to_xyz(D65_XY)
@@ -53,8 +69,17 @@ pub(crate) fn aces_white_xyz() -> [f64; 3] {
 
 /// Bradford adaptation that maps D65 onto the ACES white.
 pub(crate) fn bradford_d65_to_aces() -> [[f64; 3]; 3] {
-    let source = apply(BRADFORD_XYZ_TO_LMS, d65_xyz());
-    let destination = apply(BRADFORD_XYZ_TO_LMS, aces_white_xyz());
+    bradford(d65_xyz(), aces_white_xyz())
+}
+
+/// Bradford adaptation that maps D65 onto the ICC D50 white.
+pub(crate) fn bradford_d65_to_d50() -> [[f64; 3]; 3] {
+    bradford(d65_xyz(), D50_XYZ)
+}
+
+fn bradford(source_xyz: [f64; 3], destination_xyz: [f64; 3]) -> [[f64; 3]; 3] {
+    let source = apply(BRADFORD_XYZ_TO_LMS, source_xyz);
+    let destination = apply(BRADFORD_XYZ_TO_LMS, destination_xyz);
     let scale = [
         [destination[0] / source[0], 0.0, 0.0],
         [0.0, destination[1] / source[1], 0.0],
@@ -101,6 +126,40 @@ pub(crate) fn xyz_d60_to_ap1() -> [[f64; 3]; 3] {
 /// CIE XYZ under D65 → ACEScg: AP1 after the Bradford D65 → ACES adaptation.
 pub(crate) fn xyz_d65_to_acescg() -> [[f64; 3]; 3] {
     multiply(xyz_d60_to_ap1(), bradford_d65_to_aces())
+}
+
+/// CIE XYZ of the white the sRGB matrix was built for.
+///
+/// That is `SRGB_TO_XYZ_D65 * (1, 1, 1)`, about (0.95047, 1, 1.08883). It is
+/// not the xy-derived [`d65_xyz`]: those differ in the fourth digit, and using
+/// the xy white here tints neutrals.
+fn srgb_white_xyz() -> [f64; 3] {
+    apply(SRGB_TO_XYZ_D65, [1.0, 1.0, 1.0])
+}
+
+/// ACEScg → linear sRGB.
+///
+/// AP1 relative to the ACES white is converted back to XYZ, Bradford-adapted
+/// onto the sRGB matrix white, then taken through the sRGB matrix. ACEScg
+/// `(1, 1, 1)` maps to linear sRGB `(1, 1, 1)`.
+pub(crate) fn acescg_to_linear_srgb() -> [[f64; 3]; 3] {
+    let acescg_to_xyz = inverse(xyz_d60_to_ap1()).expect("AP1 matrix is invertible");
+    let aces_to_srgb_white = bradford(aces_white_xyz(), srgb_white_xyz());
+    let xyz_to_srgb = inverse(SRGB_TO_XYZ_D65).expect("sRGB matrix is invertible");
+    multiply(xyz_to_srgb, multiply(aces_to_srgb_white, acescg_to_xyz))
+}
+
+/// XYZ of the sRGB primaries under ICC D50, in red, green, blue order.
+///
+/// The D65 sRGB matrix is Bradford-adapted to [`D50_XYZ`] so an embedded
+/// sRGB profile and the output transform share one set of primaries.
+pub(crate) fn srgb_colorants_d50() -> [[f64; 3]; 3] {
+    let rgb_to_xyz = multiply(bradford_d65_to_d50(), SRGB_TO_XYZ_D65);
+    [
+        [rgb_to_xyz[0][0], rgb_to_xyz[1][0], rgb_to_xyz[2][0]],
+        [rgb_to_xyz[0][1], rgb_to_xyz[1][1], rgb_to_xyz[2][1]],
+        [rgb_to_xyz[0][2], rgb_to_xyz[1][2], rgb_to_xyz[2][2]],
+    ]
 }
 
 /// Camera RGB → ACEScg for a D65 XYZ→camera matrix, before white balance.
@@ -261,5 +320,22 @@ mod tests {
     fn singular_camera_matrix_is_rejected() {
         let singular = [[1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [3.0, 0.0, 0.0]];
         assert!(camera_to_acescg(singular).is_none());
+    }
+
+    #[test]
+    fn acescg_white_maps_to_linear_srgb_white() {
+        let white = apply(acescg_to_linear_srgb(), [1.0, 1.0, 1.0]);
+        assert_vec(white, [1.0, 1.0, 1.0], 1.0e-9);
+    }
+
+    #[test]
+    fn srgb_colorants_sum_to_d50() {
+        let colorants = srgb_colorants_d50();
+        let sum = [
+            colorants[0][0] + colorants[1][0] + colorants[2][0],
+            colorants[0][1] + colorants[1][1] + colorants[2][1],
+            colorants[0][2] + colorants[1][2] + colorants[2][2],
+        ];
+        assert_vec(sum, D50_XYZ, 2.0e-3);
     }
 }
