@@ -38,7 +38,7 @@ npm run dev
 
 ### Windows
 
-WebView2 and the Visual Studio C++ build tools are required. From PowerShell,
+WebView2 and the Visual Studio C++ build tools are required. From PowerShell
 in the repo:
 
 ```powershell
@@ -46,6 +46,9 @@ cd apps/ui; npm install
 cd ../desktop; npm install
 npm run dev
 ```
+
+`npm run dev` and `npm run build` start or build `apps/ui` with
+`npm --prefix ../ui`. Those hooks run in PowerShell.
 
 ### Linux (Debian or Ubuntu)
 

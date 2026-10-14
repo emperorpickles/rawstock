@@ -4,9 +4,9 @@
   "version": "0.0.1",
   "identifier": "dev.rawstock.desktop",
   "build": {
-    "beforeDevCommand": "sh src-tauri/ui.sh dev",
+    "beforeDevCommand": "npm --prefix ../ui run dev",
     "devUrl": "http://127.0.0.1:1420",
-    "beforeBuildCommand": "sh src-tauri/ui.sh build",
+    "beforeBuildCommand": "npm --prefix ../ui run build",
     "frontendDist": "../../ui/dist"
   },
   "app": {
