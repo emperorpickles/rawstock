@@ -6,13 +6,14 @@ targets desktop hardware, so the model runs directly.
 
 `FilmModel` in core maps scene exposure to layer densities. `Parametric` and
 `Spectral` are enum variants. Prefer the enum over a trait object unless
-there is a stated reason not to. Names must be original (no trademarked film
-names).
+there is a stated reason not to.
 
 `rawstock develop` loads one file into the existing
 [`Parameters`](../crates/rawstock-core/src/render.rs) struct: exposure,
-optional halation, a parametric film model, optional grain, print exposure,
-and a print curve.
+optional halation, a film model, optional grain, print exposure, and a print
+curve. An invented look needs an original name. A file that transcribes one
+published film may use that film's name when `source` and `license` attribute
+the measurement.
 
 ## Schema 1
 
@@ -26,7 +27,7 @@ revision = 1
 name = "Neutral"
 source = "Where the numbers came from."
 license = "CC0-1.0"
-model = "parametric"          # enum tag; "spectral" is not accepted yet
+model = "parametric"          # or "spectral"; see below
 exposure_ev = 0.0             # stops, before the film model
 print_exposure = 0.9          # print log-exposure = print_exposure - density
 
@@ -61,11 +62,39 @@ density = [0.15, 0.30]        # density, must not decrease
 # weight = [0.6, 0.12, 0.04]
 ```
 
-`model` is an enum. The only tag schema 1 accepts is `parametric`. A later
-`spectral` variant can be added without renaming `parametric`, so files
-written today keep parsing. A spectral payload that needs new keys would
-arrive with a new `schema_version`; this reader rejects both unknown
-versions and unknown fields.
+`model` is an enum. Schema 1 accepts `parametric` and `spectral`. Existing
+parametric files keep parsing: the spectral keys are optional, and a
+parametric file that sets one is rejected. Unknown versions and unknown
+fields are still rejected.
+
+`spectral` replaces only the step from scene RGB to per-layer log exposure.
+ACEScg is upsampled with the Jakob and Hanika sigmoid (see
+`crates/rawstock-core/data/NOTICE`) and integrated against `sensitivity`.
+The same D-logH curves, coupling, and grain then run. When `dye_density` is
+present, the print stage turns those densities into display RGB by
+integrating transmittance `10^(-Σ density · dye)` against CIE 1931 under
+D65. Without dye curves the print stage is the existing per-channel
+inversion. `wavelength_nm` is the shared grid, in nanometres, strictly
+increasing. Each sensitivity is non-negative and its trapezoidal integral
+is 1, so a flat spectrum of level 1 exposes every layer equally. Dye
+samples are non-negative. `reference_log_exposure`, with dye curves, is the
+log exposure the scan balances to a neutral.
+
+```toml
+model = "spectral"
+reference_log_exposure = -1.5
+wavelength_nm = [380, 390, 400]
+
+[sensitivity]                 # red, green, and blue, one sample per wavelength
+red = [0.0, 0.05, 0.0]
+green = [0.0, 0.05, 0.0]
+blue = [0.0, 0.05, 0.0]
+
+[dye_density]                 # optional; omitted keeps the simple print
+red = [0.0, 1.0, 0.0]
+green = [0.0, 1.0, 0.0]
+blue = [0.0, 1.0, 0.0]
+```
 
 `[grain]` and `[halation]` are optional schema 1 tables. Leaving them out
 is the same file older stocks already use, so `schema_version` stays 1.
@@ -94,11 +123,6 @@ table can be copied without rewriting whole values as floats.
 `source` is the datasheet, scan, or other origin of the numbers. `license`
 is the license of those numbers. Set both before committing measured data.
 
-Schema 1 does not carry grain, halation, bloom, or spectral sensitivity and
-dye density. The pipeline in [Architecture](../docs/ARCHITECTURE.md) still
-fixes when those stages run. A later schema can add them. Until then the
-loader rejects those keys.
-
 [neutral.stock.toml](neutral.stock.toml) is a synthetic neutral reference.
 Red, green, and blue share one curve and coupling is omitted, so a gray stays
 gray. The license is CC0-1.0 because these numbers were written for rawstock.
@@ -106,51 +130,24 @@ They are not a measurement of any manufactured film.
 
 ## Kodak Portra 400
 
-The first measured stock is spectral. Spectral sensitivity, characteristic
-curves, and dye density come from Kodak publication E-4050. Grain, interlayer
-coupling, and print/scan are calibrated from chart or step-wedge scans.
-
-[agx-emulsion](https://github.com/andreavolpato/agx-emulsion) (GPL-3.0; the
-repository is now spektrafilm) is reference prior art for this kind of model.
-rawstock is GPL-3.0-or-later, so that license is compatible. Portra 400's
-numbers come from E-4050 and our scans, with `source` and `license` filled in.
-
-## spectral_film_lut
-
-Research notes for a possible future importer. This tree does not vendor any
-of its data, and there is no importer code.
-
-[JanLohse/spectral_film_lut](https://github.com/JanLohse/spectral_film_lut) is
-MIT-licensed. The license file is the standard MIT text, copyright 2026 Jan
-Lohse:
+[portra400.stock.toml](portra400.stock.toml) is a spectral stock. The
+sensitivities and D-logH curves were digitized from Kodak publication E-4050
+by Jan Lohse in
+[spectral_film_lut](https://github.com/JanLohse/spectral_film_lut), which is
+MIT-licensed, copyright 2026 Jan Lohse:
 
 <https://github.com/JanLohse/spectral_film_lut/blob/main/LICENSE>
 
-`pyproject.toml` sets `license = "MIT"`, and GitHub reports the MIT License.
-There is no second license file for the stock tables.
+`lab/import_spectral_film_lut.py` reads that package's Portra 400 module and
+writes the TOML. It does not vendor the package. Grain and halation are
+omitted: the module's RMS tables are copied from Kodak 5207 and its scalar
+`rms` is marked guessed, and this tree does not invent those numbers. The
+print curve is the synthetic scan curve from
+[neutral.stock.toml](neutral.stock.toml), not a paper measurement. The dye
+curves are the importer's split of the published midscale-minus-D-min
+spectrum, peak-normalized, not separately traced dyes. `agx-emulsion` data
+is not used.
 
-The stock data is not a document format of its own. Each stock is a Python
-module that builds a `FilmData` dataclass
-(`src/spectral_film_lut/film_data.py`). Those modules live in
-`negative_film/`, `print_film/`, `reversal_film/`, `reversal_print/`,
-`bw_negative_film/`, and `bw_print_film/`. The package `__init__.py` imports
-the constants into `FILM_STOCKS`.
-
-A curve is a list of dicts, one dict per layer, mapping a float key to a
-float value in source order:
-
-- `sensiometric_curve`: log exposure → density (the D-logH curve)
-- `log_sensitivity`: wavelength → log sensitivity
-- `spectral_density`: wavelength → dye density
-- `d_ref_sd` and `d_min_sd`: one wavelength → density dict each
-- `mtf`, `rms_curve`, and `rms_density`: more per-layer dicts
-- `sensitivity`: an optional NumPy array
-
-The dataclass also carries `name`, `manufacturer`, `film_type` (`positive` or
-`negative`), `stage` (`camera` or `print`), `medium`, `density_measure` (for
-example `status_m`), `year`, `iso`, and `rms`. An importer would read those
-`FilmData` values. The repository does not ship them as TOML or JSON.
-
-The MIT grant is the one in that LICENSE file: the software and associated
-documentation files. The curves were digitized from manufacturer datasheets.
-This repository does not copy them.
+Portra is a Kodak trademark. This file is an attributed transcription of
+published curves, not an invented look. Invented looks still need original
+names.

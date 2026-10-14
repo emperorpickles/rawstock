@@ -5,9 +5,12 @@ film simulations, called **stocks**, in the spirit of in-camera film
 simulations. A shared Rust core powers a CLI, a Tauri desktop app, and a web
 app that runs entirely client-side via WebAssembly and WebGPU.
 
-**Status:** `develop` loads a parametric stock file into the film pipeline
+**Status:** `develop` loads a schema-1 stock into the film pipeline
 (exposure, optional halation, D-logH curves, optional grain, print/scan,
-sRGB) and writes 8-bit JPEG or 16-bit TIFF.
+sRGB) and writes 8-bit JPEG or 16-bit TIFF. `parametric` reads scene RGB as
+layer exposure. `spectral` upsamples that RGB and integrates per-layer
+sensitivities first. [stocks/portra400.stock.toml](stocks/portra400.stock.toml)
+is the first spectral stock.
 
 ```
 rawstock develop IMG.RAF --stock stocks/neutral.stock.toml --out out.jpg

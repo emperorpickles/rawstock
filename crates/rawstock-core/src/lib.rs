@@ -7,9 +7,11 @@
 
 #![forbid(unsafe_code)]
 
+mod cie1931;
 pub mod color;
 pub mod decode;
 mod icc;
 mod matrices;
 pub mod render;
+mod spectrum;
 pub mod stock;

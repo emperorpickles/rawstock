@@ -90,19 +90,48 @@ fn bradford(source_xyz: [f64; 3], destination_xyz: [f64; 3]) -> [[f64; 3]; 3] {
     multiply(inverse_bradford, multiply(scale, BRADFORD_XYZ_TO_LMS))
 }
 
+/// AP0 primaries, CIE 1931 xy, in red, green, blue order.
+///
+/// Source: SMPTE ST 2065-1 (ACES2065-1). The blue primary's y is negative.
+pub(crate) const AP0_PRIMARIES_XY: [[f64; 2]; 3] =
+    [[0.7347, 0.2653], [0.0, 1.0], [0.0001, -0.0770]];
+
 /// XYZ (relative to the ACES white) → ACEScg.
 ///
 /// Derived from [`AP1_PRIMARIES_XY`] and [`ACES_WHITE_XY`] by SMPTE RP 177:1993.
 pub(crate) fn xyz_d60_to_ap1() -> [[f64; 3]; 3] {
-    let columns = AP1_PRIMARIES_XY.map(xy_to_xyz);
+    xyz_to_rgb(AP1_PRIMARIES_XY, aces_white_xyz())
+}
+
+/// XYZ (relative to the ACES white) → ACES2065-1.
+///
+/// Derived from [`AP0_PRIMARIES_XY`] and [`ACES_WHITE_XY`] by SMPTE RP 177:1993.
+pub(crate) fn xyz_d60_to_ap0() -> [[f64; 3]; 3] {
+    xyz_to_rgb(AP0_PRIMARIES_XY, aces_white_xyz())
+}
+
+/// ACEScg → ACES2065-1. The two spaces share the ACES white.
+pub(crate) fn ap1_to_ap0() -> [[f64; 3]; 3] {
+    let ap1_to_xyz = inverse(xyz_d60_to_ap1()).expect("AP1 matrix is invertible");
+    multiply(xyz_d60_to_ap0(), ap1_to_xyz)
+}
+
+/// ACES2065-1 → ACEScg.
+#[cfg(test)]
+pub(crate) fn ap0_to_ap1() -> [[f64; 3]; 3] {
+    inverse(ap1_to_ap0()).expect("AP0 matrix is invertible")
+}
+
+fn xyz_to_rgb(primaries_xy: [[f64; 2]; 3], white: [f64; 3]) -> [[f64; 3]; 3] {
+    let columns = primaries_xy.map(xy_to_xyz);
     // Primary XYZ values are columns.
     let primaries = [
         [columns[0][0], columns[1][0], columns[2][0]],
         [columns[0][1], columns[1][1], columns[2][1]],
         [columns[0][2], columns[1][2], columns[2][2]],
     ];
-    let inverse_primaries = inverse(primaries).expect("AP1 primaries are linearly independent");
-    let scales = apply(inverse_primaries, aces_white_xyz());
+    let inverse_primaries = inverse(primaries).expect("primaries are linearly independent");
+    let scales = apply(inverse_primaries, white);
     let rgb_to_xyz = [
         [
             primaries[0][0] * scales[0],
@@ -120,7 +149,7 @@ pub(crate) fn xyz_d60_to_ap1() -> [[f64; 3]; 3] {
             primaries[2][2] * scales[2],
         ],
     ];
-    inverse(rgb_to_xyz).expect("AP1 RGB to XYZ matrix is invertible")
+    inverse(rgb_to_xyz).expect("RGB to XYZ matrix is invertible")
 }
 
 /// CIE XYZ under D65 → ACEScg: AP1 after the Bradford D65 → ACES adaptation.
@@ -289,6 +318,24 @@ mod tests {
         for (row, expected) in matrix.into_iter().zip(PUBLISHED_XYZ_TO_AP1) {
             assert_vec(row, expected, 1.0e-10);
         }
+    }
+
+    #[test]
+    fn xyz_to_ap0_matches_the_rgb2spec_matrix() {
+        // The ACES2065-1 matrix shipped with mitsuba-renderer/rgb2spec
+        // (BSD-3-Clause), which is the matrix the coefficient table integrates
+        // against. SMPTE ST 2065-1 primaries, rounded the same way.
+        const PUBLISHED_XYZ_TO_AP0: [[f64; 3]; 3] = [
+            [1.0498110175, 0.0000000000, -0.0000974845],
+            [-0.4959030231, 1.3733130458, 0.0982400361],
+            [0.0000000000, 0.0000000000, 0.9912520182],
+        ];
+        let matrix = xyz_d60_to_ap0();
+        for (row, expected) in matrix.into_iter().zip(PUBLISHED_XYZ_TO_AP0) {
+            assert_vec(row, expected, 1.0e-4);
+        }
+        let white = apply(ap1_to_ap0(), [1.0, 1.0, 1.0]);
+        assert_vec(white, [1.0, 1.0, 1.0], 1.0e-9);
     }
 
     #[test]

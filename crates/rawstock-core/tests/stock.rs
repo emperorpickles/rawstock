@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use rawstock_core::color::LinearImage;
 use rawstock_core::render::Parameters;
 use rawstock_core::stock::{FilmModel, Grain, ModelError, Stock, StockError, StockModel};
 
@@ -44,7 +45,9 @@ fn example_stock_round_trips_into_parameters() {
     assert_eq!(parameters.exposure_ev(), 0.0);
     assert!((parameters.print_exposure() - 0.9).abs() < 1.0e-6);
 
-    let FilmModel::Parametric(model) = parameters.film();
+    let FilmModel::Parametric(model) = parameters.film() else {
+        panic!("neutral stock is parametric");
+    };
     assert!(model.coupling().is_none());
     let knots = [-3.5_f32, -2.0, -0.7, 0.0, 0.6, 1.5];
     let density = [0.15_f32, 0.30, 0.70, 1.15, 1.70, 2.05];
@@ -98,7 +101,9 @@ matrix = [[1.0, 0.25, 0.0], [0.0, 1.0, 0.5], [0.0, 0.0, 1.0]]
     assert_eq!(stock.revision(), 3);
     assert_eq!(stock.parameters().exposure_ev(), 0.0);
     assert_eq!(stock.parameters().print_exposure(), 1.0);
-    let FilmModel::Parametric(model) = stock.parameters().film();
+    let FilmModel::Parametric(model) = stock.parameters().film() else {
+        panic!("coupled stock is parametric");
+    };
     assert_eq!(
         model.coupling(),
         Some([[1.0, 0.25, 0.0], [0.0, 1.0, 0.5], [0.0, 0.0, 1.0]])
@@ -282,15 +287,88 @@ fn rejects_an_unknown_schema_version() {
 
 #[test]
 fn rejects_an_unknown_model_tag() {
-    let text = neutral_text().replacen("model = \"parametric\"", "model = \"spectral\"", 1);
+    let text = neutral_text().replacen("model = \"parametric\"", "model = \"emulsion\"", 1);
     let err = load_text(&text).unwrap_err();
     let StockError::Parse { source, .. } = err else {
         panic!("expected a parse error, got {err:?}");
     };
     assert!(
-        source.to_string().contains("spectral"),
+        source.to_string().contains("emulsion"),
         "unknown model was not named: {source}"
     );
+}
+
+#[test]
+fn portra_400_loads_and_keeps_a_gray_near_neutral() {
+    use rawstock_core::render::Pipeline;
+
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stocks/portra400.stock.toml");
+    let stock = Stock::load(&path).unwrap();
+    assert_eq!(stock.model(), StockModel::Spectral);
+    assert!(stock.source().contains("spectral_film_lut"));
+    assert!(stock.source().contains("E-4050"));
+    assert_eq!(stock.license(), "MIT");
+    assert!(stock.parameters().grain().is_none());
+    assert!(stock.parameters().halation().is_none());
+
+    let FilmModel::Spectral(model) = stock.parameters().film() else {
+        panic!("portra is spectral");
+    };
+    assert!(model.wavelengths().len() >= 2);
+    assert!(model.dye_density().is_some());
+    assert!(model.coupling().is_none());
+    assert!(model.reference_log_exposure().is_some());
+    for layer in model.sensitivities() {
+        assert_eq!(layer.len(), model.wavelengths().len());
+        assert!(
+            layer
+                .iter()
+                .all(|sample| sample.is_finite() && *sample >= 0.0)
+        );
+        let integral = trapezoid(model.wavelengths(), layer);
+        assert!(
+            (integral - 1.0).abs() < 1.0e-3,
+            "sensitivity integral {integral}"
+        );
+    }
+    for layer in model.dye_density().unwrap() {
+        assert!(
+            layer
+                .iter()
+                .all(|sample| sample.is_finite() && *sample >= 0.0)
+        );
+    }
+
+    let developed = Pipeline::new(stock.parameters().clone()).develop(&gray_image(0.18));
+    let pixel = developed.pixels();
+    let spread = pixel[0].max(pixel[1]).max(pixel[2]) - pixel[0].min(pixel[1]).min(pixel[2]);
+    assert!(
+        spread < 0.03,
+        "Portra reference gray is not near neutral: {pixel:?}"
+    );
+    // The synthetic print curve's 0.2 step is density 0.7, so a balanced
+    // reference gray encodes near that transmission.
+    let middle = 10f32.powf(-0.7);
+    let expected = rawstock_core::color::encode_srgb(&[middle, middle, middle]);
+    for (got, want) in pixel.iter().zip(&expected) {
+        assert!(
+            (got - want).abs() < 0.02,
+            "reference gray {pixel:?} is far from the print middle {expected:?}"
+        );
+    }
+}
+
+fn gray_image(level: f32) -> LinearImage {
+    LinearImage::new(1, 1, vec![level, level, level]).unwrap()
+}
+
+fn trapezoid(wavelengths: &[f32], values: &[f32]) -> f32 {
+    let mut total = 0.0f32;
+    for index in 0..wavelengths.len() - 1 {
+        let half = 0.5 * (wavelengths[index + 1] - wavelengths[index]);
+        total += half * (values[index] + values[index + 1]);
+    }
+    total
 }
 
 fn assert_curve(curve: &rawstock_core::stock::Curve, log_exposure: &[f32], density: &[f32]) {
