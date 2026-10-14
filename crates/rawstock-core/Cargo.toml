@@ -9,5 +9,10 @@ license.workspace = true
 rawler = "0.8"
 thiserror = "2"
 
+# `uuid` (via rawler) has no randomness source on wasm32-unknown-unknown
+# unless `js` is enabled. That feature is its WebCrypto backend.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+uuid = { version = "1.28", features = ["js"] }
+
 [dev-dependencies]
 sha2 = "0.10"

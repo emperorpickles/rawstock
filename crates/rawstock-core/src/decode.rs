@@ -39,9 +39,7 @@ pub enum DecodeError {
     /// `rawler` could not decode the file.
     #[error("failed to decode {path}")]
     Backend {
-        /// Path that failed to decode.
         path: String,
-        /// The decoder error.
         #[source]
         source: rawler::RawlerError,
     },
@@ -49,41 +47,26 @@ pub enum DecodeError {
     /// The decoded buffer length did not match width × height × components.
     #[error("{path} decoded to {actual} samples, expected {expected}")]
     UnexpectedSamples {
-        /// Path that decoded to the wrong number of samples.
         path: String,
-        /// Samples present in the decoded buffer.
         actual: usize,
-        /// Samples required by the reported dimensions.
         expected: usize,
     },
 
     /// The file is neither a Bayer/X-Trans mosaic nor a linear DNG.
     #[error("{path} is not X-Trans, Bayer, or a linear DNG")]
-    UnsupportedLayout {
-        /// Path with an unsupported photometric layout.
-        path: String,
-    },
+    UnsupportedLayout { path: String },
 
     /// Black or white levels were missing.
     #[error("{path} is missing black or white levels")]
-    MissingLevels {
-        /// Path with no black or white level.
-        path: String,
-    },
+    MissingLevels { path: String },
 
     /// Neither `xyz_to_cam` nor a DNG color matrix was usable.
     #[error("{path} is missing a camera color matrix")]
-    MissingCameraMatrix {
-        /// Path with no camera color matrix.
-        path: String,
-    },
+    MissingCameraMatrix { path: String },
 
     /// Width or height did not fit in `u32`.
     #[error("{path} dimensions do not fit in u32")]
-    Dimensions {
-        /// Path whose dimensions did not fit.
-        path: String,
-    },
+    Dimensions { path: String },
 }
 
 /// Decoded RAW metadata.
@@ -219,17 +202,8 @@ impl RawImage {
             Illuminant::D55,
             Illuminant::A,
         ];
-        if let Some((_, flat)) = decoded.color_matrix_find_first(preferred)
-            && let Some(matrix) = Self::matrix_from_flat(&flat)
-        {
-            return Some(matrix);
-        }
-
-        let mut entries: Vec<_> = decoded.color_matrix.iter().collect();
-        entries.sort_by_key(|(illuminant, _)| *illuminant);
-        entries
-            .into_iter()
-            .find_map(|(_, flat)| Self::matrix_from_flat(flat))
+        let (_, flat) = decoded.color_matrix_find_first(preferred)?;
+        Self::matrix_from_flat(&flat)
     }
 
     fn matrix_from_flat(flat: &[f32]) -> Option<[[f32; 3]; 4]> {

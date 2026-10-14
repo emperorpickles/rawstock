@@ -34,8 +34,4 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - name: Check rawstock-core for wasm32-unknown-unknown
-        run: |
-          if ! cargo check -p rawstock-core --target wasm32-unknown-unknown; then
-            echo "::error::rawstock-core does not build for wasm32-unknown-unknown. The compiler error above is from rawler or one of its dependencies. No cfg, feature, or stub was added to work around it."
-            exit 1
-          fi
+        run: cargo check -p rawstock-core --target wasm32-unknown-unknown

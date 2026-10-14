@@ -1028,6 +1028,7 @@ dependencies = [
  "rawler",
  "sha2",
  "thiserror",
+ "uuid",
 ]
 
 [[package]]
