@@ -1,0 +1,37 @@
+# Neutral reference stock. Schema is documented in stocks/README.md.
+# Each curve index is one step-wedge reading: log10(exposure), density.
+# These numbers are synthetic. They are not a measurement of a manufactured film.
+
+schema_version = 1
+revision = 1
+name = "Neutral"
+source = "Synthetic reference written for rawstock. Red, green, and blue share one D-logH curve, and interlayer coupling is omitted. The numbers are a mild negative toe and shoulder, not a measurement of a manufactured film."
+license = "CC0-1.0"
+model = "parametric"
+
+# Stops applied to scene-linear exposure before the film model.
+exposure_ev = 0.0
+# Print log-exposure is print_exposure minus negative density.
+print_exposure = 0.9
+
+# Optional interlayer coupling. Omit the table when the layers are independent.
+# The matrix is row-major and multiplies the log-exposure column vector
+# before the curves run.
+# [coupling]
+# matrix = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+
+[red]
+log_exposure = [-3.5, -2.0, -0.7, 0.0, 0.6, 1.5]
+density = [0.15, 0.30, 0.70, 1.15, 1.70, 2.05]
+
+[green]
+log_exposure = [-3.5, -2.0, -0.7, 0.0, 0.6, 1.5]
+density = [0.15, 0.30, 0.70, 1.15, 1.70, 2.05]
+
+[blue]
+log_exposure = [-3.5, -2.0, -0.7, 0.0, 0.6, 1.5]
+density = [0.15, 0.30, 0.70, 1.15, 1.70, 2.05]
+
+[print]
+log_exposure = [-1.5, -0.5, 0.2, 1.0, 2.0]
+density = [0.04, 0.20, 0.70, 1.50, 2.20]
