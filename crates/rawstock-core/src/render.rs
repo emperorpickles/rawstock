@@ -31,6 +31,85 @@ use crate::decode::Orientation;
 use crate::icc;
 use crate::stock::{Curve, FilmModel, Grain, Halation, ModelError};
 
+/// One stage of [`Pipeline::develop`], in pipeline order.
+///
+/// A parameter edit names the first stage that has to run again. Decode is
+/// not a stage: the session already holds the ACEScg image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Stage {
+    /// Scale scene-linear ACEScg by `exposure_ev`.
+    Exposure,
+    /// Highlight halation, when the stock has it.
+    Halation,
+    /// Characteristic density from the film model.
+    Density,
+    /// Density grain, when the stock has it.
+    Grain,
+    /// Dye scan. A no-op when the stock has no dye curves.
+    DyeScan,
+    /// Print exposure and the print curve.
+    Print,
+    /// ACEScg to encoded sRGB.
+    Encode,
+}
+
+impl Stage {
+    /// Short name used in progress events.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Exposure => "Exposure",
+            Self::Halation => "Halation",
+            Self::Density => "Density",
+            Self::Grain => "Grain",
+            Self::DyeScan => "Dye scan",
+            Self::Print => "Print",
+            Self::Encode => "Encode",
+        }
+    }
+}
+
+/// Cancel and progress hook for a develop.
+///
+/// The desktop shell backs [`Self::cancelled`] with an `AtomicBool`. A wasm
+/// host can back it with a `Cell<bool>`. The CLI uses [`NopControl`].
+pub trait DevelopControl {
+    /// `true` when this develop should stop. A cancelled develop returns
+    /// [`Cancelled`] and no image.
+    fn cancelled(&self) -> bool;
+
+    /// `done_rows` of `rows` have finished for `stage`. `done_rows` is 0 at
+    /// the start of the stage.
+    fn on_progress(&mut self, stage: Stage, done_rows: u32, rows: u32);
+}
+
+/// Control that never cancels and ignores progress.
+#[derive(Debug, Default)]
+pub struct NopControl;
+
+impl DevelopControl for NopControl {
+    fn cancelled(&self) -> bool {
+        false
+    }
+
+    fn on_progress(&mut self, _stage: Stage, _done_rows: u32, _rows: u32) {}
+}
+
+/// A develop stopped because [`DevelopControl::cancelled`] was set.
+///
+/// The partial buffer is dropped. Callers keep the previous image.
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+#[error("development was cancelled")]
+pub struct Cancelled;
+
+/// Whether the dye scan was the lookup table or the exact integral.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fidelity {
+    /// Dye-scan lookup table. Fit view, and a 100% crop while a control is moving.
+    Preview,
+    /// Exact dye scan. Settled 100%, full export, and stocks with no dye curves.
+    Exact,
+}
+
 /// Parameters for one development.
 ///
 /// A plain struct. [`Stock::load`](crate::stock::Stock::load) fills one from a
@@ -57,6 +136,7 @@ pub struct SrgbImage {
     width: u32,
     height: u32,
     pixels: Vec<f32>,
+    fidelity: Fidelity,
 }
 
 /// Failure while writing a developed image.
@@ -164,6 +244,54 @@ impl Parameters {
     pub fn print_curve(&self) -> &Curve {
         &self.print_curve
     }
+
+    /// Set exposure in stops. Dirties [`Stage::Exposure`].
+    pub fn set_exposure_ev(&mut self, exposure_ev: f32) -> Result<Stage, ModelError> {
+        if !exposure_ev.is_finite() {
+            return Err(ModelError::NonFiniteExposure);
+        }
+        self.exposure_ev = exposure_ev;
+        Ok(Stage::Exposure)
+    }
+
+    /// Set the print log-exposure offset. Dirties [`Stage::Print`].
+    pub fn set_print_exposure(&mut self, print_exposure: f32) -> Result<Stage, ModelError> {
+        if !print_exposure.is_finite() {
+            return Err(ModelError::NonFiniteExposure);
+        }
+        self.print_exposure = print_exposure;
+        Ok(Stage::Print)
+    }
+
+    /// Replace highlight halation. `None` clears the stage. Dirties [`Stage::Halation`].
+    pub fn set_halation(&mut self, halation: Option<Halation>) -> Result<Stage, ModelError> {
+        self.halation = halation;
+        Ok(Stage::Halation)
+    }
+
+    /// Replace density grain. `None` clears the stage. Dirties [`Stage::Grain`].
+    pub fn set_grain(&mut self, grain: Option<Grain>) -> Result<Stage, ModelError> {
+        self.grain = grain;
+        Ok(Stage::Grain)
+    }
+
+    /// Replace the print curve. Dirties [`Stage::Print`].
+    pub fn set_print_curve(&mut self, print_curve: Curve) -> Result<Stage, ModelError> {
+        self.print_curve = print_curve;
+        Ok(Stage::Print)
+    }
+
+    /// Replace the film model.
+    ///
+    /// Curves, coupling, or sensitivities dirty [`Stage::Density`]. A change
+    /// that only touches dye curves or `reference_log_exposure` dirties
+    /// [`Stage::DyeScan`]. An identical model reports [`Stage::Encode`] and
+    /// still stores the value.
+    pub fn set_film(&mut self, film: FilmModel) -> Result<Stage, ModelError> {
+        let stage = self.film.edit_stage(&film);
+        self.film = film;
+        Ok(stage)
+    }
 }
 
 impl Pipeline {
@@ -177,28 +305,53 @@ impl Pipeline {
     ///
     /// Halation and grain run only when the parameters carry them. The result
     /// stays in sensor orientation. [`SrgbImage::write`] applies the camera
-    /// orientation while exporting.
+    /// orientation while exporting. This is the exact path: the dye scan is
+    /// never the preview lookup table.
     pub fn develop(&self, image: &LinearImage) -> SrgbImage {
-        let mut exposure = image.pixels().to_vec();
-        apply_exposure(&mut exposure, self.parameters.exposure_ev);
-        if let Some(halation) = &self.parameters.halation {
-            halation.apply(&mut exposure, image.width(), image.height());
-        }
-        let mut density = self.parameters.film.density(&exposure);
-        if let Some(grain) = &self.parameters.grain {
-            grain.apply(&mut density, image.width(), image.height());
-        }
-        let scanned = self.parameters.film.printing_density(&density);
-        let linear = print_scan(
+        self.develop_controlled(image, &mut NopControl)
+            .expect("nop control does not cancel")
+    }
+
+    /// [`Self::develop`] with cancel and progress.
+    ///
+    /// The same stage functions the preview session calls. `Err(Cancelled)`
+    /// means no image.
+    pub fn develop_controlled(
+        &self,
+        image: &LinearImage,
+        control: &mut dyn DevelopControl,
+    ) -> Result<SrgbImage, Cancelled> {
+        let exposure = exposure_buffer(image.pixels(), self.parameters.exposure_ev, control)?;
+        let exposed = halation_buffer(
+            exposure,
+            self.parameters.halation.as_ref(),
+            image.width(),
+            image.height(),
+            None,
+            control,
+        )?;
+        let density = density_buffer(&exposed, &self.parameters.film, image.width(), control)?;
+        let grained = grain_buffer(
+            density,
+            self.parameters.grain.as_ref(),
+            crate::stock::GrainRegion {
+                width: image.width(),
+                height: image.height(),
+                origin_x: 0,
+                origin_y: 0,
+                frame_width: image.width(),
+            },
+            control,
+        )?;
+        let (scanned, fidelity) =
+            dye_buffer(&grained, &self.parameters.film, image.width(), control)?;
+        let linear = print_buffer(
+            &scanned,
             self.parameters.print_exposure,
             &self.parameters.print_curve,
-            scanned.as_deref().unwrap_or(&density),
-        );
-        SrgbImage {
-            width: image.width(),
-            height: image.height(),
-            pixels: color::encode_srgb(&linear),
-        }
+            control,
+        )?;
+        encode_buffer(linear, image.width(), image.height(), fidelity, control)
     }
 }
 
@@ -208,11 +361,26 @@ impl std::fmt::Debug for SrgbImage {
             .field("width", &self.width)
             .field("height", &self.height)
             .field("pixels", &self.pixels.len())
+            .field("fidelity", &self.fidelity)
             .finish()
     }
 }
 
 impl SrgbImage {
+    pub(crate) fn from_encoded(
+        width: u32,
+        height: u32,
+        pixels: Vec<f32>,
+        fidelity: Fidelity,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            pixels,
+            fidelity,
+        }
+    }
+
     /// Width in pixels, before orientation is applied.
     pub fn width(&self) -> u32 {
         self.width
@@ -226,6 +394,16 @@ impl SrgbImage {
     /// Encoded sRGB samples in `0..=1`, interleaved RGB.
     pub fn pixels(&self) -> &[f32] {
         &self.pixels
+    }
+
+    /// `preview` for a dye-scan lookup, `exact` for the integral the export uses.
+    pub fn fidelity(&self) -> Fidelity {
+        self.fidelity
+    }
+
+    /// 8-bit RGB with the same rounding as the JPEG writer.
+    pub fn to_rgb8(&self) -> Vec<u8> {
+        quantize_u8(&self.pixels)
     }
 
     /// Whether `path` is a JPEG or TIFF this exporter can write.
@@ -288,6 +466,116 @@ fn apply_exposure(samples: &mut [f32], ev: f32) {
     for sample in samples {
         *sample *= scale;
     }
+}
+
+pub(crate) fn exposure_buffer(
+    pixels: &[f32],
+    exposure_ev: f32,
+    control: &mut dyn DevelopControl,
+) -> Result<Vec<f32>, Cancelled> {
+    begin(Stage::Exposure, 1, control)?;
+    let mut exposure = pixels.to_vec();
+    apply_exposure(&mut exposure, exposure_ev);
+    finish(Stage::Exposure, 1, control)?;
+    Ok(exposure)
+}
+
+pub(crate) fn halation_buffer(
+    mut exposure: Vec<f32>,
+    halation: Option<&Halation>,
+    width: u32,
+    height: u32,
+    sigma: Option<f32>,
+    control: &mut dyn DevelopControl,
+) -> Result<Vec<f32>, Cancelled> {
+    let Some(halation) = halation else {
+        return Ok(exposure);
+    };
+    let sigma = sigma.unwrap_or_else(|| halation.sigma_px(width, height));
+    halation.apply_controlled(&mut exposure, width, height, sigma, control)?;
+    Ok(exposure)
+}
+
+pub(crate) fn density_buffer(
+    exposure: &[f32],
+    film: &FilmModel,
+    width: u32,
+    control: &mut dyn DevelopControl,
+) -> Result<Vec<f32>, Cancelled> {
+    film.density_controlled(exposure, width, control)
+}
+
+pub(crate) fn grain_buffer(
+    mut density: Vec<f32>,
+    grain: Option<&Grain>,
+    region: crate::stock::GrainRegion,
+    control: &mut dyn DevelopControl,
+) -> Result<Vec<f32>, Cancelled> {
+    let Some(grain) = grain else {
+        return Ok(density);
+    };
+    grain.apply_region(&mut density, region, control)?;
+    Ok(density)
+}
+
+pub(crate) fn dye_buffer(
+    density: &[f32],
+    film: &FilmModel,
+    width: u32,
+    control: &mut dyn DevelopControl,
+) -> Result<(Vec<f32>, Fidelity), Cancelled> {
+    match film.printing_density_controlled(density, width, control)? {
+        Some(scanned) => Ok((scanned, Fidelity::Exact)),
+        None => Ok((density.to_vec(), Fidelity::Exact)),
+    }
+}
+
+pub(crate) fn print_buffer(
+    density: &[f32],
+    print_exposure: f32,
+    curve: &Curve,
+    control: &mut dyn DevelopControl,
+) -> Result<Vec<f32>, Cancelled> {
+    begin(Stage::Print, 1, control)?;
+    let linear = print_scan(print_exposure, curve, density);
+    finish(Stage::Print, 1, control)?;
+    Ok(linear)
+}
+
+pub(crate) fn encode_buffer(
+    linear: Vec<f32>,
+    width: u32,
+    height: u32,
+    fidelity: Fidelity,
+    control: &mut dyn DevelopControl,
+) -> Result<SrgbImage, Cancelled> {
+    begin(Stage::Encode, height, control)?;
+    let pixels = color::encode_srgb(&linear);
+    finish(Stage::Encode, height, control)?;
+    Ok(SrgbImage::from_encoded(width, height, pixels, fidelity))
+}
+
+pub(crate) fn begin(
+    stage: Stage,
+    rows: u32,
+    control: &mut dyn DevelopControl,
+) -> Result<(), Cancelled> {
+    if control.cancelled() {
+        return Err(Cancelled);
+    }
+    control.on_progress(stage, 0, rows);
+    if control.cancelled() {
+        return Err(Cancelled);
+    }
+    Ok(())
+}
+
+fn finish(stage: Stage, rows: u32, control: &mut dyn DevelopControl) -> Result<(), Cancelled> {
+    control.on_progress(stage, rows, rows);
+    if control.cancelled() {
+        return Err(Cancelled);
+    }
+    Ok(())
 }
 
 /// Invert the negative and scan it back to display-referred linear RGB.
@@ -438,6 +726,7 @@ mod tests {
             width: 2,
             height: 1,
             pixels: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            fidelity: Fidelity::Exact,
         };
         let path = std::env::temp_dir().join("rawstock-orient.tiff");
         picture.write(&path, Orientation::Rotate90).unwrap();
@@ -465,6 +754,7 @@ mod tests {
             width: 2,
             height: 1,
             pixels: vec![0.2, 0.2, 0.2, 0.8, 0.8, 0.8],
+            fidelity: Fidelity::Exact,
         };
         let path = std::env::temp_dir().join("rawstock-orient.jpg");
         picture.write(&path, Orientation::Rotate90).unwrap();
@@ -488,6 +778,7 @@ mod tests {
             width: 1,
             height: 1,
             pixels: vec![0.0, 0.0, 0.0],
+            fidelity: Fidelity::Exact,
         };
         let err = picture
             .write("/tmp/rawstock-out.png", Orientation::Normal)

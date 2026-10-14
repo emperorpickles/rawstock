@@ -182,62 +182,54 @@ CLI passes a no-op and keeps calling `Pipeline::develop`.
 
 ### CPU latency
 
-These figures are from the current scalar loops, not a timed run. The
-Portra grid is 41 wavelengths (380–780 nm at 10 nm). The dye scan calls
-`10f32.powf` once per wavelength per pixel. A 1440×944 proxy is 1.36
-million pixels, about 56 million of those `powf`s. At roughly 15–40 ns
-per scalar `powf` on one desktop core, that stage alone is about
-0.8–2.2 s. Spectral density (sigmoid upsample plus three dots per
-wavelength) is a few tenths of a second on chromatic pixels. The
-flat-gray shortcut in the upsampler does not apply to a photograph, so a
-gray wedge is the wrong timing fixture. Parametric stocks skip both
-spectral stages. Their cost is the print and the sRGB encode, on the
-order of 0.1–0.3 s for that proxy.
+Measured with Kodak Portra 400 on a release build, one core of a 4-vCPU
+Intel Xeon under KVM. The clock is `RAWSTOCK_FIXTURES=/tmp/rawstock-fixtures
+cargo test -p rawstock-core --release --test session release_preview_timings
+-- --ignored --nocapture`. The same `PreviewSession` calls are what the
+desktop worker makes. Decode is once per open. A proxy render is the fit
+view. Full export is the exact frame plus the JPEG write.
 
-Halation is three box passes, cheap next to the dye scan. Grain is not a
-per-pixel hash anymore. Rebuilding the dye-cloud field walks the film
-plane, so it costs about the same on a 720 px proxy as on the full
-frame. The amount slider avoids that walk. A `size_mm` change pays it,
-scoped to the crop when the 100% view is what's on screen. Milestone 1
-times that rebuild on a real file and writes the number here.
-
-Print-exposure drags can stay on the exact path. A grain-amount drag can
-too, once the unit field is cached: it is a multiply plus the dye-scan
-lookup. Exposure, curves, and dye scales on a spectral stock cannot: a
-full exact develop of the 1440 px proxy is a second or more. The preview
-uses a dye-scan lookup table on the proxy:
-
-- The table is a function of the dye curves and `reference_log_exposure`
-  only. Grain stays exact: it runs first, then the grained density looks
-  up the table.
-- A 48³ table over the density range the stock actually uses (Portra sits
-  roughly between 0.2 and 3.0) is about 4.5 million `powf`s to build,
-  about 70–180 ms, and only when dyes or the reference log exposure change.
-- A grain-amount drag multiplies the cached field and looks up the dye
-  table. With density already cached and the 720 px drag proxy, that
-  should land around a tenth of a second. A dye-scale drag adds the table
-  rebuild. An exposure or curve drag still recomputes spectral density:
-  a few tenths of a second at 1440 px, and about a quarter of that at
-  720 px. The cancel flag keeps the newest drag as the one that finishes.
-- The settled 100% crop and every export use the exact dye scan. The
-  widget marks the bitmap `preview` or `exact` so a proxy is not judged
-  as the file that will be saved.
-
-Print-only edits skip the table rebuild and the film model. They should
-be well under a quarter second at 1440 px, and quicker at 720 px.
-
-Full export stays on the exact path, on demand, with the progress events
-on screen:
-
-| Export | Parametric, one core | Spectral, exact dye scan, one core |
+| | X-S10 RAF, 6384×4182 | iPhone 12 Pro DNG, 4032×3024 |
 | --- | --- | --- |
-| iPhone 12 Pro, 4032×3024 | about 1.5–4 s | about 8–20 s |
-| X-S10, 6384×4182 | about 3–8 s | about 15–40 s |
+| Decode, demosaic, ACEScg | 1.07 s | 0.35 s |
+| 720 proxy, cold (dye-cloud field, density, dye table) | 3.02 s | 3.49 s |
+| 720 proxy, grain amount (cached field) | 0.04 s | 0.05 s |
+| 720 proxy, exposure (field reused) | 0.09 s | 0.11 s |
+| 1440 proxy, cold (new field) | 4.98 s | 5.77 s |
+| 1440 proxy, print exposure | 0.09 s | 0.11 s |
+| Full exact export, JPEG | 48.2 s | 25.3 s |
 
-Decode and demosaic happen once per open and are then cached. Budget a
-second or a few seconds. ProRAW skips demosaic. X-Trans pays for
-bilinear. Milestone 1 replaces this section's ranges with release-build
-timings from the worker, on a real RAF and a real DNG.
+The Portra grid is 41 wavelengths (380–780 nm at 10 nm). The exact dye
+scan calls `10f32.powf` once per wavelength per pixel. The fit view, and a
+100% crop while a control is moving, look the dye scan up in a 48³ table.
+Grain stays exact: the dye-cloud field is splatted first, then the grained
+density looks up the table. Building that table is skipped until the dye
+curves or the reference log exposure change. Parametric stocks skip both
+spectral stages.
+
+The cold proxy rows are the first splat of the dye-cloud field. That walk
+is in the film plane, so a 720 px proxy and a 1440 px proxy cost a few
+seconds each rather than scaling with pixel count. The amount slider keeps
+the field and only remultiplies RMS, which is the 0.04 s row. An exposure
+drag recomputes spectral density and reuses the field, which is the 0.09 s
+row at 720. A `size_mm` change rebuilds the field, and a 100% view rebuilds
+only the crop. A print-exposure drag stays on the exact print curve and is
+the 0.09 s row at 1440. Halation is three box passes. The full-export row
+is the exact dye scan plus a full-frame splat and the JPEG write.
+
+The table is a function of the dye curves and `reference_log_exposure`
+only. A dye-scale drag rebuilds it. The cancel flag keeps the newest drag
+as the one that finishes. The settled 100% crop and every export use the
+exact dye scan. The widget marks the bitmap `preview` or `exact` so a
+proxy is not judged as the file that will be saved.
+
+Print-only edits skip the table rebuild and the film model. On this
+machine that is under a tenth of a second at 1440. Full export stays on
+the exact path, on demand, with the progress events on screen. The JPEG
+row in the table above is that export for Portra 400. A parametric stock
+skips the spectral stages, so its export is well under those times.
+Decode and demosaic happen once per open and are then cached. ProRAW
+skips demosaic. X-Trans pays for bilinear, which is the 1.07 s RAF open.
 
 ### What the GPU adds later
 

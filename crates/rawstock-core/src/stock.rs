@@ -210,6 +210,11 @@ impl Curve {
         let weight = (log_h - self.log_h[lower]) / span;
         self.density[lower] + weight * (self.density[upper] - self.density[lower])
     }
+
+    /// The `(log10(exposure), density)` knots, in order.
+    pub fn points(&self) -> impl Iterator<Item = (f32, f32)> + '_ {
+        self.log_h.iter().copied().zip(self.density.iter().copied())
+    }
 }
 
 impl Parametric {
@@ -235,20 +240,33 @@ impl Parametric {
         self.coupling
     }
 
-    fn density(&self, exposure: &[f32]) -> Vec<f32> {
+    fn density_controlled(
+        &self,
+        exposure: &[f32],
+        width: u32,
+        control: &mut dyn crate::render::DevelopControl,
+    ) -> Result<Vec<f32>, crate::render::Cancelled> {
+        let (stride, rows) = row_span(exposure.len(), width);
+        crate::render::begin(crate::render::Stage::Density, rows, control)?;
         let mut density = Vec::with_capacity(exposure.len());
-        for pixel in exposure.as_chunks::<3>().0 {
-            let mut log_h = pixel.map(|channel| channel.max(EXPOSURE_FLOOR).log10());
-            if let Some(matrix) = self.coupling {
-                log_h = mix(matrix, log_h);
+        for (y, row) in exposure.chunks(stride).take(rows as usize).enumerate() {
+            if control.cancelled() {
+                return Err(crate::render::Cancelled);
             }
-            density.extend([
-                self.curves[0].eval(log_h[0]),
-                self.curves[1].eval(log_h[1]),
-                self.curves[2].eval(log_h[2]),
-            ]);
+            for pixel in row.as_chunks::<3>().0 {
+                let mut log_h = pixel.map(|channel| channel.max(EXPOSURE_FLOOR).log10());
+                if let Some(matrix) = self.coupling {
+                    log_h = mix(matrix, log_h);
+                }
+                density.extend([
+                    self.curves[0].eval(log_h[0]),
+                    self.curves[1].eval(log_h[1]),
+                    self.curves[2].eval(log_h[2]),
+                ]);
+            }
+            control.on_progress(crate::render::Stage::Density, y as u32 + 1, rows);
         }
-        density
+        Ok(density)
     }
 }
 
@@ -375,57 +393,139 @@ impl Spectral {
         self.reference_log_exposure
     }
 
-    fn density(&self, exposure: &[f32]) -> Vec<f32> {
+    /// Dye curves multiplied by `scales`, with the scan balance recomputed.
+    ///
+    /// Each scale is finite and non-negative. The stock must already have dye
+    /// curves. This is the dye-scale slider: the session keeps the loaded
+    /// curves as the base and writes `base × scale`.
+    pub fn with_dye_scales(&self, scales: [f32; 3]) -> Result<Self, ModelError> {
+        if scales
+            .iter()
+            .any(|scale| !scale.is_finite() || *scale < 0.0)
+        {
+            return Err(ModelError::DyeDensity);
+        }
+        let Some(dyes) = &self.dye_density else {
+            return Err(ModelError::DyeDensity);
+        };
+        let scaled = [
+            dyes[0].iter().map(|sample| sample * scales[0]).collect(),
+            dyes[1].iter().map(|sample| sample * scales[1]).collect(),
+            dyes[2].iter().map(|sample| sample * scales[2]).collect(),
+        ];
+        Self::new(
+            self.wavelengths.clone(),
+            self.sensitivity.clone(),
+            Some(scaled),
+            self.curves.clone(),
+            self.coupling,
+            self.reference_log_exposure,
+        )
+    }
+
+    fn density_controlled(
+        &self,
+        exposure: &[f32],
+        width: u32,
+        control: &mut dyn crate::render::DevelopControl,
+    ) -> Result<Vec<f32>, crate::render::Cancelled> {
+        let (stride, rows) = row_span(exposure.len(), width);
+        crate::render::begin(crate::render::Stage::Density, rows, control)?;
         let mut spectrum = vec![0.0f32; self.wavelengths.len()];
         let mut density = Vec::with_capacity(exposure.len());
-        for pixel in exposure.as_chunks::<3>().0 {
-            spectrum::fill_scene_spectrum(*pixel, &self.wavelengths, &mut spectrum);
-            let mut log_h = [0.0f32; 3];
-            for (layer, log_exposure) in log_h.iter_mut().enumerate() {
-                let mut layer_exposure = 0.0f32;
-                for (sample, weight) in spectrum.iter().zip(&self.weighted_sensitivity[layer]) {
-                    layer_exposure += sample * weight;
+        for (y, row) in exposure.chunks(stride).take(rows as usize).enumerate() {
+            if control.cancelled() {
+                return Err(crate::render::Cancelled);
+            }
+            for pixel in row.as_chunks::<3>().0 {
+                spectrum::fill_scene_spectrum(*pixel, &self.wavelengths, &mut spectrum);
+                let mut log_h = [0.0f32; 3];
+                for (layer, log_exposure) in log_h.iter_mut().enumerate() {
+                    let mut layer_exposure = 0.0f32;
+                    for (sample, weight) in spectrum.iter().zip(&self.weighted_sensitivity[layer]) {
+                        layer_exposure += sample * weight;
+                    }
+                    *log_exposure = layer_exposure.max(EXPOSURE_FLOOR).log10();
                 }
-                *log_exposure = layer_exposure.max(EXPOSURE_FLOOR).log10();
+                if let Some(matrix) = self.coupling {
+                    log_h = mix(matrix, log_h);
+                }
+                density.extend([
+                    self.curves[0].eval(log_h[0]),
+                    self.curves[1].eval(log_h[1]),
+                    self.curves[2].eval(log_h[2]),
+                ]);
             }
-            if let Some(matrix) = self.coupling {
-                log_h = mix(matrix, log_h);
-            }
-            density.extend([
-                self.curves[0].eval(log_h[0]),
-                self.curves[1].eval(log_h[1]),
-                self.curves[2].eval(log_h[2]),
-            ]);
+            control.on_progress(crate::render::Stage::Density, y as u32 + 1, rows);
         }
-        density
+        Ok(density)
     }
 
     /// Equivalent per-channel density for the existing print curve.
     ///
     /// `None` when this stock has no dye spectra: the characteristic density
     /// is already what the print curve expects.
-    fn printing_density(&self, density: &[f32]) -> Option<Vec<f32>> {
-        let dyes = self.dye_density.as_ref()?;
-        let observer = self.observer.as_ref()?;
+    fn printing_density_controlled(
+        &self,
+        density: &[f32],
+        width: u32,
+        control: &mut dyn crate::render::DevelopControl,
+    ) -> Result<Option<Vec<f32>>, crate::render::Cancelled> {
+        let Some(dyes) = self.dye_density.as_ref() else {
+            return Ok(None);
+        };
+        let Some(observer) = self.observer.as_ref() else {
+            return Ok(None);
+        };
+        let (stride, rows) = row_span(density.len(), width);
+        crate::render::begin(crate::render::Stage::DyeScan, rows, control)?;
         let mut transmittance = vec![0.0f32; self.wavelengths.len()];
         let mut printed = Vec::with_capacity(density.len());
-        for pixel in density.as_chunks::<3>().0 {
-            for index in 0..transmittance.len() {
-                let optical = dyes[0][index] * pixel[0]
-                    + dyes[1][index] * pixel[1]
-                    + dyes[2][index] * pixel[2];
-                transmittance[index] = 10f32.powf(-optical);
+        for (y, row) in density.chunks(stride).take(rows as usize).enumerate() {
+            if control.cancelled() {
+                return Err(crate::render::Cancelled);
             }
-            let scanned = observer
-                .apply(&transmittance)
-                .map(|channel| -channel.max(EXPOSURE_FLOOR).log10());
-            printed.extend([
-                scanned[0] - self.scan_balance[0],
-                scanned[1] - self.scan_balance[1],
-                scanned[2] - self.scan_balance[2],
-            ]);
+            for pixel in row.as_chunks::<3>().0 {
+                for index in 0..transmittance.len() {
+                    let optical = dyes[0][index] * pixel[0]
+                        + dyes[1][index] * pixel[1]
+                        + dyes[2][index] * pixel[2];
+                    transmittance[index] = 10f32.powf(-optical);
+                }
+                let scanned = observer
+                    .apply(&transmittance)
+                    .map(|channel| -channel.max(EXPOSURE_FLOOR).log10());
+                printed.extend([
+                    scanned[0] - self.scan_balance[0],
+                    scanned[1] - self.scan_balance[1],
+                    scanned[2] - self.scan_balance[2],
+                ]);
+            }
+            control.on_progress(crate::render::Stage::DyeScan, y as u32 + 1, rows);
         }
-        Some(printed)
+        Ok(Some(printed))
+    }
+
+    pub(crate) fn scan_pixel(
+        &self,
+        pixel: [f32; 3],
+        transmittance: &mut [f32],
+    ) -> Option<[f32; 3]> {
+        let dyes = self.dye_density.as_ref()?;
+        let observer = self.observer.as_ref()?;
+        for index in 0..transmittance.len() {
+            let optical =
+                dyes[0][index] * pixel[0] + dyes[1][index] * pixel[1] + dyes[2][index] * pixel[2];
+            transmittance[index] = 10f32.powf(-optical);
+        }
+        let scanned = observer
+            .apply(transmittance)
+            .map(|channel| -channel.max(EXPOSURE_FLOOR).log10());
+        Some([
+            scanned[0] - self.scan_balance[0],
+            scanned[1] - self.scan_balance[1],
+            scanned[2] - self.scan_balance[2],
+        ])
     }
 
     /// Density of a neutral filter with the same ACEScg transmittance.
@@ -459,9 +559,19 @@ impl FilmModel {
     /// The result has the same length as `exposure`. A trailing incomplete
     /// pixel is omitted.
     pub fn density(&self, exposure: &[f32]) -> Vec<f32> {
+        self.density_controlled(exposure, 0, &mut crate::render::NopControl)
+            .expect("nop control does not cancel")
+    }
+
+    pub(crate) fn density_controlled(
+        &self,
+        exposure: &[f32],
+        width: u32,
+        control: &mut dyn crate::render::DevelopControl,
+    ) -> Result<Vec<f32>, crate::render::Cancelled> {
         match self {
-            Self::Parametric(model) => model.density(exposure),
-            Self::Spectral(model) => model.density(exposure),
+            Self::Parametric(model) => model.density_controlled(exposure, width, control),
+            Self::Spectral(model) => model.density_controlled(exposure, width, control),
         }
     }
 
@@ -470,11 +580,79 @@ impl FilmModel {
     /// `None` means `density` is already that input. Parametric stocks, and
     /// spectral stocks without dye curves, return `None`.
     pub fn printing_density(&self, density: &[f32]) -> Option<Vec<f32>> {
+        self.printing_density_controlled(density, 0, &mut crate::render::NopControl)
+            .expect("nop control does not cancel")
+    }
+
+    pub(crate) fn printing_density_controlled(
+        &self,
+        density: &[f32],
+        width: u32,
+        control: &mut dyn crate::render::DevelopControl,
+    ) -> Result<Option<Vec<f32>>, crate::render::Cancelled> {
         match self {
-            Self::Parametric(_) => None,
-            Self::Spectral(model) => model.printing_density(density),
+            Self::Parametric(_) => Ok(None),
+            Self::Spectral(model) => model.printing_density_controlled(density, width, control),
         }
     }
+
+    /// The first stage a change from `self` to `next` has to recompute.
+    ///
+    /// [`Stage::Encode`](crate::render::Stage::Encode) means the two models
+    /// agree. Dye-only edits stay at the dye scan, so grain is kept.
+    pub(crate) fn edit_stage(&self, next: &Self) -> crate::render::Stage {
+        if self.same_density_inputs(next) {
+            if self.same_dyes(next) {
+                crate::render::Stage::Encode
+            } else {
+                crate::render::Stage::DyeScan
+            }
+        } else {
+            crate::render::Stage::Density
+        }
+    }
+
+    fn same_density_inputs(&self, next: &Self) -> bool {
+        match (self, next) {
+            (Self::Parametric(left), Self::Parametric(right)) => {
+                curves_eq(&left.curves, &right.curves) && left.coupling == right.coupling
+            }
+            (Self::Spectral(left), Self::Spectral(right)) => {
+                left.wavelengths == right.wavelengths
+                    && left.sensitivity == right.sensitivity
+                    && curves_eq(&left.curves, &right.curves)
+                    && left.coupling == right.coupling
+            }
+            _ => false,
+        }
+    }
+
+    fn same_dyes(&self, next: &Self) -> bool {
+        match (self, next) {
+            (Self::Parametric(_), Self::Parametric(_)) => true,
+            (Self::Spectral(left), Self::Spectral(right)) => {
+                left.dye_density == right.dye_density
+                    && left.reference_log_exposure == right.reference_log_exposure
+            }
+            _ => false,
+        }
+    }
+}
+
+fn curves_eq(left: &[Curve; 3], right: &[Curve; 3]) -> bool {
+    left.iter()
+        .zip(right)
+        .all(|(a, b)| a.log_h == b.log_h && a.density == b.density)
+}
+
+fn row_span(samples: usize, width: u32) -> (usize, u32) {
+    let pixels = samples / 3;
+    if pixels == 0 {
+        return (3, 0);
+    }
+    let width_px = if width == 0 { pixels } else { width as usize };
+    let rows = pixels / width_px.max(1);
+    (width_px.max(1) * 3, rows as u32)
 }
 
 /// RMS granularity of one film layer, as a function of density.
@@ -490,6 +668,36 @@ impl FilmModel {
 pub struct Granularity {
     density: Vec<f32>,
     rms: Vec<f32>,
+}
+
+/// Where a grain crop sits in the full frame.
+///
+/// Pitch and the 48 µm amplitude use `frame_width`. `origin_x` and
+/// `origin_y` are the crop's top-left in that frame, in pixels.
+#[derive(Debug, Clone, Copy)]
+pub struct GrainRegion {
+    /// Crop width in pixels.
+    pub width: u32,
+    /// Crop height in pixels.
+    pub height: u32,
+    /// Crop left edge in the full frame.
+    pub origin_x: u32,
+    /// Crop top edge in the full frame.
+    pub origin_y: u32,
+    /// Full-frame width. This sets millimetres per pixel.
+    pub frame_width: u32,
+}
+
+impl GrainRegion {
+    /// Image rows available in an interleaved RGB buffer of `samples`.
+    pub(crate) fn rows(self, samples: usize) -> usize {
+        let stride = self.width as usize * 3;
+        if self.width == 0 || self.height == 0 || stride == 0 || samples < stride {
+            0
+        } else {
+            (samples / stride).min(self.height as usize)
+        }
+    }
 }
 
 /// Per-layer film grain in density.
@@ -581,6 +789,18 @@ impl Granularity {
     pub fn points(&self) -> impl Iterator<Item = (f32, f32)> + '_ {
         self.density.iter().copied().zip(self.rms.iter().copied())
     }
+
+    /// Multiply every RMS sample by `amount`.
+    ///
+    /// `amount` is finite and non-negative. `1` leaves the table unchanged.
+    /// The session uses `None` grain, rather than a zero table, when the
+    /// amount slider is 0.
+    pub fn scaled(&self, amount: f32) -> Result<Self, ModelError> {
+        if !amount.is_finite() || amount < 0.0 {
+            return Err(ModelError::GranularitySample);
+        }
+        Self::new(self.points().map(|(density, rms)| (density, rms * amount)))
+    }
 }
 
 impl Grain {
@@ -660,6 +880,24 @@ impl Grain {
         self.size_mm
     }
 
+    /// Multiply every layer's RMS by `amount`.
+    ///
+    /// Frame width, seed, and dye-cloud size stay. `amount` follows
+    /// [`Granularity::scaled`]. The splatted field does not depend on RMS,
+    /// so a preview can keep the clouds and only rerun this scale.
+    pub fn scaled(&self, amount: f32) -> Result<Self, ModelError> {
+        Ok(Self {
+            frame_mm: self.frame_mm,
+            seed: self.seed,
+            size_mm: self.size_mm,
+            layers: [
+                self.layers[0].scaled(amount)?,
+                self.layers[1].scaled(amount)?,
+                self.layers[2].scaled(amount)?,
+            ],
+        })
+    }
+
     /// Kodak measurement aperture in pixels when the image is `width` across.
     ///
     /// This is the 48 µm window on a frame of [`Self::frame_mm`]. It scales
@@ -679,34 +917,89 @@ impl Grain {
     /// unit variance and multiplied by the granularity at that pixel. Shared
     /// clouds correlate the layers; each layer also has clouds of its own.
     pub fn apply(&self, density: &mut [f32], width: u32, height: u32) {
-        if width == 0 || height == 0 {
-            return;
+        let _ = self.apply_region(
+            density,
+            GrainRegion {
+                width,
+                height,
+                origin_x: 0,
+                origin_y: 0,
+                frame_width: width,
+            },
+            &mut crate::render::NopControl,
+        );
+    }
+
+    /// Add grain to a crop of the full frame.
+    ///
+    /// [`GrainRegion::width`] and `height` are the crop. The origin is that
+    /// crop's top-left in the full frame. Pitch and the 48 µm amplitude use
+    /// [`GrainRegion::frame_width`], not the crop width, so a 100% view
+    /// matches [`Self::apply`] on the whole frame. `control` is polled while
+    /// the clouds are splatted.
+    pub fn apply_region(
+        &self,
+        density: &mut [f32],
+        region: GrainRegion,
+        control: &mut dyn crate::render::DevelopControl,
+    ) -> Result<(), crate::render::Cancelled> {
+        let frame_width = region.frame_width;
+        if region.width == 0 || region.height == 0 || frame_width == 0 {
+            return Ok(());
         }
-        let row_stride = width as usize * 3;
-        let rows = (density.len() / row_stride).min(height as usize);
+        let rows = region.rows(density.len());
         if rows == 0 {
-            return;
+            return Ok(());
         }
-        let mut field = vec![0.0_f32; rows * row_stride];
-        let pitch = self.frame_mm / width as f32;
-        let (mean, deviation) = self.accumulate_clouds(&mut field, width, rows, pitch);
-        // σ_D = (rms / 1000) * scale. scale is 1 when the 48 µm aperture
-        // covers a pixel, and sqrt(cell_px) when one pixel covers several.
-        let scale = self.cell_px(width).min(1.0).sqrt() / 1000.0;
-        for (index, (sample, grain)) in density
-            .iter_mut()
-            .zip(field.iter())
-            .take(rows * row_stride)
-            .enumerate()
-        {
-            let layer = index % 3;
-            let rms = self.layers[layer].eval(*sample);
-            let spread = deviation[layer];
-            if rms == 0.0 || spread == 0.0 {
+        let field = self.unit_field(region, rows, control)?;
+        self.mix_field(density, &field, frame_width);
+        Ok(())
+    }
+
+    /// Normalized dye-cloud field for `region`, one value per density sample.
+    ///
+    /// The field does not depend on the granularity tables. [`Self::mix_field`]
+    /// applies RMS. A crop uses the full frame's pitch, so the same film-plane
+    /// coordinate gets the same cloud.
+    pub(crate) fn unit_field(
+        &self,
+        region: GrainRegion,
+        rows: usize,
+        control: &mut dyn crate::render::DevelopControl,
+    ) -> Result<Vec<f32>, crate::render::Cancelled> {
+        let width = region.width;
+        let frame_width = region.frame_width;
+        crate::render::begin(crate::render::Stage::Grain, rows as u32, control)?;
+        let pitch = self.frame_mm / frame_width as f32;
+        let mut field = vec![0.0_f32; rows * width as usize * 3];
+        let (mean, deviation) = self.accumulate_clouds(&mut field, region, rows, pitch, control)?;
+        for (index, sample) in field.iter_mut().enumerate() {
+            let spread = deviation[index % 3];
+            if spread == 0.0 {
+                *sample = 0.0;
+            } else {
+                *sample = (*sample - mean[index % 3]) / spread;
+            }
+        }
+        control.on_progress(crate::render::Stage::Grain, rows as u32, rows as u32);
+        if control.cancelled() {
+            return Err(crate::render::Cancelled);
+        }
+        Ok(field)
+    }
+
+    /// Add `field` from [`Self::unit_field`] onto density.
+    ///
+    /// `frame_width` is the full frame, matching the field. RMS comes from
+    /// the tables on `self`, so an amount change can reuse `field`.
+    pub(crate) fn mix_field(&self, density: &mut [f32], field: &[f32], frame_width: u32) {
+        let scale = self.cell_px(frame_width).min(1.0).sqrt() / 1000.0;
+        for (index, (sample, unit)) in density.iter_mut().zip(field.iter()).enumerate() {
+            let rms = self.layers[index % 3].eval(*sample);
+            if rms == 0.0 {
                 continue;
             }
-            let unit = (*grain - mean[layer]) / spread;
-            *sample += unit * rms * scale;
+            *sample += *unit * rms * scale;
         }
     }
 
@@ -715,31 +1008,40 @@ impl Grain {
     fn accumulate_clouds(
         &self,
         field: &mut [f32],
-        width: u32,
+        region: GrainRegion,
         rows: usize,
         pitch: f32,
-    ) -> ([f32; 3], [f32; 3]) {
+        control: &mut dyn crate::render::DevelopControl,
+    ) -> Result<([f32; 3], [f32; 3]), crate::render::Cancelled> {
         let mut mean = [0.0_f32; 3];
         let mut variance = [0.0_f32; 3];
         for cloud in DYE_CLOUDS {
-            let (cloud_mean, cloud_variance) = self.splat_cloud(field, width, rows, pitch, *cloud);
+            let (cloud_mean, cloud_variance) =
+                self.splat_cloud(field, region, rows, pitch, *cloud, control)?;
             for layer in 0..3 {
                 mean[layer] += cloud_mean[layer];
                 variance[layer] += cloud_variance[layer];
             }
         }
-        (mean, variance.map(f32::sqrt))
+        Ok((mean, variance.map(f32::sqrt)))
     }
 
     /// Add one Poisson process. Layers named by the mask share grain centers.
     fn splat_cloud(
         &self,
         field: &mut [f32],
-        width: u32,
+        region: GrainRegion,
         rows: usize,
         pitch: f32,
         cloud: DyeCloud,
-    ) -> ([f32; 3], [f32; 3]) {
+        control: &mut dyn crate::render::DevelopControl,
+    ) -> Result<([f32; 3], [f32; 3]), crate::render::Cancelled> {
+        let GrainRegion {
+            width,
+            origin_x,
+            origin_y,
+            ..
+        } = region;
         let (amp_mean, amp_second) = amplitude_moments();
         let lambda = cloud.mu / (cloud.cell_mm * cloud.cell_mm);
         let scale_second = radius_scale_second(cloud.radius_scale);
@@ -767,18 +1069,23 @@ impl Grain {
             margin = margin.max(radius_hi[layer] * cloud.aspect_max.sqrt());
         }
         if margin == 0.0 {
-            return (mean, variance);
+            return Ok((mean, variance));
         }
 
         let cell = cloud.cell_mm;
-        let width_mm = self.frame_mm;
+        let origin_x_mm = origin_x as f32 * pitch;
+        let origin_y_mm = origin_y as f32 * pitch;
+        let width_mm = width as f32 * pitch;
         let height_mm = rows as f32 * pitch;
-        let x_first = ((-margin) / cell).floor() as i32;
-        let y_first = ((-margin) / cell).floor() as i32;
-        let x_last = ((width_mm + margin) / cell).floor() as i32;
-        let y_last = ((height_mm + margin) / cell).floor() as i32;
+        let x_first = ((origin_x_mm - margin) / cell).floor() as i32;
+        let y_first = ((origin_y_mm - margin) / cell).floor() as i32;
+        let x_last = ((origin_x_mm + width_mm + margin) / cell).floor() as i32;
+        let y_last = ((origin_y_mm + height_mm + margin) / cell).floor() as i32;
         let seed = self.seed.wrapping_add(cloud.salt);
         for cy in y_first..=y_last {
+            if control.cancelled() {
+                return Err(crate::render::Cancelled);
+            }
             for cx in x_first..=x_last {
                 let mut rng = CloudRng::new(cx as u32, cy as u32, seed);
                 let count = poisson_count(cloud.mu, &mut rng);
@@ -806,6 +1113,8 @@ impl Grain {
                             width,
                             rows,
                             pitch,
+                            origin_x as f32,
+                            origin_y as f32,
                             Stamp {
                                 x_mm,
                                 y_mm,
@@ -821,7 +1130,7 @@ impl Grain {
                 }
             }
         }
-        (mean, variance)
+        Ok((mean, variance))
     }
 }
 
@@ -864,41 +1173,82 @@ impl Halation {
         self.radius * width.min(height) as f32
     }
 
+    /// How far the box-blur support reaches, in pixels, for this sigma.
+    ///
+    /// A 100% crop is padded by this many pixels so the edge of the view
+    /// sees the same glow as the full frame. Sigma comes from the full
+    /// frame, not from the crop.
+    pub fn blur_support(sigma: f32) -> u32 {
+        if !sigma.is_finite() || sigma < 0.5 {
+            return 0;
+        }
+        box_radii(sigma).iter().sum::<usize>() as u32
+    }
+
+    /// [`Self::blur_support`] at [`Self::sigma_px`] for this frame.
+    pub fn support_px(&self, width: u32, height: u32) -> u32 {
+        Self::blur_support(self.sigma_px(width, height))
+    }
+
     /// Add halation to interleaved scene-linear RGB exposure.
     ///
     /// The highlight measure is the peak channel. The blur is normalized, so
     /// a uniform field is unchanged by the blur itself and the added energy
     /// of an interior highlight stays within the excess energy times the
-    /// weight sum.
+    /// weight sum. Sigma is `radius` times the shorter side of this buffer.
     pub fn apply(&self, exposure: &mut [f32], width: u32, height: u32) {
+        self.apply_with_sigma(exposure, width, height, self.sigma_px(width, height));
+    }
+
+    /// [`Self::apply`] with an explicit Gaussian sigma, in pixels.
+    ///
+    /// A crop passes the full frame's sigma so the glow is not resized to
+    /// the crop.
+    pub fn apply_with_sigma(&self, exposure: &mut [f32], width: u32, height: u32, sigma: f32) {
+        let _ = self.apply_controlled(
+            exposure,
+            width,
+            height,
+            sigma,
+            &mut crate::render::NopControl,
+        );
+    }
+
+    pub(crate) fn apply_controlled(
+        &self,
+        exposure: &mut [f32],
+        width: u32,
+        height: u32,
+        sigma: f32,
+        control: &mut dyn crate::render::DevelopControl,
+    ) -> Result<(), crate::render::Cancelled> {
         let width_px = width as usize;
         let height_px = height as usize;
         if width_px == 0 || height_px == 0 {
-            return;
+            return Ok(());
         }
         let Some(pixels) = width_px.checked_mul(height_px) else {
-            return;
+            return Ok(());
         };
         let Some(samples) = pixels.checked_mul(3) else {
-            return;
+            return Ok(());
         };
         if exposure.len() < samples {
-            return;
+            return Ok(());
         }
+        crate::render::begin(crate::render::Stage::Halation, height, control)?;
         let mut excess = vec![0.0_f32; pixels];
         for (index, pixel) in exposure[..samples].as_chunks::<3>().0.iter().enumerate() {
+            if index % width_px == 0 && control.cancelled() {
+                return Err(crate::render::Cancelled);
+            }
             let peak = pixel[0].max(pixel[1]).max(pixel[2]);
             let over = peak - self.threshold;
             if over > 0.0 {
                 excess[index] = over;
             }
         }
-        widen(
-            &mut excess,
-            width_px,
-            height_px,
-            self.sigma_px(width, height),
-        );
+        widen(&mut excess, width_px, height_px, sigma, control)?;
         for (index, pixel) in exposure[..samples]
             .as_chunks_mut::<3>()
             .0
@@ -910,6 +1260,8 @@ impl Halation {
             pixel[1] += self.weight[1] * glow;
             pixel[2] += self.weight[2] * glow;
         }
+        control.on_progress(crate::render::Stage::Halation, height, height);
+        Ok(())
     }
 }
 
@@ -1069,7 +1421,15 @@ struct Stamp {
     layer: usize,
 }
 
-fn stamp_cloud(field: &mut [f32], width: u32, rows: usize, pitch: f32, stamp: Stamp) {
+fn stamp_cloud(
+    field: &mut [f32],
+    width: u32,
+    rows: usize,
+    pitch: f32,
+    origin_x: f32,
+    origin_y: f32,
+    stamp: Stamp,
+) {
     let Stamp {
         x_mm,
         y_mm,
@@ -1081,8 +1441,8 @@ fn stamp_cloud(field: &mut [f32], width: u32, rows: usize, pitch: f32, stamp: St
         layer,
     } = stamp;
     let major = rx.max(ry);
-    let px = x_mm / pitch;
-    let py = y_mm / pitch;
+    let px = x_mm / pitch - origin_x;
+    let py = y_mm / pitch - origin_y;
     let rad = major / pitch;
     let x0 = ((px - rad - 0.5).ceil() as i32).max(0);
     let y0 = ((py - rad - 0.5).ceil() as i32).max(0);
@@ -1095,10 +1455,10 @@ fn stamp_cloud(field: &mut [f32], width: u32, rows: usize, pitch: f32, stamp: St
     let inv_ry = 1.0 / ry;
     let width = width as usize;
     for y in y0 as usize..=y1 as usize {
-        let dy = (y as f32 + 0.5) * pitch - y_mm;
+        let dy = (origin_y + y as f32 + 0.5) * pitch - y_mm;
         let row_start = y * width * 3;
         for x in x0 as usize..=x1 as usize {
-            let dx = (x as f32 + 0.5) * pitch - x_mm;
+            let dx = (origin_x + x as f32 + 0.5) * pitch - x_mm;
             let dxr = dx * cos + dy * sin;
             let dyr = -dx * sin + dy * cos;
             let d2 = (dxr * inv_rx) * (dxr * inv_rx) + (dyr * inv_ry) * (dyr * inv_ry);
@@ -1120,6 +1480,78 @@ pub enum StockModel {
     Parametric,
     /// Spectral sensitivities into those same curves, plus optional dye density.
     Spectral,
+}
+
+impl fmt::Display for StockModel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Parametric => "parametric",
+            Self::Spectral => "spectral",
+        })
+    }
+}
+
+/// Name, provenance, and model tag for [`Stock::from_parts`].
+///
+/// The save dialog fills this. The film parameters travel separately, and
+/// [`Stock::from_parts`] rejects a tag that does not match the film model.
+#[derive(Debug, Clone)]
+pub struct StockMeta {
+    revision: u32,
+    name: String,
+    source: String,
+    license: String,
+    model: StockModel,
+}
+
+impl StockMeta {
+    /// `name`, `source`, and `license` must contain text.
+    pub fn new(
+        revision: u32,
+        name: impl Into<String>,
+        source: impl Into<String>,
+        license: impl Into<String>,
+        model: StockModel,
+    ) -> Result<Self, StockError> {
+        let name = name.into();
+        let source = source.into();
+        let license = license.into();
+        require_text("name", &name)?;
+        require_text("source", &source)?;
+        require_text("license", &license)?;
+        Ok(Self {
+            revision,
+            name,
+            source,
+            license,
+            model,
+        })
+    }
+
+    /// Stock revision, independent of the schema version.
+    pub fn revision(&self) -> u32 {
+        self.revision
+    }
+
+    /// Display name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Where the numbers came from.
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// License of those numbers.
+    pub fn license(&self) -> &str {
+        &self.license
+    }
+
+    /// Model tag. It has to match the [`FilmModel`] passed to [`Stock::from_parts`].
+    pub fn model(&self) -> StockModel {
+        self.model
+    }
 }
 
 /// A stock file loaded into [`Parameters`].
@@ -1254,6 +1686,23 @@ pub enum StockError {
         len: usize,
         /// Samples the wavelength grid requires.
         expected: usize,
+    },
+
+    /// The model tag does not match the film model.
+    #[error("stock model is {model:?}, but the film model is the other kind")]
+    ModelMismatch {
+        /// The tag [`StockMeta`] carried.
+        model: StockModel,
+    },
+
+    /// The stock file could not be written.
+    #[error("failed to write stock file {path}")]
+    Write {
+        /// The path that failed.
+        path: String,
+        /// The filesystem error.
+        #[source]
+        source: std::io::Error,
     },
 }
 
@@ -1394,6 +1843,54 @@ impl Stock {
             source,
         })?;
         Self::from_toml(&text, path)
+    }
+
+    /// Parse stock text. [`Self::load`] reads the file, then calls this.
+    ///
+    /// Wasm hosts and the save dialog's preview use this so they never need
+    /// a path. Parse errors name the input `<input>`.
+    pub fn parse(text: &str) -> Result<Self, StockError> {
+        Self::from_toml(text, Path::new("<input>"))
+    }
+
+    /// Build a stock from the save dialog's fields and the current parameters.
+    ///
+    /// `meta.model` has to be the same kind as `parameters`' film model.
+    pub fn from_parts(meta: StockMeta, parameters: Parameters) -> Result<Self, StockError> {
+        let matches = matches!(
+            (meta.model, parameters.film()),
+            (StockModel::Parametric, FilmModel::Parametric(_))
+                | (StockModel::Spectral, FilmModel::Spectral(_))
+        );
+        if !matches {
+            return Err(StockError::ModelMismatch { model: meta.model });
+        }
+        Ok(Self {
+            schema_version: Self::SCHEMA_VERSION,
+            revision: meta.revision,
+            name: meta.name,
+            source: meta.source,
+            license: meta.license,
+            model: meta.model,
+            parameters,
+        })
+    }
+
+    /// Schema 1 text. Optional tables are omitted when they are off.
+    ///
+    /// The first line says rawstock wrote the file and that comments are not
+    /// kept. Floats use a decimal that round-trips through `f32`.
+    pub fn to_toml(&self) -> String {
+        StockText::write(self)
+    }
+
+    /// Write [`Self::to_toml`] to `path`.
+    pub fn write(&self, path: impl AsRef<Path>) -> Result<(), StockError> {
+        let path = path.as_ref();
+        std::fs::write(path, self.to_toml()).map_err(|source| StockError::Write {
+            path: path.display().to_string(),
+            source,
+        })
     }
 
     /// Schema version of the file. Equal to [`Self::SCHEMA_VERSION`] for a loaded stock.
@@ -1589,18 +2086,31 @@ fn halation_from_samples(samples: HalationSamples) -> Result<Halation, StockErro
 /// Three box passes whose variance matches a Gaussian of standard deviation
 /// `sigma`. Widths follow Peter Kovesi, "Fast Almost-Gaussian Filtering"
 /// (DICTA 2010). A sigma below half a pixel is left unblurred.
-fn widen(samples: &mut [f32], width: usize, height: usize, sigma: f32) {
+fn widen(
+    samples: &mut [f32],
+    width: usize,
+    height: usize,
+    sigma: f32,
+    control: &mut dyn crate::render::DevelopControl,
+) -> Result<(), crate::render::Cancelled> {
     if !sigma.is_finite() || sigma < 0.5 || width == 0 || height == 0 {
-        return;
+        return Ok(());
     }
     let mut scratch = vec![0.0_f32; samples.len()];
     for radius in box_radii(sigma) {
+        if control.cancelled() {
+            return Err(crate::render::Cancelled);
+        }
         if radius == 0 {
             continue;
         }
         box_blur_horizontal(samples, &mut scratch, width, height, radius);
+        if control.cancelled() {
+            return Err(crate::render::Cancelled);
+        }
         box_blur_vertical(&scratch, samples, width, height, radius);
     }
+    Ok(())
 }
 
 fn box_radii(sigma: f32) -> [usize; 3] {
@@ -1838,6 +2348,168 @@ fn mix(matrix: [[f32; 3]; 3], value: [f32; 3]) -> [f32; 3] {
     ]
 }
 
+/// Schema 1 writer. Key order follows `stocks/README.md`.
+struct StockText {
+    out: String,
+}
+
+impl StockText {
+    fn write(stock: &Stock) -> String {
+        let mut text = Self {
+            out: String::from("# Written by rawstock. Comments are not preserved.\n"),
+        };
+        text.line("");
+        text.key_int("schema_version", stock.schema_version);
+        text.key_int("revision", stock.revision);
+        text.key_str("name", &stock.name);
+        text.key_str("source", &stock.source);
+        text.key_str("license", &stock.license);
+        text.key_raw("model", &stock.model.to_string());
+        text.key_float("exposure_ev", stock.parameters.exposure_ev());
+        text.key_float("print_exposure", stock.parameters.print_exposure());
+        if let FilmModel::Spectral(model) = stock.parameters.film() {
+            if let Some(reference) = model.reference_log_exposure() {
+                text.key_float("reference_log_exposure", reference);
+            }
+            text.key_floats("wavelength_nm", model.wavelengths());
+        }
+        text.line("");
+        let (curves, coupling) = match stock.parameters.film() {
+            FilmModel::Parametric(model) => (model.curves(), model.coupling()),
+            FilmModel::Spectral(model) => (model.curves(), model.coupling()),
+        };
+        for (name, curve) in ["red", "green", "blue"].into_iter().zip(curves) {
+            text.curve(name, curve);
+        }
+        text.curve("print", stock.parameters.print_curve());
+        if let Some(matrix) = coupling {
+            text.line("");
+            text.table("coupling");
+            text.matrix(matrix);
+        }
+        if let Some(grain) = stock.parameters.grain() {
+            text.line("");
+            text.table("grain");
+            text.key_float("frame_mm", grain.frame_mm());
+            text.key_int("seed", grain.seed());
+            for (index, (name, layer)) in ["red", "green", "blue"]
+                .into_iter()
+                .zip(grain.layers())
+                .enumerate()
+            {
+                text.table(&format!("grain.{name}"));
+                let (density, rms): (Vec<f32>, Vec<f32>) = layer.points().unzip();
+                text.key_floats("density", &density);
+                text.key_floats("rms", &rms);
+                text.key_float("size_mm", grain.size_mm()[index]);
+            }
+        }
+        if let Some(halation) = stock.parameters.halation() {
+            text.line("");
+            text.table("halation");
+            text.key_float("threshold", halation.threshold());
+            text.key_float("radius", halation.radius());
+            text.key_floats("weight", &halation.weight());
+        }
+        if let FilmModel::Spectral(model) = stock.parameters.film() {
+            text.line("");
+            text.rgb_table("sensitivity", model.sensitivities());
+            if let Some(dyes) = model.dye_density() {
+                text.line("");
+                text.rgb_table("dye_density", dyes);
+            }
+        }
+        text.out.push('\n');
+        text.out
+    }
+
+    fn curve(&mut self, name: &str, curve: &Curve) {
+        self.line("");
+        self.table(name);
+        let (log_h, density): (Vec<f32>, Vec<f32>) = curve.points().unzip();
+        self.key_floats("log_exposure", &log_h);
+        self.key_floats("density", &density);
+    }
+
+    fn rgb_table(&mut self, name: &str, channels: &[Vec<f32>; 3]) {
+        self.table(name);
+        self.key_floats("red", &channels[0]);
+        self.key_floats("green", &channels[1]);
+        self.key_floats("blue", &channels[2]);
+    }
+
+    fn matrix(&mut self, matrix: [[f32; 3]; 3]) {
+        let rows: Vec<String> = matrix.iter().map(|row| format_f32_array(row)).collect();
+        self.line(&format!("matrix = [{}]", rows.join(", ")));
+    }
+
+    fn table(&mut self, name: &str) {
+        self.line(&format!("[{name}]"));
+    }
+
+    fn key_int(&mut self, key: &str, value: u32) {
+        self.line(&format!("{key} = {value}"));
+    }
+
+    fn key_float(&mut self, key: &str, value: f32) {
+        self.line(&format!("{key} = {}", format_f32(value)));
+    }
+
+    fn key_floats(&mut self, key: &str, values: &[f32]) {
+        self.line(&format!("{key} = {}", format_f32_array(values)));
+    }
+
+    fn key_str(&mut self, key: &str, value: &str) {
+        self.line(&format!("{key} = \"{}\"", escape_toml(value)));
+    }
+
+    fn key_raw(&mut self, key: &str, value: &str) {
+        self.line(&format!("{key} = \"{value}\""));
+    }
+
+    fn line(&mut self, text: &str) {
+        self.out.push_str(text);
+        self.out.push('\n');
+    }
+}
+
+fn format_f32_array(values: &[f32]) -> String {
+    let mut out = String::from("[");
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&format_f32(*value));
+    }
+    out.push(']');
+    out
+}
+
+/// Shortest debug decimal, which round-trips through `f32`.
+fn format_f32(value: f32) -> String {
+    let text = format!("{value:?}");
+    if text.contains('.') || text.contains('e') || text.contains('E') {
+        text
+    } else {
+        format!("{text}.0")
+    }
+}
+
+fn escape_toml(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2041,5 +2713,49 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, ModelError::Sensitivity));
+    }
+
+    #[test]
+    fn crop_grain_matches_the_full_frame() {
+        let layer = Granularity::new([(0.0, 40.0), (3.0, 40.0)]).unwrap();
+        let grain = Grain::new(35.0, 9, [layer.clone(), layer.clone(), layer]).unwrap();
+        let frame_width = 96;
+        let frame_height = 40;
+        let mut full = vec![1.0_f32; frame_width as usize * frame_height as usize * 3];
+        grain.apply(&mut full, frame_width, frame_height);
+        let origin_x = 17;
+        let origin_y = 9;
+        let width = 20;
+        let height = 12;
+        let mut crop = vec![1.0_f32; width as usize * height as usize * 3];
+        grain
+            .apply_region(
+                &mut crop,
+                GrainRegion {
+                    width,
+                    height,
+                    origin_x,
+                    origin_y,
+                    frame_width,
+                },
+                &mut crate::render::NopControl,
+            )
+            .unwrap();
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                for channel in 0..3 {
+                    let full_index =
+                        ((origin_y as usize + y) * frame_width as usize + origin_x as usize + x)
+                            * 3
+                            + channel;
+                    let crop_index = (y * width as usize + x) * 3 + channel;
+                    assert_eq!(
+                        crop[crop_index].to_bits(),
+                        full[full_index].to_bits(),
+                        "pixel {x},{y} channel {channel}"
+                    );
+                }
+            }
+        }
     }
 }

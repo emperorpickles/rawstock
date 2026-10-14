@@ -1,0 +1,341 @@
+:root {
+  color-scheme: dark;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+  font-size: 15px;
+  line-height: 1.4;
+  background: #141210;
+  color: #f3eadc;
+  --paper: #231f1b;
+  --ink: #f3eadc;
+  --muted: #b3a594;
+  --line: #3a332c;
+  --brass: #d7a15a;
+  --brass-deep: #8a6230;
+  --well: #0c0b0a;
+  --danger: #e0a090;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  height: 100%;
+}
+
+button,
+input {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.35rem 0.8rem;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--brass);
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+button.on,
+button.primary {
+  background: var(--brass);
+  border-color: var(--brass);
+  color: #1a140e;
+}
+
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--brass);
+  outline-offset: 2px;
+}
+
+.shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  height: 100%;
+}
+
+.toolbar,
+.status {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.7rem 1rem;
+  background: var(--paper);
+  border-bottom: 1px solid var(--line);
+}
+
+.status {
+  border-bottom: 0;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  min-height: 2.6rem;
+}
+
+.word {
+  font-family: Palatino, "Iowan Old Style", Georgia, serif;
+  font-size: 1.35rem;
+  letter-spacing: 0.01em;
+  margin-right: 0.4rem;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.stage {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  background: var(--well);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.stage canvas.fit {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.stage canvas.pixel {
+  cursor: grab;
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.stage canvas.pixel:active {
+  cursor: grabbing;
+}
+
+.stage .empty,
+.stage .pending {
+  position: relative;
+  z-index: 1;
+  max-width: 28rem;
+  text-align: center;
+  color: var(--muted);
+  padding: 1.5rem;
+}
+
+.stage .pending {
+  position: absolute;
+  left: 1rem;
+  bottom: 1rem;
+  text-align: left;
+  background: rgb(20 18 16 / 80%);
+  border-radius: 0.4rem;
+}
+
+.badge {
+  position: absolute;
+  top: 0.8rem;
+  left: 0.8rem;
+  z-index: 1;
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.badge span,
+.note {
+  background: rgb(20 18 16 / 82%);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.15rem 0.6rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.note {
+  position: absolute;
+  right: 0.8rem;
+  bottom: 0.8rem;
+  z-index: 1;
+  border-radius: 0.4rem;
+  max-width: 22rem;
+}
+
+.panel {
+  grid-row: 2 / span 2;
+  grid-column: 2;
+  overflow: auto;
+  background: #1b1815;
+  border-left: 1px solid var(--line);
+  padding: 1rem 1rem 1.4rem;
+}
+
+.panel h2 {
+  font-family: Palatino, "Iowan Old Style", Georgia, serif;
+  font-size: 1.05rem;
+  font-weight: 500;
+  margin: 0 0 0.6rem;
+}
+
+.stocks {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-bottom: 1.1rem;
+}
+
+.stocks button {
+  border-radius: 0.45rem;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.1rem;
+  padding: 0.45rem 0.65rem;
+}
+
+.stocks button small,
+.meta,
+.hint,
+.fault {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.stocks button.on {
+  color: #1a140e;
+}
+
+.stocks button.on small {
+  color: #3d2c16;
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  margin-top: 0.4rem;
+}
+
+label.slider {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.15rem 0.6rem;
+}
+
+label.slider input[type="range"] {
+  grid-column: 1 / -1;
+  width: 100%;
+  accent-color: var(--brass);
+}
+
+.readout {
+  font-variant-numeric: tabular-nums;
+  color: var(--brass);
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.weights {
+  color: var(--muted);
+  font-size: 0.82rem;
+  margin: 0;
+}
+
+.meta {
+  margin: 0.2rem 0 0.8rem;
+}
+
+.fault {
+  color: var(--danger);
+}
+
+.dialog-back {
+  position: fixed;
+  inset: 0;
+  background: rgb(8 7 6 / 72%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 5;
+}
+
+.dialog {
+  width: min(32rem, calc(100% - 2rem));
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 0.7rem;
+  padding: 1.1rem 1.2rem 1.2rem;
+}
+
+.dialog h2 {
+  font-family: Palatino, "Iowan Old Style", Georgia, serif;
+  font-weight: 500;
+  margin: 0 0 0.4rem;
+}
+
+.dialog p {
+  color: var(--muted);
+  margin: 0 0 0.9rem;
+}
+
+.fields {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.fields input,
+.fields textarea {
+  font: inherit;
+  color: var(--ink);
+  background: var(--well);
+  border: 1px solid var(--line);
+  border-radius: 0.35rem;
+  padding: 0.4rem 0.5rem;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.shell-message {
+  height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 2rem;
+  text-align: center;
+}
+
+.shell-message p {
+  max-width: 28rem;
+  color: var(--muted);
+}

@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Rawstock",
+  "version": "0.0.1",
+  "identifier": "dev.rawstock.desktop",
+  "build": {
+    "beforeDevCommand": "sh src-tauri/ui.sh dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "sh src-tauri/ui.sh build",
+    "frontendDist": "../../ui/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Rawstock",
+        "width": 1320,
+        "height": 860,
+        "minWidth": 960,
+        "minHeight": 640
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/icon.ico"
+    ]
+  }
+}

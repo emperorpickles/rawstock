@@ -1,6 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["crates/rawstock-core", "crates/rawstock-cli"]
+members = [
+    "crates/rawstock-core",
+    "crates/rawstock-cli",
+    "apps/desktop/src-tauri",
+]
 
 [workspace.package]
 version = "0.0.1"
