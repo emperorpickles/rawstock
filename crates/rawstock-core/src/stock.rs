@@ -1,9 +1,19 @@
-//! Film model: scene exposure to per-layer density.
+//! Film model: scene exposure to per-layer density, and the stock files that
+//! fill [`Parameters`](crate::render::Parameters).
 //!
 //! Spectral (wavelength sensitivity and dye density) is intentionally not a
-//! variant yet. The only model is [`FilmModel::Parametric`].
+//! variant yet. The only model is [`FilmModel::Parametric`]. A stock file
+//! names that choice with [`StockModel`], so a later `spectral` tag can be
+//! added without changing the `parametric` tag existing files already use.
 
+use std::fmt;
+use std::path::Path;
+
+use serde::Deserialize;
+use serde::de::{self, DeserializeSeed, Deserializer, SeqAccess, Visitor};
 use thiserror::Error;
+
+use crate::render::Parameters;
 
 /// A monotone D-logH characteristic curve.
 ///
@@ -164,6 +174,323 @@ impl FilmModel {
         match self {
             Self::Parametric(model) => model.density(exposure),
         }
+    }
+}
+
+/// On-disk model tag.
+///
+/// `Spectral` is not a variant yet. Existing files say `parametric`, and that
+/// tag stays valid when a spectral variant is added.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StockModel {
+    /// Per-layer D-logH curves and optional log-exposure coupling.
+    Parametric,
+}
+
+/// A stock file loaded into [`Parameters`].
+///
+/// Metadata stays here. The curves, coupling, exposure, and print stage are
+/// the existing [`Parameters`] value, not a second parameter type.
+#[derive(Debug, Clone)]
+pub struct Stock {
+    schema_version: u32,
+    revision: u32,
+    name: String,
+    source: String,
+    license: String,
+    model: StockModel,
+    parameters: Parameters,
+}
+
+/// A stock file could not be loaded.
+#[derive(Debug, Error)]
+pub enum StockError {
+    /// The file could not be read.
+    #[error("failed to read stock file {path}")]
+    Read {
+        /// The path that failed.
+        path: String,
+        /// The filesystem error.
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// TOML parsing failed, including an unknown field or model tag.
+    #[error("failed to parse stock file {path}")]
+    Parse {
+        /// The path that failed.
+        path: String,
+        /// The TOML error.
+        #[source]
+        source: toml::de::Error,
+    },
+
+    /// `schema_version` is not a version this build understands.
+    #[error("unknown stock schema version {version}")]
+    UnknownVersion {
+        /// The version stored in the file.
+        version: u32,
+    },
+
+    /// `name`, `source`, or `license` was missing its text.
+    #[error("stock {field} is empty")]
+    Empty {
+        /// Which field was empty.
+        field: &'static str,
+    },
+
+    /// A curve's log-exposure and density columns differ in length.
+    #[error("{curve} log-exposure and density arrays have lengths {log_exposure} and {density}")]
+    ArrayLength {
+        /// `red`, `green`, `blue`, or `print`.
+        curve: &'static str,
+        /// Length of `log_exposure`.
+        log_exposure: usize,
+        /// Length of `density`.
+        density: usize,
+    },
+
+    /// A curve was not a monotone characteristic curve.
+    #[error("{curve} characteristic curve is invalid")]
+    Curve {
+        /// `red`, `green`, `blue`, or `print`.
+        curve: &'static str,
+        /// Why the curve was rejected.
+        #[source]
+        source: ModelError,
+    },
+
+    /// Coupling or exposure failed the film-model checks.
+    #[error(transparent)]
+    Model(ModelError),
+}
+
+/// Parser input. Not a second public parameter type: [`Stock::load`] turns it
+/// into [`Parameters`].
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StockFile {
+    schema_version: u32,
+    revision: u32,
+    name: String,
+    source: String,
+    license: String,
+    model: StockModel,
+    #[serde(deserialize_with = "de_f32")]
+    exposure_ev: f32,
+    #[serde(deserialize_with = "de_f32")]
+    print_exposure: f32,
+    red: CurveSamples,
+    green: CurveSamples,
+    blue: CurveSamples,
+    print: CurveSamples,
+    #[serde(default)]
+    coupling: Option<CouplingSamples>,
+}
+
+/// Optional interlayer coupling. Absent means the layers stay independent.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CouplingSamples {
+    /// Row-major 3×3. Multiplies the log-exposure column vector.
+    matrix: [[f32; 3]; 3],
+}
+
+/// One measured curve: index `i` is the step-wedge pair
+/// `(log_exposure[i], density[i])`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CurveSamples {
+    #[serde(deserialize_with = "de_f32_vec")]
+    log_exposure: Vec<f32>,
+    #[serde(deserialize_with = "de_f32_vec")]
+    density: Vec<f32>,
+}
+
+impl Stock {
+    /// Schema this build reads. A file with any other `schema_version` is rejected.
+    pub const SCHEMA_VERSION: u32 = 1;
+
+    /// Read a stock file and validate it into [`Parameters`].
+    ///
+    /// Each curve's log-exposure and density arrays must be the same length.
+    /// Log-exposure must strictly increase and density must not decrease.
+    /// `schema_version` must be [`Self::SCHEMA_VERSION`].
+    pub fn load(path: impl AsRef<Path>) -> Result<Self, StockError> {
+        let path = path.as_ref();
+        let text = std::fs::read_to_string(path).map_err(|source| StockError::Read {
+            path: path.display().to_string(),
+            source,
+        })?;
+        Self::from_toml(&text, path)
+    }
+
+    /// Schema version of the file. Equal to [`Self::SCHEMA_VERSION`] for a loaded stock.
+    pub fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    /// The stock's own revision, independent of [`Self::schema_version`].
+    pub fn revision(&self) -> u32 {
+        self.revision
+    }
+
+    /// Display name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Where the numbers came from.
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// License of those numbers.
+    pub fn license(&self) -> &str {
+        &self.license
+    }
+
+    /// Model tag from the file.
+    pub fn model(&self) -> StockModel {
+        self.model
+    }
+
+    /// Development parameters stored in the file.
+    pub fn parameters(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    /// Take the development parameters out of the stock.
+    pub fn into_parameters(self) -> Parameters {
+        self.parameters
+    }
+
+    fn from_toml(text: &str, path: &Path) -> Result<Self, StockError> {
+        let file: StockFile = toml::from_str(text).map_err(|source| StockError::Parse {
+            path: path.display().to_string(),
+            source,
+        })?;
+        if file.schema_version != Self::SCHEMA_VERSION {
+            return Err(StockError::UnknownVersion {
+                version: file.schema_version,
+            });
+        }
+        let name = require_text("name", &file.name)?.to_string();
+        let source = require_text("source", &file.source)?.to_string();
+        let license = require_text("license", &file.license)?.to_string();
+        let red = curve_from_samples("red", &file.red)?;
+        let green = curve_from_samples("green", &file.green)?;
+        let blue = curve_from_samples("blue", &file.blue)?;
+        let print = curve_from_samples("print", &file.print)?;
+        let coupling = file.coupling.map(|coupling| coupling.matrix);
+        let film = match file.model {
+            StockModel::Parametric => FilmModel::Parametric(
+                Parametric::new([red, green, blue], coupling).map_err(StockError::Model)?,
+            ),
+        };
+        let parameters = Parameters::new(file.exposure_ev, film, file.print_exposure, print)
+            .map_err(StockError::Model)?;
+        Ok(Self {
+            schema_version: file.schema_version,
+            revision: file.revision,
+            name,
+            source,
+            license,
+            model: file.model,
+            parameters,
+        })
+    }
+}
+
+fn require_text<'a>(field: &'static str, value: &'a str) -> Result<&'a str, StockError> {
+    if value.trim().is_empty() {
+        Err(StockError::Empty { field })
+    } else {
+        Ok(value)
+    }
+}
+
+fn curve_from_samples(curve: &'static str, samples: &CurveSamples) -> Result<Curve, StockError> {
+    if samples.log_exposure.len() != samples.density.len() {
+        return Err(StockError::ArrayLength {
+            curve,
+            log_exposure: samples.log_exposure.len(),
+            density: samples.density.len(),
+        });
+    }
+    let points = samples
+        .log_exposure
+        .iter()
+        .copied()
+        .zip(samples.density.iter().copied());
+    Curve::new(points).map_err(|source| StockError::Curve { curve, source })
+}
+
+fn de_f32<'de, D>(deserializer: D) -> Result<f32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserializer.deserialize_any(F32Visitor)
+}
+
+fn de_f32_vec<'de, D>(deserializer: D) -> Result<Vec<f32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserializer.deserialize_seq(F32VecVisitor)
+}
+
+struct F32Visitor;
+
+impl Visitor<'_> for F32Visitor {
+    type Value = f32;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a number")
+    }
+
+    fn visit_i64<E: de::Error>(self, value: i64) -> Result<f32, E> {
+        Ok(value as f32)
+    }
+
+    fn visit_u64<E: de::Error>(self, value: u64) -> Result<f32, E> {
+        Ok(value as f32)
+    }
+
+    fn visit_f64<E: de::Error>(self, value: f64) -> Result<f32, E> {
+        Ok(value as f32)
+    }
+}
+
+struct F32VecVisitor;
+
+impl<'de> Visitor<'de> for F32VecVisitor {
+    type Value = Vec<f32>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("an array of numbers")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<f32>, A::Error> {
+        let mut values = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+        while let Some(value) = seq.next_element_seed(F32Seed)? {
+            values.push(value);
+        }
+        Ok(values)
+    }
+}
+
+struct F32Seed;
+
+impl<'de> DeserializeSeed<'de> for F32Seed {
+    type Value = f32;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<f32, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        de_f32(deserializer)
     }
 }
 
