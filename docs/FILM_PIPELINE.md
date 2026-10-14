@@ -334,6 +334,13 @@ uniform angle, so the blob is an ellipse rather than a disc. The radius is
 log-uniform between two scales of that layer's `size_mm`. The strength of
 one cloud is uniform on `[0.45, 1]`.
 
+When the finest cloud is still smaller than about 1.15 px, that kernel is
+point-sampled: the photosite is already the average. Once it covers more
+than that, a 1.05 px gaussian reconstructs the stamp before the field is
+normalized. The pad around a crop is the kernel support, so the 100% view
+still matches the full frame. The analytical deviation is reduced by the
+same blur, and the 48 µm aperture scaling is unchanged.
+
 The field is **multi-scale**. `DYE_CLOUDS` is six Poisson processes. Three
 of them are shared by all three dye layers, at cell sizes 0.012 mm (fine),
 0.020 mm (mid), and 0.046 mm (coarse). Their variances are 0.22, 0.40, and

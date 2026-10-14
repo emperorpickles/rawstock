@@ -190,11 +190,15 @@ impl RawImage {
     ///
     /// Black/white normalization and demosaic are `rawler`'s rescale and
     /// demosaic steps (Bayer via PPG, X-Trans via bilinear, linear DNG
-    /// unchanged). As-shot white balance is applied in camera RGB, normalized
-    /// so green stays at the sensor white level. The D65 camera matrix is
-    /// row-scaled so D65 maps to camera white, inverted, then a Bradford
-    /// adaptation takes D65 to the ACES white and AP1 takes that XYZ into
-    /// ACEScg.
+    /// unchanged). Rescale does not clip above the white level, so highlights
+    /// are cut to that level in camera RGB, white-balanced with green at 1,
+    /// then cut again at the smallest multiplier. That second cut is what
+    /// keeps a clipped neutral from turning magenta: the short channel would
+    /// otherwise be the only one still at the sensor white. The D65 camera
+    /// matrix is row-scaled so D65 maps to camera white, inverted, then a
+    /// Bradford adaptation takes D65 to the ACES white and AP1 takes that XYZ
+    /// into ACEScg. White balance is already in the samples, so the matrix
+    /// sees an identity balance.
     pub fn develop_linear(&self) -> Result<LinearImage, DevelopError> {
         let developed = RawDevelop::new_with(&[ProcessingStep::Rescale, ProcessingStep::Demosaic])
             .develop_intermediate(self.decoded())
@@ -210,7 +214,9 @@ impl RawImage {
             }
         };
 
-        let transform = acescg_transform(self.camera_matrix(), self.as_shot_wb())?;
+        let white_balance = normalized_white_balance(self.as_shot_wb())?;
+        recover_highlights(&mut samples, white_balance);
+        let transform = acescg_transform(self.camera_matrix(), [1.0, 1.0, 1.0, 0.0])?;
         apply_transform(&mut samples, transform);
         LinearImage::new(width, height, samples)
     }
@@ -330,6 +336,31 @@ fn normalized_white_balance(as_shot_wb: [f32; 4]) -> Result<[f64; 3], DevelopErr
     Ok([f64::from(rgb[0]) / green, 1.0, f64::from(rgb[2]) / green])
 }
 
+/// Clip photosites to the white level, apply white balance, then clip to the
+/// first channel that would have clipped on a neutral.
+///
+/// `white_balance` is green-normalized. A fully exposed neutral is `(1, 1, 1)`
+/// on the sensor. Multiplying by a balance whose red or blue coefficient is
+/// above 1, then by the color matrix, leaves green short and the highlight
+/// encodes magenta. Cutting every balanced channel at `min(white_balance)`
+/// pulls that neutral back to camera white. A colorful pixel that only clips
+/// one channel stays colorful: only the channels past the cap move.
+fn recover_highlights(samples: &mut [f32], white_balance: [f64; 3]) {
+    let wb = white_balance.map(|channel| channel as f32);
+    let cap = wb[0].min(wb[1]).min(wb[2]);
+    for pixel in samples.as_chunks_mut::<3>().0 {
+        for channel in 0..3 {
+            let sensor = pixel[channel];
+            let sensor = if sensor.is_finite() {
+                sensor.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            pixel[channel] = (sensor * wb[channel]).min(cap);
+        }
+    }
+}
+
 fn apply_transform(samples: &mut [f32], matrix: [[f32; 3]; 3]) {
     for pixel in samples.as_chunks_mut::<3>().0 {
         let red = pixel[0];
@@ -444,6 +475,47 @@ mod tests {
         ];
         let matrix = acescg_transform(xyz_to_camera, [1.0, 1.0, 1.0, 0.0]).unwrap();
         assert_white(apply_pixel(matrix, [1.0, 1.0, 1.0]));
+    }
+
+    #[test]
+    fn clipped_highlight_stays_neutral_under_fuji_balance() {
+        // X-S10 matrix and an as-shot balance in the same shape as the CC0
+        // fixture (green already 1, blue the largest coefficient).
+        let xyz_to_camera = [
+            [1.3426, -0.6334, -0.1177],
+            [-0.4244, 1.2136, 0.2371],
+            [-0.058, 0.1303, 0.598],
+            [0.0, 0.0, 0.0],
+        ];
+        let balance = normalized_white_balance([1.6953642, 1.0, 2.3509934, f32::NAN]).unwrap();
+        let matrix = acescg_transform(xyz_to_camera, [1.0, 1.0, 1.0, 0.0]).unwrap();
+
+        let mut white = vec![1.4, 1.2, 1.8];
+        recover_highlights(&mut white, balance);
+        apply_transform(&mut white, matrix);
+        assert_white([white[0], white[1], white[2]]);
+        let encoded = encode_srgb(&white);
+        for channel in &encoded {
+            assert!((channel - 1.0).abs() < 1.0e-4, "{encoded:?}");
+        }
+
+        // A red that only just clips stays red. Baking the balance into the
+        // matrix and clipping after it paints this pixel magenta.
+        let mut red = vec![1.0, 0.25, 0.20];
+        recover_highlights(&mut red, balance);
+        apply_transform(&mut red, matrix);
+        assert!(
+            red[0] > red[1] + 0.15 && red[0] > red[2] + 0.05,
+            "clipped red went magenta: {red:?}"
+        );
+
+        // A gray below the cap is only white-balanced, not crushed.
+        let level = 0.4_f32;
+        let mut gray = vec![level / balance[0] as f32, level, level / balance[2] as f32];
+        recover_highlights(&mut gray, balance);
+        for channel in &gray {
+            assert!((channel - level).abs() < 1.0e-5, "{gray:?}");
+        }
     }
 
     #[test]

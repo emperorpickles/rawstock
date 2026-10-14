@@ -961,6 +961,13 @@ impl Grain {
     /// The field does not depend on the granularity tables. [`Self::mix_field`]
     /// applies RMS. A crop uses the full frame's pitch, so the same film-plane
     /// coordinate gets the same cloud.
+    ///
+    /// Clouds smaller than a pixel are left as point samples: the photosite
+    /// already averages them, and widening them would pin the density
+    /// deviation to the pixel instead of to the 48 µm aperture. Once the
+    /// finest cloud covers more than about a pixel, the compact kernel is
+    /// reconstructed with a short gaussian. The stamp is padded by that
+    /// kernel so a crop matches the full frame, including at the frame edge.
     pub(crate) fn unit_field(
         &self,
         region: GrainRegion,
@@ -971,21 +978,54 @@ impl Grain {
         let frame_width = region.frame_width;
         crate::render::begin(crate::render::Stage::Grain, rows as u32, control)?;
         let pitch = self.frame_mm / frame_width as f32;
-        let mut field = vec![0.0_f32; rows * width as usize * 3];
-        let (mean, deviation) = self.accumulate_clouds(&mut field, region, rows, pitch, control)?;
-        for (index, sample) in field.iter_mut().enumerate() {
-            let spread = deviation[index % 3];
+        let finest = self.size_mm.into_iter().fold(f32::MAX, f32::min).max(0.0);
+        let finest_px = DYE_CLOUDS[0].radius_scale[0] * finest / pitch;
+        let sigma = reconstruction_sigma(finest_px);
+        let pad = reconstruction_pad(sigma);
+        let origin_x = region.origin_x as i32 - pad;
+        let origin_y = region.origin_y as i32 - pad;
+        let padded_w = width as usize + pad as usize * 2;
+        let padded_h = rows + pad as usize * 2;
+        let mut field = vec![0.0_f32; padded_h * padded_w * 3];
+        let (mean, deviation) = self.accumulate_clouds(
+            &mut field,
+            CloudTarget {
+                width: padded_w as u32,
+                rows: padded_h,
+                origin_x,
+                origin_y,
+                pitch,
+            },
+            control,
+        )?;
+        if sigma > 0.0 {
+            gaussian_blur(&mut field, padded_w, padded_h, sigma, control)?;
+        }
+        let atten = self.size_mm.map(|size| {
+            let radius_px = 0.45 * size / pitch;
+            reconstruction_atten(radius_px, sigma)
+        });
+        let mut out = vec![0.0_f32; rows * width as usize * 3];
+        for y in 0..rows {
+            let src = ((y + pad as usize) * padded_w + pad as usize) * 3;
+            let dst = y * width as usize * 3;
+            out[dst..dst + width as usize * 3]
+                .copy_from_slice(&field[src..src + width as usize * 3]);
+        }
+        for (index, sample) in out.iter_mut().enumerate() {
+            let layer = index % 3;
+            let spread = deviation[layer] * atten[layer];
             if spread == 0.0 {
                 *sample = 0.0;
             } else {
-                *sample = (*sample - mean[index % 3]) / spread;
+                *sample = (*sample - mean[layer]) / spread;
             }
         }
         control.on_progress(crate::render::Stage::Grain, rows as u32, rows as u32);
         if control.cancelled() {
             return Err(crate::render::Cancelled);
         }
-        Ok(field)
+        Ok(out)
     }
 
     /// Add `field` from [`Self::unit_field`] onto density.
@@ -1008,16 +1048,13 @@ impl Grain {
     fn accumulate_clouds(
         &self,
         field: &mut [f32],
-        region: GrainRegion,
-        rows: usize,
-        pitch: f32,
+        target: CloudTarget,
         control: &mut dyn crate::render::DevelopControl,
     ) -> Result<([f32; 3], [f32; 3]), crate::render::Cancelled> {
         let mut mean = [0.0_f32; 3];
         let mut variance = [0.0_f32; 3];
         for cloud in DYE_CLOUDS {
-            let (cloud_mean, cloud_variance) =
-                self.splat_cloud(field, region, rows, pitch, *cloud, control)?;
+            let (cloud_mean, cloud_variance) = self.splat_cloud(field, target, *cloud, control)?;
             for layer in 0..3 {
                 mean[layer] += cloud_mean[layer];
                 variance[layer] += cloud_variance[layer];
@@ -1030,18 +1067,17 @@ impl Grain {
     fn splat_cloud(
         &self,
         field: &mut [f32],
-        region: GrainRegion,
-        rows: usize,
-        pitch: f32,
+        target: CloudTarget,
         cloud: DyeCloud,
         control: &mut dyn crate::render::DevelopControl,
     ) -> Result<([f32; 3], [f32; 3]), crate::render::Cancelled> {
-        let GrainRegion {
+        let CloudTarget {
             width,
+            rows,
             origin_x,
             origin_y,
-            ..
-        } = region;
+            pitch,
+        } = target;
         let (amp_mean, amp_second) = amplitude_moments();
         let lambda = cloud.mu / (cloud.cell_mm * cloud.cell_mm);
         let scale_second = radius_scale_second(cloud.radius_scale);
@@ -1408,6 +1444,121 @@ fn poisson_count(mu: f32, rng: &mut CloudRng) -> u32 {
         count += 1;
     }
     count
+}
+
+/// Where a dye-cloud splat lands. Origins are pixels and may be negative so a
+/// reconstruction kernel can read grains that sit just outside the crop.
+#[derive(Clone, Copy)]
+struct CloudTarget {
+    width: u32,
+    rows: usize,
+    origin_x: i32,
+    origin_y: i32,
+    pitch: f32,
+}
+
+/// Gaussian sigma, in pixels, once dye clouds are large enough to alias.
+///
+/// The finest process uses [`DYE_CLOUDS`] radius scale `0.30`. Under about
+/// 1.15 px that cloud is smaller than the photosite, and the aperture scaling
+/// in [`Grain::mix_field`] is what sets the deviation. Above that, a
+/// point-sampled compact kernel stair-steps. The sigma reaches 1.05 px by
+/// 1.7 px and then stays there, so a finer scan does not get a stronger blur.
+fn reconstruction_sigma(finest_radius_px: f32) -> f32 {
+    const START: f32 = 1.15;
+    const FULL: f32 = 1.7;
+    const SIGMA: f32 = 1.05;
+    if !(finest_radius_px.is_finite()) || finest_radius_px <= START {
+        return 0.0;
+    }
+    let t = ((finest_radius_px - START) / (FULL - START)).min(1.0);
+    SIGMA * t
+}
+
+fn reconstruction_pad(sigma: f32) -> i32 {
+    if sigma <= 0.0 {
+        0
+    } else {
+        (sigma * 3.0).ceil() as i32
+    }
+}
+
+/// How much of the analytical deviation remains after [`gaussian_blur`].
+///
+/// `radius_px` is the layer's mid fine-cloud radius. A blur that is small
+/// next to that radius barely moves the deviation; a blur comparable to it
+/// does. The 1.35 was fit so a 40 MP Portra-sized field stays at unit
+/// deviation after the reconstruction.
+fn reconstruction_atten(radius_px: f32, sigma: f32) -> f32 {
+    if sigma <= 0.0 || !(radius_px.is_finite()) || radius_px <= 0.0 {
+        return 1.0;
+    }
+    let ratio = sigma / radius_px;
+    1.0 / (1.0 + 1.35 * ratio * ratio).sqrt()
+}
+
+/// Separable gaussian. `field` is interleaved RGB of `width` by `rows`.
+fn gaussian_blur(
+    field: &mut [f32],
+    width: usize,
+    rows: usize,
+    sigma: f32,
+    control: &mut dyn crate::render::DevelopControl,
+) -> Result<(), crate::render::Cancelled> {
+    let radius = reconstruction_pad(sigma);
+    if radius <= 0 || width == 0 || rows == 0 {
+        return Ok(());
+    }
+    let mut kernel = Vec::with_capacity(radius as usize * 2 + 1);
+    let mut weight = 0.0_f32;
+    for offset in -radius..=radius {
+        let tap = (-0.5 * (offset as f32 / sigma).powi(2)).exp();
+        kernel.push(tap);
+        weight += tap;
+    }
+    for tap in &mut kernel {
+        *tap /= weight;
+    }
+    let mut temp = vec![0.0_f32; field.len()];
+    for y in 0..rows {
+        if control.cancelled() {
+            return Err(crate::render::Cancelled);
+        }
+        for x in 0..width {
+            let mut acc = [0.0_f32; 3];
+            for (index, tap) in kernel.iter().enumerate() {
+                let src_x = (x as i32 + index as i32 - radius).clamp(0, width as i32 - 1) as usize;
+                let src = (y * width + src_x) * 3;
+                acc[0] += field[src] * tap;
+                acc[1] += field[src + 1] * tap;
+                acc[2] += field[src + 2] * tap;
+            }
+            let dst = (y * width + x) * 3;
+            temp[dst] = acc[0];
+            temp[dst + 1] = acc[1];
+            temp[dst + 2] = acc[2];
+        }
+    }
+    for y in 0..rows {
+        if control.cancelled() {
+            return Err(crate::render::Cancelled);
+        }
+        for x in 0..width {
+            let mut acc = [0.0_f32; 3];
+            for (index, tap) in kernel.iter().enumerate() {
+                let src_y = (y as i32 + index as i32 - radius).clamp(0, rows as i32 - 1) as usize;
+                let src = (src_y * width + x) * 3;
+                acc[0] += temp[src] * tap;
+                acc[1] += temp[src + 1] * tap;
+                acc[2] += temp[src + 2] * tap;
+            }
+            let dst = (y * width + x) * 3;
+            field[dst] = acc[0];
+            field[dst + 1] = acc[1];
+            field[dst + 2] = acc[2];
+        }
+    }
+    Ok(())
 }
 
 struct Stamp {

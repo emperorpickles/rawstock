@@ -37,10 +37,12 @@ What is derived
 
     ``exposure_ev`` places a scene-linear 0.18 on ``log10(12.5 / ISO)``, the
     middle-gray log exposure spectral_film_lut uses for an ISO speed. The
-    print curve is the synthetic scan curve from ``stocks/neutral.stock.toml``,
-    not a paper measurement. ``print_exposure`` is chosen so the mean
-    scanned dye density at that log exposure sits on the same print
-    log-exposure the neutral stock uses for a 0.18 gray (0.2).
+    print curve below is the synthetic scan curve Portra was imported
+    against. It used to match ``stocks/neutral.stock.toml``; Neutral's live
+    curve has since been retuned, and these knots stay frozen so a re-import
+    still matches the stock in the tree. ``print_exposure`` is chosen so the
+    mean scanned dye density at that log exposure sits on print
+    log-exposure 0.2, which was Neutral's 0.18 gray when Portra was built.
 """
 
 from __future__ import annotations
@@ -56,7 +58,9 @@ WAVELENGTH_MAX = 780
 WAVELENGTH_STEP = 10
 # spectral_film_lut construct_spectral_density defaults.
 DYE_SIGMA_NM = 25.0
-# Neutral stock's print stage. 0.2 is print log-exposure of its 0.18 gray.
+# Frozen print stage from the Neutral stock at the time Portra was imported.
+# 0.2 is the print log-exposure that stock gave a 0.18 gray. Neutral's live
+# curve is no longer these knots; do not copy them back from the stock file.
 NEUTRAL_PRINT_LOG = 0.2
 PRINT_LOG_EXPOSURE = [-1.5, -0.5, 0.2, 1.0, 2.0]
 PRINT_DENSITY = [0.04, 0.20, 0.70, 1.50, 2.20]

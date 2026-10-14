@@ -1,18 +1,21 @@
 # Neutral reference stock. Schema is documented in stocks/README.md.
 # Each curve index is one step-wedge reading: log10(exposure), density.
 # These numbers are synthetic. They are not a measurement of a manufactured film.
+# The pair is a view transform: middle gray encodes near a straight sRGB
+# gray, highlights still shoulder, and the same curve on every channel keeps
+# a neutral neutral.
 
 schema_version = 1
-revision = 1
+revision = 2
 name = "Neutral"
-source = "Synthetic reference written for rawstock. Red, green, and blue share one D-logH curve, and interlayer coupling is omitted. The numbers are a mild negative toe and shoulder, not a measurement of a manufactured film."
+source = "Synthetic reference written for rawstock. Red, green, and blue share one D-logH curve, and interlayer coupling is omitted. The curve is a view transform: middle gray stays near a straight sRGB encoding, highlights still shoulder, and a neutral stays neutral. It is not a measurement of a manufactured film."
 license = "CC0-1.0"
 model = "parametric"
 
 # Stops applied to scene-linear exposure before the film model.
 exposure_ev = 0.0
 # Print log-exposure is print_exposure minus negative density.
-print_exposure = 0.9
+print_exposure = 1.25
 
 # Optional interlayer coupling. Omit the table when the layers are independent.
 # The matrix is row-major and multiplies the log-exposure column vector
@@ -24,17 +27,17 @@ print_exposure = 0.9
 # stays gray. See stocks/README.md for the table shape.
 
 [red]
-log_exposure = [-3.5, -2.0, -0.7, 0.0, 0.6, 1.5]
-density = [0.15, 0.30, 0.70, 1.15, 1.70, 2.05]
+log_exposure = [-3.8, -2.6, -1.6, -0.7447, 0.0, 0.5, 1.1]
+density = [0.18, 0.42, 0.72, 1.10, 1.70, 2.02, 2.28]
 
 [green]
-log_exposure = [-3.5, -2.0, -0.7, 0.0, 0.6, 1.5]
-density = [0.15, 0.30, 0.70, 1.15, 1.70, 2.05]
+log_exposure = [-3.8, -2.6, -1.6, -0.7447, 0.0, 0.5, 1.1]
+density = [0.18, 0.42, 0.72, 1.10, 1.70, 2.02, 2.28]
 
 [blue]
-log_exposure = [-3.5, -2.0, -0.7, 0.0, 0.6, 1.5]
-density = [0.15, 0.30, 0.70, 1.15, 1.70, 2.05]
+log_exposure = [-3.8, -2.6, -1.6, -0.7447, 0.0, 0.5, 1.1]
+density = [0.18, 0.42, 0.72, 1.10, 1.70, 2.02, 2.28]
 
 [print]
-log_exposure = [-1.5, -0.5, 0.2, 1.0, 2.0]
-density = [0.04, 0.20, 0.70, 1.50, 2.20]
+log_exposure = [-1.6, -0.7, 0.15, 0.85, 1.55, 2.3]
+density = [0.04, 0.12, 0.74, 1.70, 2.30, 2.55]

@@ -1,6 +1,7 @@
 //! Grain hash, density mean, resolution scaling, and halation energy.
 
-use rawstock_core::stock::{Grain, Granularity, Halation, ModelError};
+use rawstock_core::render::NopControl;
+use rawstock_core::stock::{Grain, GrainRegion, Granularity, Halation, ModelError};
 
 fn flat(rms: f32) -> Granularity {
     Granularity::new([(0.0, rms), (4.0, rms)]).unwrap()
@@ -310,6 +311,71 @@ fn grain_has_no_grid_and_is_not_white() {
 }
 
 #[test]
+fn resolved_clouds_stay_soft_and_a_crop_matches() {
+    // 35 mm across 6160 px is a 40 MP frame. Portra's dye clouds are then a
+    // few pixels wide; a point-sampled kernel leaves hard pixel steps there.
+    let layer = flat(1000.0);
+    let grain = Grain::new(35.0, 400, [layer.clone(), layer.clone(), layer])
+        .unwrap()
+        .with_size_mm([0.070, 0.048, 0.034])
+        .unwrap();
+    let width = 200_u32;
+    let height = 140_u32;
+    let mut density = vec![1.0_f32; width as usize * height as usize * 3];
+    let region = GrainRegion {
+        width,
+        height,
+        origin_x: 1800,
+        origin_y: 1200,
+        frame_width: 6160,
+    };
+    grain
+        .apply_region(&mut density, region, &mut NopControl)
+        .unwrap();
+
+    let rough = neighbor_roughness(&density, width);
+    assert!(
+        rough[0] < 0.155 && rough[1] < 0.22 && rough[2] < 0.27,
+        "neighbor roughness {rough:?} is still a hard pixel step"
+    );
+    let std = channel_std(&density);
+    for (channel, value) in std.iter().enumerate() {
+        assert!((value - 1.0).abs() < 0.08, "channel {channel} std {value}");
+    }
+    assert!(equal_neighbor_fraction_of(&density, width) < 0.01);
+
+    let crop_w = 24_u32;
+    let crop_h = 16_u32;
+    let mut crop = vec![1.0_f32; crop_w as usize * crop_h as usize * 3];
+    grain
+        .apply_region(
+            &mut crop,
+            GrainRegion {
+                width: crop_w,
+                height: crop_h,
+                origin_x: region.origin_x + 11,
+                origin_y: region.origin_y + 7,
+                frame_width: region.frame_width,
+            },
+            &mut NopControl,
+        )
+        .unwrap();
+    for y in 0..crop_h as usize {
+        for x in 0..crop_w as usize {
+            for channel in 0..3 {
+                let full_index = ((7 + y) * width as usize + (11 + x)) * 3 + channel;
+                let crop_index = (y * crop_w as usize + x) * 3 + channel;
+                assert_eq!(
+                    crop[crop_index].to_bits(),
+                    density[full_index].to_bits(),
+                    "pixel {x},{y} channel {channel}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn dye_cloud_size_scales_with_the_frame() {
     let grain = grain(1.0, 13, 1000.0);
     let coarse = develop_field(&grain, 128, 32);
@@ -492,6 +558,43 @@ fn channel_correlation(density: &[f32]) -> f32 {
         cov += (f64::from(*r) - f64::from(red_mean)) * (f64::from(*g) - f64::from(green_mean));
     }
     (cov / red.len() as f64) as f32 / (red_std * green_std)
+}
+
+fn neighbor_roughness(density: &[f32], width: u32) -> [f32; 3] {
+    let width = width as usize;
+    let height = density.len() / 3 / width;
+    let mut acc = [0.0_f64; 3];
+    let mut count = [0.0_f64; 3];
+    for y in 0..height {
+        for x in 0..width {
+            let index = (y * width + x) * 3;
+            if x + 1 < width {
+                for channel in 0..3 {
+                    acc[channel] +=
+                        f64::from((density[index + channel] - density[index + 3 + channel]).abs());
+                    count[channel] += 1.0;
+                }
+            }
+            if y + 1 < height {
+                let below = index + width * 3;
+                for channel in 0..3 {
+                    acc[channel] +=
+                        f64::from((density[index + channel] - density[below + channel]).abs());
+                    count[channel] += 1.0;
+                }
+            }
+        }
+    }
+    let std = channel_std(density);
+    [0, 1, 2].map(|channel| (acc[channel] / count[channel]) as f32 / std[channel])
+}
+
+fn channel_std(density: &[f32]) -> [f32; 3] {
+    let mut columns = [Vec::new(), Vec::new(), Vec::new()];
+    for (index, sample) in density.iter().enumerate() {
+        columns[index % 3].push(*sample);
+    }
+    columns.map(|column| mean_std(&column).1)
 }
 
 fn mean_std(samples: &[f32]) -> (f32, f32) {

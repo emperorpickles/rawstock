@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rawstock_core::color::LinearImage;
-use rawstock_core::render::Parameters;
+use rawstock_core::render::{Parameters, Pipeline};
 use rawstock_core::stock::{FilmModel, Grain, ModelError, Stock, StockError, StockModel};
 
 fn neutral_path() -> PathBuf {
@@ -32,35 +32,65 @@ fn neutral_text() -> String {
 fn example_stock_round_trips_into_parameters() {
     let stock = Stock::load(neutral_path()).unwrap();
     assert_eq!(stock.schema_version(), Stock::SCHEMA_VERSION);
-    assert_eq!(stock.revision(), 1);
+    assert_eq!(stock.revision(), 2);
     assert_eq!(stock.name(), "Neutral");
     assert_eq!(
         stock.source(),
-        "Synthetic reference written for rawstock. Red, green, and blue share one D-logH curve, and interlayer coupling is omitted. The numbers are a mild negative toe and shoulder, not a measurement of a manufactured film."
+        "Synthetic reference written for rawstock. Red, green, and blue share one D-logH curve, and interlayer coupling is omitted. The curve is a view transform: middle gray stays near a straight sRGB encoding, highlights still shoulder, and a neutral stays neutral. It is not a measurement of a manufactured film."
     );
     assert_eq!(stock.license(), "CC0-1.0");
     assert_eq!(stock.model(), StockModel::Parametric);
 
     let parameters: &Parameters = stock.parameters();
     assert_eq!(parameters.exposure_ev(), 0.0);
-    assert!((parameters.print_exposure() - 0.9).abs() < 1.0e-6);
+    assert!((parameters.print_exposure() - 1.25).abs() < 1.0e-6);
 
     let FilmModel::Parametric(model) = parameters.film() else {
         panic!("neutral stock is parametric");
     };
     assert!(model.coupling().is_none());
-    let knots = [-3.5_f32, -2.0, -0.7, 0.0, 0.6, 1.5];
-    let density = [0.15_f32, 0.30, 0.70, 1.15, 1.70, 2.05];
+    let knots = [-3.8_f32, -2.6, -1.6, -0.7447, 0.0, 0.5, 1.1];
+    let density = [0.18_f32, 0.42, 0.72, 1.10, 1.70, 2.02, 2.28];
     for curve in model.curves() {
         assert_curve(curve, &knots, &density);
     }
     assert_curve(
         parameters.print_curve(),
-        &[-1.5, -0.5, 0.2, 1.0, 2.0],
-        &[0.04, 0.20, 0.70, 1.50, 2.20],
+        &[-1.6, -0.7, 0.15, 0.85, 1.55, 2.3],
+        &[0.04, 0.12, 0.74, 1.70, 2.30, 2.55],
     );
     assert!(parameters.grain().is_none());
     assert!(parameters.halation().is_none());
+}
+
+#[test]
+fn neutral_stock_holds_gray_and_color() {
+    let stock = Stock::load(neutral_path()).unwrap();
+    let pipeline = Pipeline::new(stock.parameters().clone());
+    let code = |rgb: [f32; 3]| {
+        let image = LinearImage::new(1, 1, rgb.to_vec()).unwrap();
+        let bytes = pipeline.develop(&image).to_rgb8();
+        [bytes[0], bytes[1], bytes[2]]
+    };
+
+    let gray = code([0.18, 0.18, 0.18]);
+    assert_eq!(gray[0], gray[1]);
+    assert_eq!(gray[1], gray[2]);
+    assert!(
+        (110..=126).contains(&gray[0]),
+        "middle gray {gray:?} left the straight sRGB code"
+    );
+    let shadow = code([0.02, 0.02, 0.02]);
+    assert!(shadow[0] < 75, "shadows are lifted: {shadow:?}");
+    let white = code([1.0, 1.0, 1.0]);
+    assert!(white[0] > 180, "highlights are flat: {white:?}");
+    assert!(white[0] > gray[0] + 50, "gray {gray:?} white {white:?}");
+    assert_eq!(white, [white[0], white[0], white[0]]);
+
+    let red = code([0.083, 0.017, 0.009]);
+    assert!(red[0] > red[1] + 25 && red[0] > red[2] + 25, "{red:?}");
+    let blue = code([0.001, 0.002, 0.07]);
+    assert!(blue[2] > blue[0] + 40 && blue[2] > blue[1] + 40, "{blue:?}");
 }
 
 #[test]
@@ -115,8 +145,8 @@ matrix = [[1.0, 0.25, 0.0], [0.0, 1.0, 0.5], [0.0, 0.0, 1.0]]
 #[test]
 fn rejects_a_non_monotone_curve() {
     let text = neutral_text().replacen(
-        "density = [0.15, 0.30, 0.70, 1.15, 1.70, 2.05]",
-        "density = [0.15, 0.30, 0.10, 1.15, 1.70, 2.05]",
+        "density = [0.18, 0.42, 0.72, 1.10, 1.70, 2.02, 2.28]",
+        "density = [0.18, 0.42, 0.10, 1.10, 1.70, 2.02, 2.28]",
         1,
     );
     let err = load_text(&text).unwrap_err();
@@ -129,8 +159,8 @@ fn rejects_a_non_monotone_curve() {
     ));
 
     let text = neutral_text().replacen(
-        "log_exposure = [-3.5, -2.0, -0.7, 0.0, 0.6, 1.5]",
-        "log_exposure = [-3.5, -2.0, -0.7, -0.7, 0.6, 1.5]",
+        "log_exposure = [-3.8, -2.6, -1.6, -0.7447, 0.0, 0.5, 1.1]",
+        "log_exposure = [-3.8, -2.6, -1.6, -0.7447, -0.7447, 0.5, 1.1]",
         1,
     );
     let err = load_text(&text).unwrap_err();
@@ -146,8 +176,8 @@ fn rejects_a_non_monotone_curve() {
 #[test]
 fn rejects_arrays_of_different_lengths() {
     let text = neutral_text().replacen(
-        "log_exposure = [-3.5, -2.0, -0.7, 0.0, 0.6, 1.5]",
-        "log_exposure = [-3.5, -2.0]",
+        "log_exposure = [-3.8, -2.6, -1.6, -0.7447, 0.0, 0.5, 1.1]",
+        "log_exposure = [-3.8, -2.6]",
         1,
     );
     let err = load_text(&text).unwrap_err();
@@ -156,7 +186,7 @@ fn rejects_arrays_of_different_lengths() {
         StockError::ArrayLength {
             curve: "red",
             log_exposure: 2,
-            density: 6,
+            density: 7,
         }
     ));
 }

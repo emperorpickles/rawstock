@@ -7,7 +7,7 @@
 use rawstock_core::color::LinearImage;
 use rawstock_core::decode::RawImage;
 use rawstock_core::render::{Parameters, Pipeline};
-use rawstock_core::stock::{Curve, FilmModel, Parametric};
+use rawstock_core::stock::{Curve, FilmModel, Parametric, Stock};
 
 #[path = "common/mod.rs"]
 mod common;
@@ -72,6 +72,20 @@ fn develop_fixture(fixture: &Fixture, patch: GrayPatch) {
     assert_eq!(raw.orientation(), fixture.orientation);
     let mean = patch_mean(&linear, patch.x, patch.y, patch.size);
     assert_neutral(fixture.filename, mean, patch.tolerance);
+
+    let patch_image = LinearImage::new(1, 1, mean.to_vec()).unwrap();
+    let neutral = Stock::load(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../stocks/neutral.stock.toml"),
+    )
+    .unwrap();
+    let printed = Pipeline::new(neutral.parameters().clone()).develop(&patch_image);
+    let px = printed.pixels();
+    assert_neutral(
+        &format!("{} through Neutral", fixture.filename),
+        [px[0], px[1], px[2]],
+        0.05,
+    );
 
     let developed = Pipeline::new(neutral_parameters()).develop(&linear);
     let dir = std::env::temp_dir().join("rawstock-export");
