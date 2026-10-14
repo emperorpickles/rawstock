@@ -1,7 +1,8 @@
-//! RAW decoding: a camera file becomes the metadata needed to interpret it.
+//! RAW decoding: a camera file becomes the samples and metadata needed to
+//! develop it.
 //!
-//! The backend is [`rawler`]. Pixel samples are checked, then dropped: color,
-//! stocks, and export are out of scope here.
+//! The backend is [`rawler`]. [`RawImage::develop_linear`] demosaics those
+//! samples and converts them to scene-linear ACEScg.
 
 use std::fmt;
 use std::path::Path;
@@ -69,11 +70,10 @@ pub enum DecodeError {
     Dimensions { path: String },
 }
 
-/// Decoded RAW metadata.
+/// Decoded RAW file.
 ///
-/// Fields stay private so callers go through the accessors. Pixel samples are
-/// not retained.
-#[derive(Debug)]
+/// Fields stay private so callers go through the accessors. Sensor samples
+/// are retained for [`Self::develop_linear`].
 pub struct RawImage {
     width: u32,
     height: u32,
@@ -84,6 +84,8 @@ pub struct RawImage {
     as_shot_wb: [f32; 4],
     /// XYZ → camera RGBE matrix.
     camera_matrix: [[f32; 3]; 4],
+    /// Sensor samples and CFA layout. Not part of [`Debug`] output.
+    decoded: rawler::rawimage::RawImage,
 }
 
 impl RawImage {
@@ -95,7 +97,7 @@ impl RawImage {
             path: path_string.clone(),
             source,
         })?;
-        Self::from_decoded(&path_string, &decoded)
+        Self::from_decoded(&path_string, decoded)
     }
 
     /// Width and height of the decoded frame, in pixels.
@@ -128,7 +130,12 @@ impl RawImage {
         self.camera_matrix
     }
 
-    fn from_decoded(path: &str, decoded: &rawler::rawimage::RawImage) -> Result<Self, DecodeError> {
+    /// Sensor samples backing this image.
+    pub(crate) fn decoded(&self) -> &rawler::rawimage::RawImage {
+        &self.decoded
+    }
+
+    fn from_decoded(path: &str, decoded: rawler::rawimage::RawImage) -> Result<Self, DecodeError> {
         let actual = match &decoded.data {
             RawImageData::Integer(samples) => samples.len(),
             RawImageData::Float(samples) => samples.len(),
@@ -162,20 +169,21 @@ impl RawImage {
         }
 
         let camera_matrix =
-            Self::camera_matrix_from(decoded).ok_or_else(|| DecodeError::MissingCameraMatrix {
+            Self::camera_matrix_from(&decoded).ok_or_else(|| DecodeError::MissingCameraMatrix {
                 path: path.to_owned(),
             })?;
 
         Ok(Self {
             width,
             height,
-            cfa: Self::cfa_kind(decoded).ok_or_else(|| DecodeError::UnsupportedLayout {
+            cfa: Self::cfa_kind(&decoded).ok_or_else(|| DecodeError::UnsupportedLayout {
                 path: path.to_owned(),
             })?,
             black_levels,
             white_levels,
             as_shot_wb: decoded.wb_coeffs,
             camera_matrix,
+            decoded,
         })
     }
 
@@ -227,6 +235,20 @@ impl RawImage {
             .map(|level| level.to_string())
             .collect::<Vec<_>>()
             .join(" ")
+    }
+}
+
+impl fmt::Debug for RawImage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RawImage")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("cfa", &self.cfa)
+            .field("black_levels", &self.black_levels)
+            .field("white_levels", &self.white_levels)
+            .field("as_shot_wb", &self.as_shot_wb)
+            .field("camera_matrix", &self.camera_matrix)
+            .finish_non_exhaustive()
     }
 }
 

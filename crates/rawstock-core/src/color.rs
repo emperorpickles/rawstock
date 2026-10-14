@@ -1,5 +1,351 @@
-//! Color management: demosaiced camera RGB → a linear, wide-gamut working
-//! space, and the final conversion to an output space (e.g. sRGB, Display P3).
+//! Scene-linear color: demosaiced camera RGB → ACEScg.
 //!
-//! All creative processing happens in linear light; encoding to the output
-//! space happens last. Not implemented yet.
+//! [`RawImage::develop_linear`](crate::decode::RawImage::develop_linear) asks
+//! [`rawler`] to rescale black/white levels and demosaic (PPG for Bayer,
+//! bilinear for X-Trans, pass-through for linear DNG). White balance and the
+//! camera → ACEScg matrix live here. No tone curve, stock, or output encoding
+//! is applied. ACEScg negatives are kept.
+
+use std::path::Path;
+
+use rawler::imgop::develop::{Intermediate, ProcessingStep, RawDevelop};
+use thiserror::Error;
+
+use crate::decode::RawImage;
+use crate::matrices;
+
+/// Failure while developing a RAW file to scene-linear ACEScg or writing it.
+#[derive(Debug, Error)]
+pub enum DevelopError {
+    /// `rawler` could not rescale or demosaic the file.
+    #[error("failed to demosaic RAW data")]
+    Demosaic {
+        /// The decoder error.
+        #[source]
+        source: rawler::RawlerError,
+    },
+
+    /// Demosaic returned a channel count this path does not convert.
+    #[error("demosaic produced {channels} color channels")]
+    UnexpectedChannels {
+        /// Channel count `rawler` returned.
+        channels: usize,
+    },
+
+    /// A dimension did not fit in `u32`.
+    #[error("image dimension {value} does not fit in u32")]
+    Dimension {
+        /// The dimension that overflowed.
+        value: usize,
+    },
+
+    /// The sample buffer does not match width × height × 3.
+    #[error("linear image has {actual} samples, expected {expected}")]
+    Samples {
+        /// Samples present in the buffer.
+        actual: usize,
+        /// Samples required by the dimensions.
+        expected: usize,
+    },
+
+    /// The XYZ→camera matrix cannot be inverted.
+    #[error("camera color matrix is singular")]
+    SingularCameraMatrix,
+
+    /// As-shot white balance has no positive finite RGB coefficients.
+    #[error("as-shot white balance is missing")]
+    MissingWhiteBalance,
+
+    /// The OpenEXR writer rejected the image.
+    #[error("failed to write OpenEXR")]
+    WriteExr {
+        /// The writer error.
+        #[source]
+        source: exr::error::Error,
+    },
+}
+
+/// Scene-linear ACEScg image, interleaved f32 RGB, row-major.
+#[derive(Clone)]
+pub struct LinearImage {
+    width: u32,
+    height: u32,
+    pixels: Vec<f32>,
+}
+
+impl std::fmt::Debug for LinearImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LinearImage")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("pixels", &self.pixels.len())
+            .finish()
+    }
+}
+
+impl LinearImage {
+    /// Build an image from interleaved RGB samples.
+    ///
+    /// `pixels` must contain `width * height * 3` finite-layout samples.
+    /// Values are not required to be finite or inside `0..=1`: ACEScg is
+    /// scene-referred.
+    pub fn new(width: u32, height: u32, pixels: Vec<f32>) -> Result<Self, DevelopError> {
+        let expected = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|count| count.checked_mul(3))
+            .ok_or(DevelopError::Samples {
+                actual: pixels.len(),
+                expected: 0,
+            })?;
+        if pixels.len() != expected {
+            return Err(DevelopError::Samples {
+                actual: pixels.len(),
+                expected,
+            });
+        }
+        Ok(Self {
+            width,
+            height,
+            pixels,
+        })
+    }
+
+    /// Width in pixels.
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Height in pixels.
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Interleaved RGB samples, length [`Self::width`] × [`Self::height`] × 3.
+    pub fn pixels(&self) -> &[f32] {
+        &self.pixels
+    }
+
+    /// Write scene-linear ACEScg RGB as a 32-bit float OpenEXR file.
+    ///
+    /// Channels are `R`, `G`, and `B`. The encoding is linear: nothing in
+    /// this method applies a display transform.
+    pub fn write_exr(&self, path: impl AsRef<Path>) -> Result<(), DevelopError> {
+        let width = self.width as usize;
+        let height = self.height as usize;
+        let pixels = &self.pixels;
+        exr::prelude::write_rgb_file(path, width, height, |x, y| {
+            let index = (y * width + x) * 3;
+            (pixels[index], pixels[index + 1], pixels[index + 2])
+        })
+        .map_err(|source| DevelopError::WriteExr { source })
+    }
+}
+
+impl RawImage {
+    /// Demosaic and convert this file to scene-linear ACEScg.
+    ///
+    /// Black/white normalization and demosaic are `rawler`'s rescale and
+    /// demosaic steps (Bayer via PPG, X-Trans via bilinear, linear DNG
+    /// unchanged). As-shot white balance is applied in camera RGB, normalized
+    /// so green stays at the sensor white level. The D65 camera matrix is
+    /// row-scaled so D65 maps to camera white, inverted, then a Bradford
+    /// adaptation takes D65 to the ACES white and AP1 takes that XYZ into
+    /// ACEScg.
+    pub fn develop_linear(&self) -> Result<LinearImage, DevelopError> {
+        let developed = RawDevelop::new_with(&[ProcessingStep::Rescale, ProcessingStep::Demosaic])
+            .develop_intermediate(self.decoded())
+            .map_err(|source| DevelopError::Demosaic { source })?;
+
+        let (width, height, mut samples) = match developed {
+            Intermediate::ThreeColor(pixels) => take_rgb(pixels)?,
+            Intermediate::FourColor(_) => {
+                return Err(DevelopError::UnexpectedChannels { channels: 4 });
+            }
+            Intermediate::Monochrome(_) => {
+                return Err(DevelopError::UnexpectedChannels { channels: 1 });
+            }
+        };
+
+        let transform = acescg_transform(self.camera_matrix(), self.as_shot_wb())?;
+        apply_transform(&mut samples, transform);
+        LinearImage::new(width, height, samples)
+    }
+}
+
+fn take_rgb(pixels: rawler::pixarray::RgbF32) -> Result<(u32, u32, Vec<f32>), DevelopError> {
+    let width = u32::try_from(pixels.width).map_err(|_| DevelopError::Dimension {
+        value: pixels.width,
+    })?;
+    let height = u32::try_from(pixels.height).map_err(|_| DevelopError::Dimension {
+        value: pixels.height,
+    })?;
+    let samples = pixels.into_flatten();
+    Ok((width, height, samples))
+}
+
+/// Bake as-shot white balance into the camera → ACEScg matrix.
+fn acescg_transform(
+    xyz_to_camera: [[f32; 3]; 4],
+    as_shot_wb: [f32; 4],
+) -> Result<[[f32; 3]; 3], DevelopError> {
+    let xyz_to_camera = [
+        row(xyz_to_camera[0]),
+        row(xyz_to_camera[1]),
+        row(xyz_to_camera[2]),
+    ];
+    let white_balance = normalized_white_balance(as_shot_wb)?;
+    let to_aces =
+        matrices::camera_to_acescg(xyz_to_camera).ok_or(DevelopError::SingularCameraMatrix)?;
+    let mut baked = [[0.0f32; 3]; 3];
+    for row_index in 0..3 {
+        for col in 0..3 {
+            baked[row_index][col] = (to_aces[row_index][col] * white_balance[col]) as f32;
+        }
+    }
+    Ok(baked)
+}
+
+fn row(values: [f32; 3]) -> [f64; 3] {
+    [
+        f64::from(values[0]),
+        f64::from(values[1]),
+        f64::from(values[2]),
+    ]
+}
+
+/// Scale as-shot RGB multipliers so green is 1.
+///
+/// Green = 1 keeps a fully exposed green photosite at 1.0 after black/white
+/// normalization. The fourth (RGBE) coefficient is unused: demosaic returns
+/// three channels.
+fn normalized_white_balance(as_shot_wb: [f32; 4]) -> Result<[f64; 3], DevelopError> {
+    let rgb = [as_shot_wb[0], as_shot_wb[1], as_shot_wb[2]];
+    if rgb.iter().any(|coeff| !coeff.is_finite() || *coeff <= 0.0) {
+        return Err(DevelopError::MissingWhiteBalance);
+    }
+    let green = f64::from(rgb[1]);
+    Ok([f64::from(rgb[0]) / green, 1.0, f64::from(rgb[2]) / green])
+}
+
+fn apply_transform(samples: &mut [f32], matrix: [[f32; 3]; 3]) {
+    for pixel in samples.as_chunks_mut::<3>().0 {
+        let red = pixel[0];
+        let green = pixel[1];
+        let blue = pixel[2];
+        pixel[0] = matrix[0][0] * red + matrix[0][1] * green + matrix[0][2] * blue;
+        pixel[1] = matrix[1][0] * red + matrix[1][1] * green + matrix[1][2] * blue;
+        pixel[2] = matrix[2][0] * red + matrix[2][1] * green + matrix[2][2] * blue;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_rejects_a_short_buffer() {
+        let err = LinearImage::new(2, 2, vec![0.0; 3]).unwrap_err();
+        assert!(err.to_string().contains("3 samples"));
+    }
+
+    #[test]
+    fn exr_roundtrip_preserves_samples() {
+        let image = LinearImage::new(2, 1, vec![0.25, -0.5, 1.5, 0.0, 1.0, 2.0]).unwrap();
+        let path = std::env::temp_dir().join("rawstock-linear-roundtrip.exr");
+        image.write_exr(&path).unwrap();
+
+        let decoded = exr::prelude::read_first_rgba_layer_from_file(
+            &path,
+            |resolution, _channels| {
+                assert_eq!((resolution.x(), resolution.y()), (2, 1));
+                vec![[0.0f32; 4]; resolution.x() * resolution.y()]
+            },
+            |buffer: &mut Vec<[f32; 4]>, position, pixel: (f32, f32, f32, f32)| {
+                buffer[position.y() * 2 + position.x()] = [pixel.0, pixel.1, pixel.2, pixel.3];
+            },
+        )
+        .unwrap();
+
+        let pixels = &decoded.layer_data.channel_data.pixels;
+        assert_eq!(pixels.len(), 2);
+        for (got, expected) in pixels.iter().zip(image.pixels().as_chunks::<3>().0) {
+            for (channel, want) in got.iter().take(3).zip(expected) {
+                assert!((channel - want).abs() < 1.0e-6, "{got:?} != {expected:?}");
+            }
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn camera_white_maps_to_acescg_white() {
+        // sRGB's XYZ→RGB matrix stands in for a D65 camera matrix. The camera
+        // value is that matrix applied to D65, which must come back as ACEScg white.
+        let xyz_to_camera = srgb_xyz_to_rgb();
+        let matrix = acescg_transform(xyz_to_camera, [1.0, 1.0, 1.0, 0.0]).unwrap();
+        let white = apply_pixel(matrix, camera_rgb_of_d65(xyz_to_camera));
+        assert_white(white);
+    }
+
+    #[test]
+    fn white_balance_scales_relative_to_green() {
+        let xyz_to_camera = srgb_xyz_to_rgb();
+        let neutral = camera_rgb_of_d65(xyz_to_camera);
+        // Multipliers (2, 1, 0.5), green already 1, so the preimage is divided
+        // by those same coefficients.
+        let matrix = acescg_transform(xyz_to_camera, [2.0, 1.0, 0.5, 0.0]).unwrap();
+        let white = apply_pixel(matrix, [neutral[0] / 2.0, neutral[1], neutral[2] / 0.5]);
+        assert_white(white);
+    }
+
+    #[test]
+    fn unnormalized_camera_matrix_still_maps_white_to_white() {
+        // Fujifilm X-S10 XYZ→camera matrix from the CC0 fixture. Its rows do
+        // not already sum to a D65 response of (1, 1, 1).
+        let xyz_to_camera = [
+            [1.3426, -0.6334, -0.1177],
+            [-0.4244, 1.2136, 0.2371],
+            [-0.058, 0.1303, 0.598],
+            [0.0, 0.0, 0.0],
+        ];
+        let matrix = acescg_transform(xyz_to_camera, [1.0, 1.0, 1.0, 0.0]).unwrap();
+        assert_white(apply_pixel(matrix, [1.0, 1.0, 1.0]));
+    }
+
+    #[test]
+    fn missing_white_balance_is_an_error() {
+        let xyz_to_camera = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0; 3]];
+        let err = acescg_transform(xyz_to_camera, [1.0, f32::NAN, 1.0, 0.0]).unwrap_err();
+        assert!(err.to_string().contains("white balance"));
+    }
+
+    fn apply_pixel(matrix: [[f32; 3]; 3], pixel: [f32; 3]) -> [f32; 3] {
+        let mut samples = pixel.to_vec();
+        apply_transform(&mut samples, matrix);
+        [samples[0], samples[1], samples[2]]
+    }
+
+    fn srgb_xyz_to_rgb() -> [[f32; 3]; 4] {
+        [
+            [3.2404542, -1.5371385, -0.4985314],
+            [-0.969_266, 1.8760108, 0.0415560],
+            [0.0556434, -0.2040259, 1.0572252],
+            [0.0, 0.0, 0.0],
+        ]
+    }
+
+    fn camera_rgb_of_d65(xyz_to_camera: [[f32; 3]; 4]) -> [f32; 3] {
+        let matrix = [
+            row(xyz_to_camera[0]),
+            row(xyz_to_camera[1]),
+            row(xyz_to_camera[2]),
+        ];
+        let camera = crate::matrices::apply(matrix, crate::matrices::d65_xyz());
+        [camera[0] as f32, camera[1] as f32, camera[2] as f32]
+    }
+
+    fn assert_white(rgb: [f32; 3]) {
+        for channel in rgb {
+            assert!((channel - 1.0).abs() < 3.0e-4, "{rgb:?}");
+        }
+    }
+}

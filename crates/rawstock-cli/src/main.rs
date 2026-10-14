@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
@@ -30,6 +30,13 @@ enum Command {
         /// Input RAW file.
         file: PathBuf,
     },
+    /// Write a scene-linear ACEScg OpenEXR from a RAW file.
+    DumpLinear {
+        /// Input RAW file.
+        input: PathBuf,
+        /// Output `.exr` path.
+        output: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -44,7 +51,21 @@ fn run(cli: Cli) -> Result<()> {
             println!("{image}");
             Ok(())
         }
+        Command::DumpLinear { input, output } => {
+            if !is_exr(&output) {
+                bail!("output must be an .exr file");
+            }
+            let image = RawImage::open(&input)?;
+            image.develop_linear()?.write_exr(&output)?;
+            Ok(())
+        }
     }
+}
+
+fn is_exr(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("exr"))
 }
 
 #[cfg(test)]
@@ -79,5 +100,18 @@ mod tests {
     fn inspect_parses() {
         let cli = Cli::try_parse_from(["rawstock", "inspect", "IMG.RAF"]);
         assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn dump_linear_parses() {
+        let cli = Cli::try_parse_from(["rawstock", "dump-linear", "IMG.RAF", "out.exr"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn dump_linear_rejects_a_non_exr_output() {
+        let cli = Cli::try_parse_from(["rawstock", "dump-linear", "IMG.RAF", "out.jpg"]).unwrap();
+        let err = run(cli).unwrap_err();
+        assert!(err.to_string().contains(".exr"));
     }
 }

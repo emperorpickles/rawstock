@@ -19,3 +19,17 @@ pip install -r requirements.txt
 
 Put sample RAWs in `test-images/` at the repo root (git-ignored). Never commit
 RAW files.
+
+## Scene-linear dumps
+
+The lab consumes scene-linear ACEScg OpenEXR files written by the Rust core,
+so look work can share that decode instead of calling rawpy:
+
+```bash
+cargo run -p rawstock-cli --release -- dump-linear IMG.RAF out.exr
+python read_linear.py out.exr
+```
+
+`read_linear.read_acescg_exr` returns a float32 NumPy array of shape
+`(height, width, 3)`, RGB, scene-linear ACEScg. No white balance, tone
+curve, or output encoding is applied on top of what the core already did.
