@@ -130,6 +130,20 @@ impl LinearImage {
         &self.pixels
     }
 
+    /// Bake `orientation` into this image.
+    ///
+    /// An identity orientation leaves the buffer in place. The sample count
+    /// does not change, so this cannot fail the way [`Self::new`] can.
+    pub fn apply_orientation(&mut self, orientation: crate::decode::Orientation) {
+        if orientation.is_identity() {
+            return;
+        }
+        let (width, height, pixels) = orientation.apply_rgb(self.width, self.height, &self.pixels);
+        self.width = width;
+        self.height = height;
+        self.pixels = pixels;
+    }
+
     /// Width and height of a proxy whose longer side is `long_edge`.
     ///
     /// The shorter side is rounded to the nearest pixel and is at least 1.

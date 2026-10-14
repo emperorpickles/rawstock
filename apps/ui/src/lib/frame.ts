@@ -108,6 +108,37 @@ export class PreviewCanvas {
   }
 }
 
+/** A 90° turn of the view, mapping the pan so the same point stays centered. */
+export class ViewTurn {
+  static panAfter(
+    direction: "clockwise" | "counterClockwise",
+    panX: number,
+    panY: number,
+    viewWidth: number,
+    viewHeight: number,
+    imageWidth: number,
+    imageHeight: number,
+  ): { x: number; y: number } {
+    const centerX = panX + viewWidth / 2;
+    const centerY = panY + viewHeight / 2;
+    const moved =
+      direction === "clockwise"
+        ? { x: imageHeight - centerY, y: centerX }
+        : { x: centerY, y: imageWidth - centerX };
+    const nextWidth = imageHeight;
+    const nextHeight = imageWidth;
+    const crop = CropRect.visible(
+      nextWidth,
+      nextHeight,
+      viewWidth,
+      viewHeight,
+      moved.x - viewWidth / 2,
+      moved.y - viewHeight / 2,
+    );
+    return { x: crop.x, y: crop.y };
+  }
+}
+
 /** Display-space crop clamped to the oriented frame. */
 export class CropRect {
   static visible(

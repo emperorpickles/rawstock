@@ -196,6 +196,182 @@ fn halation_crop_matches_the_interior_of_the_full_frame() {
 }
 
 #[test]
+fn orientation_is_applied_before_the_pipeline() {
+    let orientations = [
+        Orientation::Normal,
+        Orientation::HorizontalFlip,
+        Orientation::Rotate180,
+        Orientation::VerticalFlip,
+        Orientation::Transpose,
+        Orientation::Rotate90,
+        Orientation::Transverse,
+        Orientation::Rotate270,
+    ];
+    for orientation in orientations {
+        let source = frame(16, 10);
+        let (width, height, pixels) =
+            orientation.apply_rgb(source.width(), source.height(), source.pixels());
+        let oriented = LinearImage::new(width, height, pixels).unwrap();
+        let mut session = PreviewSession::new(source, orientation, 8).unwrap();
+        assert_eq!(session.sensor_dimensions(), (16, 10), "{orientation}");
+        assert_eq!(
+            session.display_dimensions(),
+            (width, height),
+            "{orientation}"
+        );
+        assert_eq!(session.camera_orientation(), orientation);
+        assert_eq!(session.orientation(), orientation);
+        assert_eq!(session.quarter_turns(), 0);
+        session.set_parameters(parameters(false, false));
+        let from_session = session.render_full(&mut NopControl).unwrap();
+        let from_pipeline = Pipeline::new(session.parameters().clone()).develop(&oriented);
+        assert_eq!(
+            from_session.to_rgb8(),
+            from_pipeline.to_rgb8(),
+            "{orientation}"
+        );
+        assert_eq!(
+            (from_session.width(), from_session.height()),
+            (width, height)
+        );
+    }
+}
+
+#[test]
+fn oriented_crop_matches_the_full_frame() {
+    let orientations = [
+        Orientation::Normal,
+        Orientation::Rotate180,
+        Orientation::Rotate90,
+        Orientation::Rotate270,
+        Orientation::HorizontalFlip,
+        Orientation::VerticalFlip,
+        Orientation::Transpose,
+        Orientation::Transverse,
+    ];
+    for orientation in orientations {
+        let mut session = PreviewSession::new(frame(40, 24), orientation, 20).unwrap();
+        session.set_parameters(parameters(true, false));
+        let (width, height) = session.display_dimensions();
+        let full = session.render_full(&mut NopControl).unwrap();
+        assert_eq!((full.width(), full.height()), (width, height));
+        let rect = DisplayRect {
+            x: 2,
+            y: 3,
+            width: 11,
+            height: 7,
+        };
+        assert!(rect.x + rect.width <= width && rect.y + rect.height <= height);
+        let crop = session
+            .render_region(rect, ScanMode::Exact, &mut NopControl)
+            .unwrap();
+        assert_eq!((crop.width(), crop.height()), (rect.width, rect.height));
+        let full_rgb = full.to_rgb8();
+        let crop_rgb = crop.to_rgb8();
+        for y in 0..rect.height {
+            for x in 0..rect.width {
+                let full_index = (((y + rect.y) * width + (x + rect.x)) * 3) as usize;
+                let crop_index = ((y * rect.width + x) * 3) as usize;
+                assert_eq!(
+                    crop_rgb[crop_index..crop_index + 3],
+                    full_rgb[full_index..full_index + 3],
+                    "{orientation} pixel {x},{y}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn oriented_halation_crop_matches_the_interior() {
+    for orientation in [
+        Orientation::Rotate90,
+        Orientation::Rotate270,
+        Orientation::Rotate180,
+    ] {
+        let mut session = PreviewSession::new(frame(80, 48), orientation, 40).unwrap();
+        session.set_parameters(parameters(true, true));
+        let (width, height) = session.display_dimensions();
+        let support = session
+            .parameters()
+            .halation()
+            .unwrap()
+            .support_px(width, height);
+        let rect = DisplayRect {
+            x: support + 1,
+            y: support + 1,
+            width: 8,
+            height: 6,
+        };
+        assert!(
+            rect.x + rect.width <= width && rect.y + rect.height <= height,
+            "{orientation} {width}x{height} support {support}"
+        );
+        let full = session.render_full(&mut NopControl).unwrap();
+        let crop = session
+            .render_region(rect, ScanMode::Exact, &mut NopControl)
+            .unwrap();
+        let full_rgb = full.to_rgb8();
+        let crop_rgb = crop.to_rgb8();
+        for y in 0..rect.height {
+            for x in 0..rect.width {
+                let full_index = (((y + rect.y) * width + (x + rect.x)) * 3) as usize;
+                let crop_index = ((y * rect.width + x) * 3) as usize;
+                assert_eq!(
+                    crop_rgb[crop_index..crop_index + 3],
+                    full_rgb[full_index..full_index + 3],
+                    "{orientation} pixel {x},{y}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn manual_turn_reorients_without_changing_the_sensor_size() {
+    let source = frame(16, 10);
+    let mut session = PreviewSession::new(source.clone(), Orientation::Rotate90, 8).unwrap();
+    session.set_parameters(parameters(true, false));
+    let (display_width, display_height) = session.display_dimensions();
+    assert_eq!(
+        session.proxy_dimensions(),
+        LinearImage::proxy_dimensions(display_width, display_height, 8)
+    );
+    assert_ne!(
+        session.proxy_dimensions(),
+        LinearImage::proxy_dimensions(16, 10, 8)
+    );
+    let before = session.render_full(&mut NopControl).unwrap();
+    session.rotate_clockwise().unwrap();
+    assert_eq!(session.sensor_dimensions(), (16, 10));
+    assert_eq!(session.quarter_turns(), 1);
+    let composed = Orientation::Rotate90.then(Orientation::Rotate90);
+    assert_eq!(session.orientation(), composed);
+    assert_eq!(session.display_dimensions(), composed.dimensions(16, 10));
+    let (width, height, pixels) = composed.apply_rgb(16, 10, source.pixels());
+    let oriented = LinearImage::new(width, height, pixels).unwrap();
+    let from_session = session.render_full(&mut NopControl).unwrap();
+    let from_pipeline = Pipeline::new(session.parameters().clone()).develop(&oriented);
+    assert_eq!(from_session.to_rgb8(), from_pipeline.to_rgb8());
+    assert_ne!(
+        (from_session.width(), from_session.height()),
+        (before.width(), before.height())
+    );
+
+    session.rotate_counterclockwise().unwrap();
+    let restored = session.render_full(&mut NopControl).unwrap();
+    assert_eq!(restored.to_rgb8(), before.to_rgb8());
+    assert_eq!(session.quarter_turns(), 0);
+
+    for _ in 0..4 {
+        session.rotate_clockwise().unwrap();
+    }
+    let around = session.render_full(&mut NopControl).unwrap();
+    assert_eq!(around.to_rgb8(), before.to_rgb8());
+    assert_eq!(session.quarter_turns(), 0);
+}
+
+#[test]
 fn export_matches_the_pipeline() {
     let mut session = session(16, 10, true, true);
     let from_session = session.render_full(&mut NopControl).unwrap();
@@ -461,7 +637,7 @@ fn release_preview_timings() {
         let started = std::time::Instant::now();
         let image = session.render_full(&mut control).unwrap();
         let out = std::env::temp_dir().join(format!("rawstock-timing-{name}.jpg"));
-        image.write(&out, orientation).unwrap();
+        image.write(&out, Orientation::Normal).unwrap();
         eprintln!(
             "{name} full export: {:.3}s -> {}",
             started.elapsed().as_secs_f64(),

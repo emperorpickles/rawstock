@@ -40,6 +40,10 @@ export class TauriHost implements Host {
     return invoke<SessionState>("load_stock", { path });
   }
 
+  async rotate(direction: "clockwise" | "counterClockwise"): Promise<SessionState> {
+    return invoke<SessionState>("rotate_image", { direction });
+  }
+
   async render(request: RenderRequest) {
     const bytes = await invoke<ArrayBuffer | Uint8Array>("render_frame", { request });
     return FrameBuffer.decode(bytes);

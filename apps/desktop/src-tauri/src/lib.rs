@@ -12,7 +12,9 @@ mod worker;
 use tauri::ipc::Response;
 use tauri::{Manager, State};
 
-use crate::api::{DevelopRequest, SaveRequest, SessionState, StockState, StockSummary};
+use crate::api::{
+    DevelopRequest, SaveRequest, SessionState, StockState, StockSummary, TurnDirection,
+};
 use crate::catalog::StockCatalog;
 use crate::worker::{Bootstrap, WorkerHandle};
 
@@ -33,6 +35,7 @@ pub fn run() {
             open_raw,
             load_stock,
             render_frame,
+            rotate_image,
             export_jpeg,
             save_stock,
         ])
@@ -67,6 +70,14 @@ async fn render_frame(
 ) -> Result<Response, String> {
     let bytes = worker.develop(request).await?;
     Ok(Response::new(bytes))
+}
+
+#[tauri::command]
+async fn rotate_image(
+    worker: State<'_, WorkerHandle>,
+    direction: TurnDirection,
+) -> Result<SessionState, String> {
+    worker.rotate(direction).await
 }
 
 #[tauri::command]
