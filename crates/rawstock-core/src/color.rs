@@ -65,6 +65,14 @@ pub enum DevelopError {
         source: exr::error::Error,
     },
 
+    /// The OpenEXR reader rejected the image.
+    #[error("failed to read OpenEXR")]
+    ReadExr {
+        /// The reader error.
+        #[source]
+        source: exr::error::Error,
+    },
+
     /// A fit proxy was asked for a long edge of zero.
     #[error("proxy long edge must be positive")]
     EmptyProxy,
@@ -181,6 +189,37 @@ impl LinearImage {
         }
         let pixels = area_box(&self.pixels, self.width, self.height, width, height);
         Self::new(width, height, pixels)
+    }
+
+    /// Read scene-linear ACEScg RGB written by [`Self::write_exr`].
+    ///
+    /// The file is interleaved RGB. A display transform is not applied.
+    pub fn read_exr(path: impl AsRef<Path>) -> Result<Self, DevelopError> {
+        let decoded = exr::prelude::read_first_rgba_layer_from_file(
+            path,
+            |resolution, _channels| {
+                (
+                    resolution.x(),
+                    resolution.y(),
+                    vec![[0.0f32; 4]; resolution.x() * resolution.y()],
+                )
+            },
+            |buffer: &mut (usize, usize, Vec<[f32; 4]>), position, pixel: (f32, f32, f32, f32)| {
+                let width = buffer.0;
+                buffer.2[position.y() * width + position.x()] =
+                    [pixel.0, pixel.1, pixel.2, pixel.3];
+            },
+        )
+        .map_err(|source| DevelopError::ReadExr { source })?;
+        let (width, height, pixels) = decoded.layer_data.channel_data.pixels;
+        let rgb = pixels
+            .into_iter()
+            .flat_map(|pixel| [pixel[0], pixel[1], pixel[2]])
+            .collect();
+        let width = u32::try_from(width).map_err(|_| DevelopError::Dimension { value: width })?;
+        let height =
+            u32::try_from(height).map_err(|_| DevelopError::Dimension { value: height })?;
+        Self::new(width, height, rgb)
     }
 
     /// Write scene-linear ACEScg RGB as a 32-bit float OpenEXR file.
@@ -433,6 +472,19 @@ mod tests {
         let image = LinearImage::new(2, 1, vec![0.25, -0.5, 1.5, 0.0, 1.0, 2.0]).unwrap();
         let path = std::env::temp_dir().join("rawstock-linear-roundtrip.exr");
         image.write_exr(&path).unwrap();
+        let read_back = LinearImage::read_exr(&path).unwrap();
+        assert_eq!((read_back.width(), read_back.height()), (2, 1));
+        for (got, expected) in read_back
+            .pixels()
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .zip(image.pixels().as_chunks::<3>().0)
+        {
+            for (channel, want) in got.iter().zip(expected) {
+                assert!((channel - want).abs() < 1.0e-6, "{got:?} != {expected:?}");
+            }
+        }
 
         let decoded = exr::prelude::read_first_rgba_layer_from_file(
             &path,

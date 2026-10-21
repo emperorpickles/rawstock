@@ -114,6 +114,16 @@ mod tests {
     }
 
     #[test]
+    fn bundled_list_includes_velvia() {
+        let stocks = StockCatalog::list().unwrap();
+        let velvia = stocks
+            .iter()
+            .find(|stock| stock.name == "Velvia")
+            .expect("Velvia is a bundled stock");
+        assert_eq!(velvia.model, "parametric");
+    }
+
+    #[test]
     fn a_new_file_inside_the_stock_directory_is_bundled() {
         let path = StockCatalog::directory().join("not-written.stock.toml");
         assert!(StockCatalog::is_bundled(&path));

@@ -588,7 +588,9 @@ of a manufactured film. A gray stays gray.
    an original name. A file that transcribes one published film may use
    that film's name when `source` and `license` attribute the measurement.
    Trademarked names (Velvia, Portra, Classic Chrome, and the rest) are
-   not for looks we made up.
+   not for looks we made up. A parametric fit to a camera's film simulation
+   may use that simulation's name when `source` says the file is an
+   approximation of in-camera JPEGs, not the manufacturer's emulsion.
 3. Set `model`. Fill `red`, `green`, `blue`, and `print` with step-wedge
    columns. Add `[coupling]`, `[grain]`, and `[halation]` only when the
    look uses them.

@@ -157,3 +157,22 @@ anti-halation layer.
 Portra is a Kodak trademark. This file is an attributed transcription of
 published curves, not an invented look. Invented looks still need original
 names.
+
+## Velvia
+
+[velvia.stock.toml](velvia.stock.toml) is a parametric stock. It is an
+**approximate** fit of the rawstock pipeline to Fujifilm X-T2 in-camera
+Velvia JPEGs (film simulation F2/Fujichrome), not a datasheet of Fujichrome
+Velvia and not a 3D LUT. The camera was set to DR100, Color 0, Highlight
+Tone 0, Shadow Tone 0, Sharpness Normal, Noise Reduction 0, and White
+Balance Auto. Grain Effect was Weak on those frames, so this file has no
+`[grain]` table: the fit was made with grain off.
+
+`lab/fit_stock.py` develops each RAF, aligns it to the JPEG, and minimizes
+CIEDE2000 on the tone curves, the print curve, and the 3×3 log-exposure
+mix. Only the Velvia pairs in `fit/` are minimized. The Provia, Classic
+Chrome, and Astia pairs are held-out checks and are not part of the loss.
+The reference photographs are not in the repository.
+
+Velvia is a Fujifilm trademark. This file is a labeled approximation of
+that camera mode.
