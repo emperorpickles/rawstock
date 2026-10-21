@@ -7,6 +7,7 @@
   import Preview from "./lib/Preview.svelte";
   import { PreviewLoop } from "./lib/previewLoop";
   import { CommandError, StockFileName } from "./lib/ranges";
+  import { StockList } from "./lib/stockList";
   import SaveDialog from "./lib/SaveDialog.svelte";
   import { TauriHost } from "./lib/tauriHost";
   import type { ControlEdit, Frame, Progress, SessionState, StockState, StockSummary } from "./lib/types";
@@ -58,13 +59,7 @@
   let resizeTimer: ReturnType<typeof setTimeout> | null = null;
 
   function remember(stock: StockState | null) {
-    if (!stock || stocks.some((item) => item.path === stock.path)) {
-      return;
-    }
-    stocks = [
-      ...stocks,
-      { path: stock.path, name: stock.name, model: stock.model, revision: stock.revision },
-    ];
+    stocks = StockList.include(stocks, stock);
   }
 
   async function retitle() {
@@ -356,7 +351,7 @@
         return;
       }
       try {
-        stocks = await host.listStocks();
+        stocks = StockList.dedupe(await host.listStocks());
         await pull();
       } catch (error) {
         fault = CommandError.message(error);
@@ -426,7 +421,7 @@
     />
     <Controls
       {stocks}
-      selected={session?.stock?.path ?? ""}
+      selected={session?.stock?.id ?? ""}
       stock={session?.stock ?? null}
       fileOpen={session !== null}
       onchoose={choose}

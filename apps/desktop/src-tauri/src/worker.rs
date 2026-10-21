@@ -357,7 +357,7 @@ struct LoadedFile {
 impl LoadedFile {
     fn from_stock(path: &Path, stock: &Stock) -> Self {
         Self {
-            path: path.to_path_buf(),
+            path: path.canonicalize().unwrap_or_else(|_| path.to_path_buf()),
             revision: stock.revision(),
             name: stock.name().to_string(),
             source: stock.source().to_string(),
@@ -610,6 +610,7 @@ fn describe(stock: &LoadedFile, session: &PreviewSession) -> StockState {
     let halation = session.halation_controls();
     let parameters = session.parameters();
     StockState {
+        id: StockCatalog::id(&stock.path),
         path: stock.path.display().to_string(),
         name: stock.name.clone(),
         model: stock.model.to_string(),
