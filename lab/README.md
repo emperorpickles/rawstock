@@ -53,3 +53,28 @@ python3 lab/import_spectral_film_lut.py \
     path/to/spectral_film_lut/src/spectral_film_lut/negative_film/kodak_portra_400.py \
     -o stocks/portra400.stock.toml
 ```
+
+## Parametric stock fitter
+
+`fit_stock.py` fits a schema-1 parametric stock to camera JPEG pairs. It
+develops each RAW through `rawstock` (decode, as-shot white balance, ACEScg,
+then the film pipeline), aligns that develop to the JPEG (orientation, and
+the crop from lens correction), downsamples both, and minimizes CIEDE2000
+over sampled patches. The free parameters are the stock's own: exposure,
+per-channel D-logH curves, the print curve, and a 3×3 log-exposure mix.
+There is no LUT.
+
+Only `fit/` is minimized. `heldout/` is measured and reported, and those
+pairs never enter the loss. The same command is how a later simulation
+(Provia, Astia, Classic Chrome, Eterna) gets its own file: point it at
+that simulation's pairs and pass `--simulation`. Reference photographs stay
+outside the repository. `python3 lab/test_stockfit.py` uses synthetic
+images only.
+
+```bash
+cargo build -p rawstock-cli --release
+python3 lab/fit_stock.py /path/to/pairs \
+    --name Velvia --simulation Velvia \
+    -o stocks/velvia.stock.toml \
+    --report-dir /tmp/velvia-report
+```

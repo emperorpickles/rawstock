@@ -39,10 +39,10 @@
 <aside class="panel">
   <h2>Stocks</h2>
   <div class="stocks">
-    {#each stocks as item (item.path)}
+    {#each stocks as item (item.id)}
       <button
         type="button"
-        class:on={item.path === selected}
+        class:on={item.id === selected}
         disabled={!fileOpen}
         onclick={() => onchoose(item.path)}
       >

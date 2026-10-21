@@ -3,6 +3,8 @@
 export type ModelKind = "parametric" | "spectral";
 
 export interface StockSummary {
+  /** Canonical `.stock.toml` path. The panel lists one row per id. */
+  id: string;
   path: string;
   name: string;
   model: ModelKind;
@@ -10,6 +12,8 @@ export interface StockSummary {
 }
 
 export interface StockState {
+  /** Same id as {@link StockSummary.id}. */
+  id: string;
   path: string;
   name: string;
   model: ModelKind;

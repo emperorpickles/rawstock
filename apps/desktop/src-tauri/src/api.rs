@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StockSummary {
+    /// Canonical path of the `.stock.toml`. Two spellings of one file share it.
+    pub id: String,
     pub path: String,
     pub name: String,
     pub model: String,
@@ -19,6 +21,8 @@ pub struct StockSummary {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StockState {
+    /// Same id as [`StockSummary::id`]: the canonical `.stock.toml` path.
+    pub id: String,
     pub path: String,
     pub name: String,
     pub model: String,
