@@ -5,6 +5,12 @@ on:
     branches:
       - main
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    # Docs-only pull requests do not start CI. Pushes to main ignore this.
+    paths-ignore:
+      - '*.md'
+      - '**/*.md'
+      - 'docs/**'
 
 # Cancel superseded PR runs. Pushes to main are left to finish.
 concurrency:
@@ -13,6 +19,7 @@ concurrency:
 
 permissions:
   contents: read
+  pull-requests: read
   # rust-cache reads and writes the Actions cache.
   actions: write
 
@@ -20,8 +27,37 @@ permissions:
 # also writes, so the warm re-run of the CI speed PR can be measured before
 # main has populated the cache. Other pull requests only restore.
 jobs:
+  # Pull requests only. Pushes to main skip this and run every job below.
+  changes:
+    name: changes
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+      gpu: ${{ steps.filter.outputs.gpu }}
+    steps:
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - '**'
+              - '!*.md'
+              - '!**/*.md'
+              - '!docs/**'
+            gpu:
+              - 'crates/rawstock-core/**'
+              - 'stocks/**'
+              - 'Cargo.*'
+              - '.github/workflows/**'
+
   fmt:
     name: fmt
+    needs: changes
+    if: >-
+      !cancelled() &&
+      (github.event_name == 'push' ||
+       (github.event.pull_request.draft == false && needs.changes.outputs.code == 'true'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -37,6 +73,11 @@ jobs:
 
   ui:
     name: ui
+    needs: changes
+    if: >-
+      !cancelled() &&
+      (github.event_name == 'push' ||
+       (github.event.pull_request.draft == false && needs.changes.outputs.code == 'true'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -56,6 +97,11 @@ jobs:
 
   test:
     name: clippy, test
+    needs: changes
+    if: >-
+      !cancelled() &&
+      (github.event_name == 'push' ||
+       (github.event.pull_request.draft == false && needs.changes.outputs.code == 'true'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -100,6 +146,11 @@ jobs:
 
   wasm:
     name: wasm32-unknown-unknown
+    needs: changes
+    if: >-
+      !cancelled() &&
+      (github.event_name == 'push' ||
+       (github.event.pull_request.draft == false && needs.changes.outputs.code == 'true'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -119,6 +170,13 @@ jobs:
   # RAWSTOCK_REQUIRE_GPU makes a missing adapter a failure, not a skip.
   gpu-vulkan:
     name: GPU parity (Vulkan, lavapipe)
+    needs: changes
+    if: >-
+      !cancelled() &&
+      (github.event_name == 'push' ||
+       (github.event.pull_request.draft == false &&
+        needs.changes.outputs.code == 'true' &&
+        needs.changes.outputs.gpu == 'true'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -143,6 +201,13 @@ jobs:
 
   gpu-dx12:
     name: GPU parity (DX12, WARP)
+    needs: changes
+    if: >-
+      !cancelled() &&
+      (github.event_name == 'push' ||
+       (github.event.pull_request.draft == false &&
+        needs.changes.outputs.code == 'true' &&
+        needs.changes.outputs.gpu == 'true'))
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
