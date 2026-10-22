@@ -31,6 +31,10 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
 - **#18** — this guide (`AGENTS.md`, `CLAUDE.md`, `PLAN.md`).
 - **#20** — Add grain to the Velvia stock (`agent: claude`, `stage: ready`).
   PR #22.
+- **Performance** (`agent: claude`). rawler optimized in dev builds (#61).
+  Sub-pixel grain drawn per pixel, and grain painted on every core (#64).
+  Next: a quick binned first preview while Markesteijn runs in the
+  background, then the other CPU film stages on every core.
 
 ## Next
 

@@ -119,7 +119,10 @@ On lavapipe, a software Vulkan rasterizer on 4 CPU cores, release build:
 | Density and grain, field cached | not measured | 0.18 s |
 
 lavapipe runs the shaders on the same CPU cores, so these show the shape of
-the work, not hardware speed. The uncached grain field is the next thing to
+the work, not hardware speed. Since #64 a process whose clouds are smaller than
+a pixel draws each sample's sum directly instead of gathering clouds, so a
+coarse preview no longer pays for every cloud in the frame. These timings
+predate that. The uncached grain field is the next thing to
 speed up, by sharing each cell's clouds across a tile in workgroup memory.
 
 Setup and readback are async because WebGPU in a browser cannot block.
