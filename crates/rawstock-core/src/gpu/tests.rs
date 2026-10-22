@@ -148,13 +148,7 @@ fn assert_close(stage: &str, cpu: &[f32], gpu: &[f32], tolerance: impl Fn(f32) -
 }
 
 fn cpu_print(parameters: &Parameters, density: &[f32]) -> Vec<f32> {
-    crate::render::print_buffer(
-        density,
-        parameters.print_exposure(),
-        parameters.print_curve(),
-        &mut NopControl,
-    )
-    .unwrap()
+    crate::render::print_buffer(density, parameters, &mut NopControl).unwrap()
 }
 
 #[test]
@@ -382,16 +376,19 @@ fn grain_field_is_reused_across_edits() {
 #[test]
 fn print_scan_matches() {
     let Some(gpu) = gpu() else { return };
-    let parameters = stock("velvia");
-    let pipeline = GpuPipeline::new(gpu, &parameters);
-    let density: Vec<f32> = (0..65_536 * 3)
-        .map(|index| -0.5 + 4.0 * unit(index, 7))
-        .collect();
-    let cpu = cpu_print(&parameters, &density);
-    let gpu = pollster::block_on(pipeline.run(&[Kernel::Print], &density)).unwrap();
-    assert_close("print", &cpu, &gpu, |value| {
-        PRINT_TOLERANCE * value.abs().max(1.0e-3)
-    });
+    // Velvia prints through ideal ACEScg dyes, Portra through its paper's dyes.
+    for name in ["velvia", "portra400"] {
+        let parameters = stock(name);
+        let pipeline = GpuPipeline::new(gpu, &parameters);
+        let density: Vec<f32> = (0..65_536 * 3)
+            .map(|index| -0.5 + 4.0 * unit(index, 7))
+            .collect();
+        let cpu = cpu_print(&parameters, &density);
+        let gpu = pollster::block_on(pipeline.run(&[Kernel::Print], &density)).unwrap();
+        assert_close(&format!("{name} print"), &cpu, &gpu, |value| {
+            PRINT_TOLERANCE * value.abs().max(1.0e-3)
+        });
+    }
 }
 
 #[test]

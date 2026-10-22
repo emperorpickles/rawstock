@@ -33,11 +33,16 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
 - **#23** — GPU slice 1: wgpu scaffold and per-pixel stages (`agent: claude`,
   `stage: working`).
 
+- **#60** — Portra 400 refresh (`agent: claude`, `stage: ready`). Re-imported
+  with a Status M scan, the Portra Endura paper curve and dyes, and grain
+  retuned for the paper's contrast. Adds `[scan_response]` and
+  `[print_dye_density]` to schema 1, CPU and GPU.
+
 ## Next
 
 After the extra Provia pairs arrive, fit Provia with `lab/fit_stock.py`,
-then the remaining Fuji simulations the same way. Portra 400 stays paused
-in favor of Fuji simulation matching.
+then the remaining Fuji simulations the same way. Other spectral_film_lut
+negatives (Portra 160/800, Ektar, Gold) can reuse the #60 importer path.
 
 ## How to update this file
 

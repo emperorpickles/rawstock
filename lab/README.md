@@ -39,19 +39,21 @@ curve, or output encoding is applied on top of what the core already did.
 `import_spectral_film_lut.py` turns the MIT-licensed Portra 400 and Velvia 50
 modules from
 [JanLohse/spectral_film_lut](https://github.com/JanLohse/spectral_film_lut)
-into spectral stocks. Velvia is written as a reversal stock. It uses only the Python standard library and reads
-the module as source text, so the package does not have to be installed.
+into spectral stocks. Velvia is written as a reversal stock. Portra is a
+negative printed onto the Portra Endura paper module, read through the
+package's Status M table. It uses only the Python standard library and reads
+the modules as source text, so the package does not have to be installed.
 Grain and halation are left out. See the script's docstring and
 [stocks/README.md](../stocks/README.md) for what is copied and what is derived.
 
-The committed `stocks/portra400.stock.toml` keeps this script's sensitivities
-and D-logH curves, then adds an approximate aesthetic tuning (dye scale,
-print curve, coupling, grain, halation). Running the command below replaces
-that file and removes the tuning.
+The committed `stocks/portra400.stock.toml` is this script's output plus a
+header note and an approximate grain and halation tuning. Running the
+command below replaces that file and removes those additions.
 
 ```bash
 python3 lab/import_spectral_film_lut.py \
     path/to/spectral_film_lut/src/spectral_film_lut/negative_film/kodak_portra_400.py \
+    --paper path/to/spectral_film_lut/src/spectral_film_lut/print_film/kodak_portra_endura.py \
     -o stocks/portra400.stock.toml
 ```
 

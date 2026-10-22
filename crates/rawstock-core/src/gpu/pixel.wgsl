@@ -15,7 +15,7 @@ struct Params {
     curve_offset: vec4<u32>,
     curve_len: vec4<u32>,
     // x: wavelength count, y: 1 when the stock has dye spectra, z: rgb2spec
-    // cube resolution.
+    // cube resolution, w: 1 when the print has its own dye spectra.
     spectral: vec4<u32>,
     scan_balance: vec4<f32>,
     ap1_to_ap0: array<vec4<f32>, 3>,
@@ -26,7 +26,9 @@ struct Params {
 @group(0) @binding(1) var<storage, read> knots: array<f32>;
 @group(0) @binding(2) var<storage, read_write> data: array<f32>;
 // Spectral stock tables, each `spectral.x` long: wavelengths, the three
-// weighted sensitivities, the three dye spectra, then the three observer rows.
+// weighted sensitivities, the three dye spectra, the three scan observer
+// rows, then, for a spectral print, the three paper dyes and the three
+// D65 observer rows that view the print.
 @group(0) @binding(3) var<storage, read> spectral: array<f32>;
 // rgb2spec: `spectral.z` z-scale entries, then the coefficient cube.
 @group(0) @binding(4) var<storage, read> rgb2spec: array<f32>;
@@ -157,11 +159,30 @@ fn print_scan(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgro
     }
     let density = load(pixel);
     let print_exposure = params.scalars.y;
-    store(pixel, vec3<f32>(
-        exp10(-curve_eval(3u, print_exposure - density.x)),
-        exp10(-curve_eval(3u, print_exposure - density.y)),
-        exp10(-curve_eval(3u, print_exposure - density.z)),
-    ));
+    let print = vec3<f32>(
+        curve_eval(3u, print_exposure - density.x),
+        curve_eval(3u, print_exposure - density.y),
+        curve_eval(3u, print_exposure - density.z),
+    );
+    if params.spectral.w == 0u {
+        store(pixel, vec3<f32>(exp10(-print.x), exp10(-print.y), exp10(-print.z)));
+        return;
+    }
+    // `print_dyes`: the paper's dye spectra viewed under D65.
+    let count = params.spectral.x;
+    var rgb = vec3<f32>(0.0);
+    for (var index = 0u; index < count; index++) {
+        let optical = spectral[10u * count + index] * print.x
+            + spectral[11u * count + index] * print.y
+            + spectral[12u * count + index] * print.z;
+        let transmittance = exp10(-optical);
+        rgb += transmittance * vec3<f32>(
+            spectral[13u * count + index],
+            spectral[14u * count + index],
+            spectral[15u * count + index],
+        );
+    }
+    store(pixel, rgb);
 }
 
 // `srgb_oetf`.
