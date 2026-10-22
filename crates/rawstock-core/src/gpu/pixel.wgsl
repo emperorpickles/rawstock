@@ -17,6 +17,7 @@ struct Params {
     // x: wavelength count, y: 1 when the stock has dye spectra, z: rgb2spec
     // cube resolution.
     spectral: vec4<u32>,
+    // xyz: neutral balance. w: 1 for a negative, -1 for a reversal stock.
     scan_balance: vec4<f32>,
     ap1_to_ap0: array<vec4<f32>, 3>,
 }
@@ -364,7 +365,8 @@ fn density_spectral(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_w
 
 // `Spectral::printing_density_controlled`: the exact dye scan. Transmittance
 // of the summed dye density, integrated against D65 and CIE 1931 in ACEScg,
-// back to density, less the neutral balance.
+// back to density, less the neutral balance. A reversal stock's slide
+// density is negated so the print stage views the slide (`Spectral::printing`).
 @compute @workgroup_size(256)
 fn dye_scan(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
     let pixel = pixel_index(id, groups);
@@ -385,9 +387,9 @@ fn dye_scan(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroup
             spectral[9u * count + index],
         );
     }
-    store(pixel, vec3<f32>(
+    store(pixel, (vec3<f32>(
         -log10(floor_exposure(rgb.x)),
         -log10(floor_exposure(rgb.y)),
         -log10(floor_exposure(rgb.z)),
-    ) - params.scan_balance.xyz);
+    ) - params.scan_balance.xyz) * params.scan_balance.w);
 }

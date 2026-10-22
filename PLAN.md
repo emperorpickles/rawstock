@@ -19,6 +19,9 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
 - Grain redesign (#13, closed #16).
 - X-Trans demosaic is rawler's 3-pass Markesteijn (#14). Bayer stays PPG.
   Linear DNG still passes through.
+- GPU rendering on wgpu (#21): every film stage, checked against the CPU
+  (#23, #25, #27, #32), and used by the CLI (`--gpu`), the preview session,
+  and the desktop tuner with a CPU fallback (#44). See `docs/GPU.md`.
 
 ## In flight
 
@@ -28,16 +31,11 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
 - **#18** — this guide (`AGENTS.md`, `CLAUDE.md`, `PLAN.md`).
 - **#20** — Add grain to the Velvia stock (`agent: claude`, `stage: ready`).
   PR #22.
-- **#21** — GPU rendering with wgpu, Phase 4 plan (`agent: claude`,
-  `stage: working`).
-- **#23** — GPU slice 1: wgpu scaffold and per-pixel stages (`agent: claude`,
-  `stage: working`).
 - **#49, #50, #51** — 1.0 app Preferences and settings store, Help menu
   (About, generated Licenses, Report an issue, log), and the first-launch
-  welcome (`agent: claude`, `stage: ready`). Built on the `apps/rawstock`
-  shell in #47, so they merge after it. #52 (presets) and #53 (export
-  queue) stay `stage: holding` until #39 and #41 land.
-
+  welcome (`agent: claude`, `stage: ready`). PRs #55, #56, #57; #57 merges
+  last. #52 (presets) and #53 (export queue) stay `stage: holding` until
+  #39 and #41 land.
 
 ## Next
 
