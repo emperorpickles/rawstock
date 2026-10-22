@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use super::*;
+use crate::decode::Orientation;
 use crate::render::{NopControl, Pipeline};
+use crate::session::{DisplayRect, PreviewSession, ScanMode};
 use crate::stock::{Grain, GrainRegion, Halation, Stock};
 
 /// Exposure is one multiply by the same f32 scale: bit for bit.
@@ -248,14 +250,20 @@ fn halation_matches() {
 }
 
 /// Grain on its own: density in, density with grain out.
-fn grain_case(gpu: &Gpu, grain: &Grain, region: GrainRegion) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+/// Grain over a density ramp raised by `shift`, on the CPU and on `gpu`.
+fn grain_case(
+    gpu: &Gpu,
+    grain: &Grain,
+    region: GrainRegion,
+    shift: f32,
+) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let pixels = region.width * region.height;
     let density: Vec<f32> = (0..pixels * 3)
         .map(|index| {
             let pixel = index / 3;
             let x = (pixel % region.width) as f32 / region.width as f32;
             let y = (pixel / region.width) as f32 / region.height as f32;
-            0.2 + 2.3 * (0.5 * x + 0.5 * y) + 0.05 * (index % 3) as f32
+            shift + 0.2 + 2.3 * (0.5 * x + 0.5 * y) + 0.05 * (index % 3) as f32
         })
         .collect();
     let mut cpu = density.clone();
@@ -315,29 +323,60 @@ fn grain_matches() {
         ),
     ];
     for (label, region) in cases {
-        let (density, cpu, gpu) = grain_case(gpu, &grain, region);
-        let mut worst = 0.0f32;
-        let mut energy = 0.0f64;
-        let mut error = 0.0f64;
-        for ((input, expected), actual) in density.iter().zip(&cpu).zip(&gpu) {
-            let delta = expected - input;
-            energy += f64::from(delta * delta);
-            let miss = (expected - actual).abs();
-            error += f64::from(miss * miss);
-            worst = worst.max(miss);
-        }
-        let rms = (energy / cpu.len() as f64).sqrt();
-        let error_rms = (error / cpu.len() as f64).sqrt();
-        eprintln!(
-            "grain {label}: grain rms {rms:.3e}, error rms {error_rms:.3e}, worst {worst:.3e}"
-        );
-        assert!(rms > 1.0e-4, "{label}: no grain on the CPU");
-        assert!(worst <= GRAIN_TOLERANCE, "{label}: worst {worst}");
-        assert!(
-            error_rms <= GRAIN_RMS_TOLERANCE,
-            "{label}: error rms {error_rms}"
-        );
+        assert_grain(label, grain_case(gpu, &grain, region, 0.0));
     }
+}
+
+fn assert_grain(label: &str, (density, cpu, gpu): (Vec<f32>, Vec<f32>, Vec<f32>)) {
+    let mut worst = 0.0f32;
+    let mut energy = 0.0f64;
+    let mut error = 0.0f64;
+    for ((input, expected), actual) in density.iter().zip(&cpu).zip(&gpu) {
+        let delta = expected - input;
+        energy += f64::from(delta * delta);
+        let miss = (expected - actual).abs();
+        error += f64::from(miss * miss);
+        worst = worst.max(miss);
+    }
+    let rms = (energy / cpu.len() as f64).sqrt();
+    let error_rms = (error / cpu.len() as f64).sqrt();
+    eprintln!("grain {label}: grain rms {rms:.3e}, error rms {error_rms:.3e}, worst {worst:.3e}");
+    assert!(rms > 1.0e-4, "{label}: no grain on the CPU");
+    assert!(worst <= GRAIN_TOLERANCE, "{label}: worst {worst}");
+    assert!(
+        error_rms <= GRAIN_RMS_TOLERANCE,
+        "{label}: error rms {error_rms}"
+    );
+}
+
+#[test]
+fn grain_field_is_reused_across_edits() {
+    let Some(gpu) = gpu() else { return };
+    // A fresh cache, and several chunks, each with its own cached band.
+    let gpu = gpu.with_chunk_limit(4000);
+    let grain = stock("portra400").grain().unwrap().clone();
+    let region = GrainRegion {
+        width: 160,
+        height: 96,
+        origin_x: 2400,
+        origin_y: 1500,
+        frame_width: 6000,
+    };
+    let cached = |gpu: &Gpu| gpu.inner.grain_fields.lock().unwrap().len();
+    assert_grain("first", grain_case(&gpu, &grain, region, 0.0));
+    assert_eq!(cached(&gpu), 1);
+    // A different picture under the same grain reads the cached field.
+    assert_grain("edited", grain_case(&gpu, &grain, region, 0.4));
+    assert_eq!(cached(&gpu), 1);
+    let fields = gpu.inner.grain_fields.lock().unwrap()[0].fields.len();
+    assert!(fields > 1, "{fields} chunks");
+    // Another crop is another field.
+    let moved = GrainRegion {
+        origin_x: 2410,
+        ..region
+    };
+    assert_grain("moved", grain_case(&gpu, &grain, moved, 0.0));
+    assert_eq!(cached(&gpu), 2);
 }
 
 #[test]
@@ -461,4 +500,147 @@ fn chunks_do_not_change_the_result() {
         whole.develop_blocking(&image).unwrap().pixels(),
         chunked.develop_blocking(&image).unwrap().pixels(),
     );
+}
+
+/// A session on `gpu` and one on the CPU over the same frame and stock.
+fn sessions(gpu: &Gpu, name: &str) -> (PreviewSession, PreviewSession) {
+    let image = highlights(640, 427);
+    let mut cpu = PreviewSession::new(image.clone(), Orientation::Normal, 256).unwrap();
+    let mut on_gpu = PreviewSession::new(image, Orientation::Normal, 256).unwrap();
+    cpu.set_parameters(stock(name));
+    on_gpu.set_parameters(stock(name));
+    on_gpu.set_gpu(Some(gpu.clone()));
+    (cpu, on_gpu)
+}
+
+#[test]
+fn session_renders_match_the_cpu() {
+    let Some(gpu) = gpu() else { return };
+    for name in ["velvia", "portra400"] {
+        let (mut cpu, mut on_gpu) = sessions(gpu, name);
+        // A crop away from the corner, so halation pads on every side and
+        // grain sits at a full-frame offset.
+        let rect = DisplayRect {
+            x: 180,
+            y: 120,
+            width: 200,
+            height: 150,
+        };
+        let expected = cpu
+            .render_region(rect, ScanMode::Exact, &mut NopControl)
+            .unwrap();
+        let actual = on_gpu
+            .render_region(rect, ScanMode::Preview, &mut NopControl)
+            .unwrap();
+        assert_eq!(actual.fidelity(), Fidelity::Exact);
+        assert_eq!((actual.width(), actual.height()), (200, 150));
+        assert_rgb8_parity(
+            &format!("{name} crop"),
+            &expected.to_rgb8(),
+            &actual.to_rgb8(),
+        );
+
+        let expected = cpu.render_full(&mut NopControl).unwrap();
+        let actual = on_gpu.render_full(&mut NopControl).unwrap();
+        assert_rgb8_parity(
+            &format!("{name} full"),
+            &expected.to_rgb8(),
+            &actual.to_rgb8(),
+        );
+
+        // The crop is the same pixels as the full frame.
+        let full = actual.to_rgb8();
+        let crop = on_gpu
+            .render_region(rect, ScanMode::Exact, &mut NopControl)
+            .unwrap()
+            .to_rgb8();
+        for row in 0..150usize {
+            let start = ((120 + row) * 640 + 180) * 3;
+            assert_eq!(&full[start..start + 600], &crop[row * 600..(row + 1) * 600]);
+        }
+    }
+    // Velvia has no dye curves, so the CPU proxy is exact too.
+    let (mut cpu, mut on_gpu) = sessions(gpu, "velvia");
+    let expected = cpu.render_proxy(&mut NopControl).unwrap();
+    let actual = on_gpu.render_proxy(&mut NopControl).unwrap();
+    assert_rgb8_parity("velvia proxy", &expected.to_rgb8(), &actual.to_rgb8());
+}
+
+/// Wall time of a full Portra develop, CPU then GPU, on a frame the size of
+/// `RAWSTOCK_TIMING_MP` megapixels (default 6). Not a parity test:
+/// `cargo test --release -p rawstock-core --features gpu --lib timing -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn timing() {
+    let Some(gpu) = gpu() else { return };
+    let megapixels: f32 = std::env::var("RAWSTOCK_TIMING_MP")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(6.0);
+    let height = (megapixels * 1.0e6 / 1.5).sqrt() as u32;
+    let width = height * 3 / 2;
+    let image = highlights(width, height);
+    let frame_width: u32 = std::env::var("RAWSTOCK_TIMING_FRAME")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(width);
+    let mut parameters = stock("portra400");
+    if std::env::var("RAWSTOCK_TIMING_GRAIN").as_deref() == Ok("0") {
+        parameters.set_grain(None).unwrap();
+    }
+    parameters.set_halation(None).unwrap();
+    // A crop of a `frame_width` frame, so a small test can time full
+    // resolution grain.
+    let region = GrainRegion {
+        width,
+        height,
+        origin_x: 0,
+        origin_y: 0,
+        frame_width,
+    };
+    let start = std::time::Instant::now();
+    let mut cpu = Pipeline::new(parameters.clone())
+        .develop(&image)
+        .pixels()
+        .to_vec();
+    if let Some(grain) = parameters.grain() {
+        // The CPU develop above used its own frame width; redo grain alone
+        // for the comparison below.
+        let mut density = parameters.film().density(image.pixels());
+        grain
+            .apply_region(&mut density, region, &mut NopControl)
+            .unwrap();
+        cpu = density;
+    }
+    let cpu_time = start.elapsed();
+    let pipeline = GpuPipeline::new(gpu, &parameters);
+    let stages = |grain| Stages {
+        pre: &[],
+        halation: None,
+        mid: &pipeline.sequence[1..2],
+        grain,
+        post: &[],
+    };
+    let run = || {
+        let grain = parameters.grain().map(|grain| (grain, region));
+        pollster::block_on(pipeline.run_frame(image.pixels(), width, height, stages(grain)))
+            .unwrap()
+    };
+    // The first run builds the shaders and the grain field; the second is
+    // a preview edit, which reuses the field.
+    let start = std::time::Instant::now();
+    let first = run();
+    let first_time = start.elapsed();
+    let start = std::time::Instant::now();
+    let developed = run();
+    let gpu_time = start.elapsed();
+    assert_eq!(first, developed);
+    eprintln!(
+        "{width}×{height} of a {frame_width} px frame, density + grain: CPU {cpu_time:.2?} \
+         (develop and grain), GPU first {first_time:.2?}, then {gpu_time:.2?} on {}",
+        gpu.adapter_name()
+    );
+    if parameters.grain().is_some() {
+        assert_close("timing grain", &cpu, &developed, |_| GRAIN_TOLERANCE);
+    }
 }

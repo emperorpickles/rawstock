@@ -26,6 +26,10 @@ ProRAW DNG, then pick a stock. Bundled stocks are read from the repo
 `RAWSTOCK_STOCK` may be a path or a file name in `stocks/`.
 `RAWSTOCK_STOCKS` overrides that directory.
 
+Previews and exports render on the GPU when one is found, and on the CPU
+otherwise. `RAWSTOCK_GPU=0` forces the CPU. The adapter is printed to the
+terminal on the first open.
+
 ### macOS
 
 Xcode command line tools are enough. The system WebKit is the webview.
