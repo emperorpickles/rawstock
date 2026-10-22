@@ -1,14 +1,15 @@
 # Velvia film simulation, parametric approximation.
 # Fitted to Fujifilm X-T2 in-camera JPEGs. This is not a LUT and
-# not a datasheet of the reversal film. Grain is omitted: the
-# camera's Grain Effect was Weak, and the fit was made with grain off.
+# not a datasheet of the reversal film. The camera's Grain Effect was
+# Weak, and the fit was made with grain off; the [grain] table below is
+# a separate approximate tuning, not part of the fit.
 # Velvia is a Fujifilm trademark. These numbers were produced by
 # rawstock's stock fitter from scene-linear ACEScg.
 
 schema_version = 1
 revision = 1
 name = "Velvia"
-source = "Approximate parametric fit to Fujifilm X-T2 in-camera Velvia JPEGs. DR100, Color 0, Highlight Tone 0, Shadow Tone 0, Sharpness Normal, Noise Reduction 0, White Balance Auto. Grain Effect was Weak on the camera and is omitted, so the fit was made with grain off. Not a Fujifilm datasheet, not a 3D LUT, and not a measurement of the reversal film."
+source = "Approximate parametric fit to Fujifilm X-T2 in-camera Velvia JPEGs. DR100, Color 0, Highlight Tone 0, Shadow Tone 0, Sharpness Normal, Noise Reduction 0, White Balance Auto. Grain Effect was Weak on the camera and the fit was made with grain off. Grain is an approximate aesthetic tuning for a fine-grained ISO 50 slide film, not a Fujifilm granularity table. Not a Fujifilm datasheet, not a 3D LUT, and not a measurement of the reversal film."
 license = "CC0-1.0"
 model = "parametric"
 
@@ -33,3 +34,26 @@ density = [-0.029750571, 0.04987938, 0.81294602, 2.8200903, 3.4373782, 3.6878376
 
 [coupling]
 matrix = [[1.3803774, -0.13388038, -0.0027565509], [0.010332672, 1.224131, 0.0013096225], [-0.28123239, -0.052447326, 1.474438]]
+
+# Approximate aesthetic tuning, not a published granularity table and not
+# part of the fit. Velvia 50 is a very fine-grained slide film, so rms is
+# about a third of Portra 400's and the dye clouds are smaller. In the
+# developed image that is roughly half of Portra's midtone luma noise.
+# Same Vision3-style shape (rises through the midtones, then falls) with
+# blue the grainiest, as with Portra. rms is 1000 times the density
+# standard deviation through a 48 µm aperture.
+[grain]
+frame_mm = 35
+seed = 50
+[grain.red]
+density = [0.15, 0.40, 0.80, 1.20, 1.70, 2.20, 2.60]
+rms = [4, 5, 7, 8, 7, 6, 5]
+size_mm = 0.010
+[grain.green]
+density = [0.15, 0.40, 0.80, 1.20, 1.70, 2.20, 2.60]
+rms = [4, 6, 8, 9, 8, 7, 5]
+size_mm = 0.0075
+[grain.blue]
+density = [0.15, 0.40, 0.80, 1.20, 1.70, 2.20, 2.60]
+rms = [5, 7, 9, 10, 9, 8, 6]
+size_mm = 0.006
