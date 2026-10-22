@@ -8,8 +8,8 @@
 //! Setup and readback are async because WebGPU in a browser cannot block.
 //! Native callers can use the `_blocking` wrappers.
 //!
-//! Exposure, both film models, the exact dye scan, print/scan, and the sRGB
-//! encode run here. A stock with halation or grain is refused with
+//! Exposure, halation, both film models, the exact dye scan, print/scan, and
+//! the sRGB encode run here. A stock with grain is refused with
 //! [`GpuError::Unsupported`] until those stages are ported.
 
 use std::future::Future;
@@ -22,7 +22,7 @@ use wgpu::util::DeviceExt;
 
 use crate::color::LinearImage;
 use crate::render::{Fidelity, Parameters, SrgbImage, Stage};
-use crate::stock::{Curve, FilmModel};
+use crate::stock::{Curve, FilmModel, Halation};
 
 #[cfg(test)]
 mod tests;
@@ -46,6 +46,15 @@ pub enum GpuError {
     /// The parameters use a stage the GPU path does not run yet.
     #[error("the GPU path does not run the {} stage yet", .0.name())]
     Unsupported(Stage),
+    /// Halation needs one storage binding for the whole frame, and this
+    /// frame does not fit.
+    #[error("a {width}×{height} frame is too large for one GPU halation pass")]
+    FrameTooLarge {
+        /// Frame width in pixels.
+        width: u32,
+        /// Frame height in pixels.
+        height: u32,
+    },
     /// Reading the result back failed.
     #[error("GPU readback failed: {0}")]
     Readback(String),
@@ -64,8 +73,13 @@ struct Inner {
     queue: wgpu::Queue,
     layout: wgpu::BindGroupLayout,
     kernels: [wgpu::ComputePipeline; KERNEL_COUNT],
+    halation_layout: wgpu::BindGroupLayout,
+    /// `threshold`, `box_horizontal`, `box_vertical`, `add_glow`.
+    halation_kernels: [wgpu::ComputePipeline; 4],
     adapter: String,
     max_chunk_pixels: u32,
+    /// Bytes in the largest storage binding.
+    max_binding: u64,
     /// The Jakob-Hanika table, uploaded on the first spectral stock.
     rgb2spec: OnceLock<wgpu::Buffer>,
     /// Bound in place of a table a stage does not read.
@@ -170,6 +184,36 @@ impl Gpu {
                 cache: None,
             })
         });
+        let halation_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("halation.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("halation.wgsl").into()),
+        });
+        let halation_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("halation"),
+            entries: &[
+                buffer_entry(0, wgpu::BufferBindingType::Uniform),
+                buffer_entry(1, wgpu::BufferBindingType::Storage { read_only: false }),
+                buffer_entry(2, wgpu::BufferBindingType::Storage { read_only: false }),
+                buffer_entry(3, wgpu::BufferBindingType::Storage { read_only: false }),
+            ],
+        });
+        let halation_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("halation"),
+                bind_group_layouts: &[Some(&halation_layout)],
+                immediate_size: 0,
+            });
+        let halation_kernels =
+            ["threshold", "box_horizontal", "box_vertical", "add_glow"].map(|entry_point| {
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some(entry_point),
+                    layout: Some(&halation_pipeline_layout),
+                    module: &halation_module,
+                    entry_point: Some(entry_point),
+                    compilation_options: Default::default(),
+                    cache: None,
+                })
+            });
         let binding = required_limits
             .max_storage_buffer_binding_size
             .min(required_limits.max_buffer_size);
@@ -187,8 +231,11 @@ impl Gpu {
                 queue,
                 layout,
                 kernels,
+                halation_layout,
+                halation_kernels,
                 adapter: adapter.get_info().name,
                 max_chunk_pixels,
+                max_binding: binding,
                 rgb2spec: OnceLock::new(),
                 empty,
             }),
@@ -232,8 +279,11 @@ impl Gpu {
                 queue: inner.queue.clone(),
                 layout: inner.layout.clone(),
                 kernels: inner.kernels.clone(),
+                halation_layout: inner.halation_layout.clone(),
+                halation_kernels: inner.halation_kernels.clone(),
                 adapter: inner.adapter.clone(),
                 max_chunk_pixels: pixels,
+                max_binding: inner.max_binding,
                 rgb2spec: inner.rgb2spec.clone(),
                 empty: inner.empty.clone(),
             }),
@@ -280,6 +330,7 @@ pub struct GpuPipeline {
     rgb2spec: wgpu::Buffer,
     params: StageParams,
     sequence: Vec<Kernel>,
+    halation: Option<Halation>,
 }
 
 impl std::fmt::Debug for GpuPipeline {
@@ -296,9 +347,6 @@ impl GpuPipeline {
     /// Fails with [`GpuError::Unsupported`] when the parameters need a stage
     /// this slice has not ported.
     pub fn new(gpu: &Gpu, parameters: &Parameters) -> Result<Self, GpuError> {
-        if parameters.halation().is_some() {
-            return Err(GpuError::Unsupported(Stage::Halation));
-        }
         if parameters.grain().is_some() {
             return Err(GpuError::Unsupported(Stage::Grain));
         }
@@ -393,16 +441,24 @@ impl GpuPipeline {
             rgb2spec,
             params,
             sequence,
+            halation: parameters.halation().cloned(),
         })
     }
 
-    /// Exposure, the film model, print/scan, and the sRGB encode.
+    /// Exposure, halation, the film model, print/scan, and the sRGB encode.
     ///
     /// The same stages and order as [`Pipeline::develop`](crate::render::Pipeline::develop),
     /// within the documented tolerance. The result is always
     /// [`Fidelity::Exact`].
     pub async fn develop(&self, image: &LinearImage) -> Result<SrgbImage, GpuError> {
-        let pixels = self.run(&self.sequence, image.pixels()).await?;
+        let pixels = match &self.halation {
+            None => self.run(&self.sequence, image.pixels()).await?,
+            Some(halation) => {
+                let sigma = halation.sigma_px(image.width(), image.height());
+                self.run_with_halation(halation, sigma, image, &self.sequence[1..])
+                    .await?
+            }
+        };
         Ok(SrgbImage::from_encoded(
             image.width(),
             image.height(),
@@ -417,105 +473,263 @@ impl GpuPipeline {
         pollster::block_on(self.develop(image))
     }
 
-    /// Run `kernels`, in order, over interleaved RGB `samples`.
-    ///
-    /// Per-pixel stages do not read neighbours, so the frame is split into
-    /// chunks that fit one storage binding.
+    /// Run per-pixel `kernels`, in order, over interleaved RGB `samples`.
     pub(crate) async fn run(
         &self,
         kernels: &[Kernel],
         samples: &[f32],
     ) -> Result<Vec<f32>, GpuError> {
         let gpu = &self.gpu.inner;
-        let pixel_count = samples.len() / 3;
-        let chunk_pixels = (gpu.max_chunk_pixels as usize).max(1);
-        let mut out = Vec::with_capacity(pixel_count * 3);
-        for chunk in samples[..pixel_count * 3].chunks(chunk_pixels * 3) {
-            out.extend(self.run_chunk(kernels, chunk).await?);
-        }
-        Ok(out)
-    }
-
-    async fn run_chunk(&self, kernels: &[Kernel], samples: &[f32]) -> Result<Vec<f32>, GpuError> {
-        let gpu = &self.gpu.inner;
-        let count = (samples.len() / 3) as u32;
-        if count == 0 {
-            return Ok(Vec::new());
-        }
-        let mut params = self.params;
-        params.counts[0] = count;
-        let uniform = gpu
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("stage params"),
-                contents: bytemuck::bytes_of(&params),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
-        let data = gpu
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("pixels"),
-                contents: bytemuck::cast_slice(samples),
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            });
-        let size = data.size();
-        let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("readback"),
-            size,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("film stages"),
-            layout: &gpu.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniform.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: self.knots.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: data.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: self.spectral.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: self.rgb2spec.as_entire_binding(),
-                },
-            ],
-        });
-        let (groups_x, groups_y) = dispatch_size(count);
+        let chunks = self.upload(samples);
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("develop"),
             });
-        for kernel in kernels {
-            // One pass per stage, so each stage sees the previous one's writes.
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some(kernel.entry_point()),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&gpu.kernels[*kernel as usize]);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(groups_x, groups_y, 1);
+        for chunk in &chunks {
+            self.encode_film(&mut encoder, chunk, kernels);
         }
-        encoder.copy_buffer_to_buffer(&data, 0, &readback, 0, size);
-        gpu.queue.submit([encoder.finish()]);
-        read_back(&gpu.device, &readback).await
+        self.finish(encoder, &chunks).await
     }
+
+    /// Exposure, halation over the whole frame at `sigma` pixels, then the
+    /// per-pixel `post` kernels.
+    pub(crate) async fn run_with_halation(
+        &self,
+        halation: &Halation,
+        sigma: f32,
+        image: &LinearImage,
+        post: &[Kernel],
+    ) -> Result<Vec<f32>, GpuError> {
+        let gpu = &self.gpu.inner;
+        let (width, height) = (image.width(), image.height());
+        let pixels = u64::from(width) * u64::from(height);
+        if pixels * 4 > gpu.max_binding {
+            return Err(GpuError::FrameTooLarge { width, height });
+        }
+        let chunks = self.upload(image.pixels());
+        if chunks.is_empty() {
+            return Ok(Vec::new());
+        }
+        let plane = |label| {
+            gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: (pixels * 4).max(4),
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            })
+        };
+        let excess = plane("halation excess");
+        let scratch = plane("halation scratch");
+        let weight = halation.weight();
+        let glow = |chunk: &Chunk, radius: u32| {
+            let params = HalationParams {
+                dims: [width, height, radius, chunk.offset],
+                scalars: [halation.threshold(), weight[0], weight[1], weight[2]],
+                counts: [chunk.count, 0, 0, 0],
+            };
+            let uniform = gpu
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("halation params"),
+                    contents: bytemuck::bytes_of(&params),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+            gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("halation"),
+                layout: &gpu.halation_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: chunk.data.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: excess.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: scratch.as_entire_binding(),
+                    },
+                ],
+            })
+        };
+        let pre = [Kernel::Exposure];
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("develop with halation"),
+            });
+        for chunk in &chunks {
+            self.encode_film(&mut encoder, chunk, &pre);
+            let group = glow(chunk, 0);
+            let (x, y) = dispatch_size(chunk.count);
+            dispatch(&mut encoder, &gpu.halation_kernels[0], &group, (x, y));
+        }
+        // `widen` leaves the excess unblurred below half a pixel.
+        if sigma.is_finite() && sigma >= 0.5 && width > 0 && height > 0 {
+            let tiles = (width.div_ceil(16), height.div_ceil(16));
+            for radius in crate::stock::box_radii(sigma) {
+                if radius == 0 {
+                    continue;
+                }
+                let group = glow(&chunks[0], radius as u32);
+                dispatch(&mut encoder, &gpu.halation_kernels[1], &group, tiles);
+                dispatch(&mut encoder, &gpu.halation_kernels[2], &group, tiles);
+            }
+        }
+        for chunk in &chunks {
+            let group = glow(chunk, 0);
+            let (x, y) = dispatch_size(chunk.count);
+            dispatch(&mut encoder, &gpu.halation_kernels[3], &group, (x, y));
+            self.encode_film(&mut encoder, chunk, post);
+        }
+        self.finish(encoder, &chunks).await
+    }
+
+    /// Split `samples` into chunks that fit one storage binding and upload
+    /// them. Per-pixel stages do not read neighbours, so the split cannot
+    /// change their result.
+    fn upload(&self, samples: &[f32]) -> Vec<Chunk> {
+        let gpu = &self.gpu.inner;
+        let pixel_count = samples.len() / 3;
+        let chunk_pixels = (gpu.max_chunk_pixels as usize).max(1);
+        samples[..pixel_count * 3]
+            .chunks(chunk_pixels * 3)
+            .enumerate()
+            .map(|(index, samples)| {
+                let count = (samples.len() / 3) as u32;
+                let mut params = self.params;
+                params.counts[0] = count;
+                let uniform = gpu
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("stage params"),
+                        contents: bytemuck::bytes_of(&params),
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    });
+                let data = gpu
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("pixels"),
+                        contents: bytemuck::cast_slice(samples),
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                    });
+                let film = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("film stages"),
+                    layout: &gpu.layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: uniform.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: self.knots.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: data.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: self.spectral.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: self.rgb2spec.as_entire_binding(),
+                        },
+                    ],
+                });
+                Chunk {
+                    data,
+                    film,
+                    count,
+                    offset: (index * chunk_pixels) as u32,
+                }
+            })
+            .collect()
+    }
+
+    fn encode_film(&self, encoder: &mut wgpu::CommandEncoder, chunk: &Chunk, kernels: &[Kernel]) {
+        let size = dispatch_size(chunk.count);
+        for kernel in kernels {
+            let pipeline = &self.gpu.inner.kernels[*kernel as usize];
+            dispatch(encoder, pipeline, &chunk.film, size);
+        }
+    }
+
+    /// Submit `encoder` and read every chunk back, in order.
+    async fn finish(
+        &self,
+        mut encoder: wgpu::CommandEncoder,
+        chunks: &[Chunk],
+    ) -> Result<Vec<f32>, GpuError> {
+        let gpu = &self.gpu.inner;
+        let readbacks: Vec<wgpu::Buffer> = chunks
+            .iter()
+            .map(|chunk| {
+                let size = chunk.data.size();
+                let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("readback"),
+                    size,
+                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                encoder.copy_buffer_to_buffer(&chunk.data, 0, &readback, 0, size);
+                readback
+            })
+            .collect();
+        gpu.queue.submit([encoder.finish()]);
+        let mut out = Vec::new();
+        for readback in &readbacks {
+            out.extend(read_back(&gpu.device, readback).await?);
+        }
+        Ok(out)
+    }
+}
+
+/// One upload of interleaved RGB, at most one storage binding long.
+struct Chunk {
+    data: wgpu::Buffer,
+    film: wgpu::BindGroup,
+    count: u32,
+    /// The chunk's first pixel in the frame.
+    offset: u32,
+}
+
+/// `Params` in `halation.wgsl`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct HalationParams {
+    dims: [u32; 4],
+    scalars: [f32; 4],
+    counts: [u32; 4],
+}
+
+/// One compute pass, so the next dispatch sees this one's writes.
+fn dispatch(
+    encoder: &mut wgpu::CommandEncoder,
+    pipeline: &wgpu::ComputePipeline,
+    group: &wgpu::BindGroup,
+    (x, y): (u32, u32),
+) {
+    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: None,
+        timestamp_writes: None,
+    });
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, group, &[]);
+    pass.dispatch_workgroups(x, y, 1);
 }
 
 /// Workgroups for `count` pixels. `pixel_index` in `pixel.wgsl` undoes this.
 fn dispatch_size(count: u32) -> (u32, u32) {
-    let groups = count.div_ceil(WORKGROUP);
+    let groups = count.div_ceil(WORKGROUP).max(1);
     let x = groups.min(65_535);
     (x, groups.div_ceil(x))
 }

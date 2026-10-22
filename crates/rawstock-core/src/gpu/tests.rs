@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 
 use super::*;
 use crate::render::{NopControl, Pipeline};
-use crate::stock::{Grain, Granularity, Stock};
+use crate::stock::{Grain, Granularity, Halation, Stock};
 
 /// Exposure is one multiply by the same f32 scale: bit for bit.
 const EXPOSURE_TOLERANCE: f32 = 0.0;
@@ -19,6 +19,9 @@ const DENSITY_TOLERANCE: f32 = 2.0e-5;
 /// above a density of 1: a dense patch sums tiny transmittances against an
 /// observer with negative lobes, so the sum cancels.
 const DYE_SCAN_TOLERANCE: f32 = 5.0e-5;
+/// Scene-linear exposure after halation, relative above 1. The GPU sums each
+/// box window directly in f32; the CPU slides an f64 running sum.
+const HALATION_TOLERANCE: f32 = 1.0e-5;
 /// Display-linear transmission from print/scan, relative to the value.
 const PRINT_TOLERANCE: f32 = 1.0e-4;
 /// Encoded sRGB in `0..=1`.
@@ -52,12 +55,53 @@ fn stock(name: &str) -> Parameters {
     Stock::load(path).expect("stock loads").into_parameters()
 }
 
-/// `name` without halation or grain, the stages the GPU does not run yet.
-fn bare(name: &str) -> Parameters {
+/// `name` without grain, the stage the GPU does not run yet.
+fn grainless(name: &str) -> Parameters {
     let mut parameters = stock(name);
-    parameters.set_halation(None).unwrap();
     parameters.set_grain(None).unwrap();
     parameters
+}
+
+/// `name` without halation or grain, for the per-pixel stage tests.
+fn bare(name: &str) -> Parameters {
+    let mut parameters = grainless(name);
+    parameters.set_halation(None).unwrap();
+    parameters
+}
+
+/// A dark frame with hot points, a hot bar on the left edge, and a bright
+/// lower-right corner, so the glow meets every border.
+fn highlights(width: u32, height: u32) -> LinearImage {
+    let mut pixels = Vec::with_capacity((width * height * 3) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let roll = unit(y * width + x, 3);
+            let mut rgb = [0.02 + 0.1 * roll, 0.03, 0.01 + 0.05 * roll];
+            let hot =
+                (x % 37 == 5 && y % 23 == 7) || x < 3 || (x > width * 3 / 4 && y > height * 3 / 4);
+            if hot {
+                rgb = [6.0 + 20.0 * roll, 4.0, 2.0];
+            }
+            pixels.extend(rgb);
+        }
+    }
+    LinearImage::new(width, height, pixels).unwrap()
+}
+
+/// Exposure and halation on the CPU, as `Pipeline::develop` runs them.
+fn cpu_halation(parameters: &Parameters, image: &LinearImage, sigma: f32) -> Vec<f32> {
+    let exposure =
+        crate::render::exposure_buffer(image.pixels(), parameters.exposure_ev(), &mut NopControl)
+            .unwrap();
+    crate::render::halation_buffer(
+        exposure,
+        parameters.halation(),
+        image.width(),
+        image.height(),
+        Some(sigma),
+        &mut NopControl,
+    )
+    .unwrap()
 }
 
 /// A hash in `0..1`, so the inputs are the same on every run.
@@ -176,6 +220,29 @@ fn dye_scan_matches() {
 }
 
 #[test]
+fn halation_matches() {
+    let Some(gpu) = gpu() else { return };
+    let mut parameters = bare("velvia");
+    // Strong enough that the glow is most of a dark pixel's value.
+    parameters
+        .set_halation(Some(Halation::new(1.0, 0.02, [0.6, 0.15, 0.02]).unwrap()))
+        .unwrap();
+    let image = highlights(301, 197);
+    let halation = parameters.halation().unwrap().clone();
+    let pipeline = GpuPipeline::new(gpu, &parameters).unwrap();
+    // Below half a pixel there is no blur, only the add-back. Then the
+    // stock's own sigma, and a radius wider than the frame.
+    for sigma in [0.3, halation.sigma_px(301, 197), 150.0] {
+        let cpu = cpu_halation(&parameters, &image, sigma);
+        let gpu =
+            pollster::block_on(pipeline.run_with_halation(&halation, sigma, &image, &[])).unwrap();
+        assert_close(&format!("halation sigma {sigma}"), &cpu, &gpu, |value| {
+            HALATION_TOLERANCE * value.abs().max(1.0)
+        });
+    }
+}
+
+#[test]
 fn print_scan_matches() {
     let Some(gpu) = gpu() else { return };
     let parameters = stock("velvia");
@@ -250,7 +317,7 @@ fn develop_matches_the_cpu_pipeline() {
     }
     let image = LinearImage::new(width as u32, height as u32, pixels).unwrap();
     for name in ["velvia", "neutral", "portra400"] {
-        let mut parameters = bare(name);
+        let mut parameters = grainless(name);
         parameters.set_exposure_ev(0.4).unwrap();
         let cpu = Pipeline::new(parameters.clone()).develop(&image);
         let developed = GpuPipeline::new(gpu, &parameters)
@@ -288,15 +355,24 @@ fn chunks_do_not_change_the_result() {
         let actual = pollster::block_on(chunked.run(&chunked.sequence, &input)).unwrap();
         assert_eq!(expected, actual, "{name}");
     }
+    // Halation reads across chunk borders.
+    let parameters = grainless("portra400");
+    let image = highlights(97, 61);
+    let whole = GpuPipeline::new(gpu, &parameters).unwrap();
+    let chunked = GpuPipeline::new(&gpu.with_chunk_limit(500), &parameters).unwrap();
+    assert_eq!(
+        whole.develop_blocking(&image).unwrap().pixels(),
+        chunked.develop_blocking(&image).unwrap().pixels(),
+    );
 }
 
 #[test]
 fn unported_stages_are_refused() {
     let Some(gpu) = gpu() else { return };
-    // Portra carries halation and grain.
+    // Portra carries grain.
     assert!(matches!(
         GpuPipeline::new(gpu, &stock("portra400")),
-        Err(GpuError::Unsupported(Stage::Halation))
+        Err(GpuError::Unsupported(Stage::Grain))
     ));
     let layer = Granularity::new([(0.0, 4.0), (3.0, 4.0)]).unwrap();
     let grain = Grain::new(Grain::FRAME_MM, 1, [layer.clone(), layer.clone(), layer]).unwrap();
