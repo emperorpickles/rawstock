@@ -104,6 +104,9 @@ pub struct PreviewSession {
     region: Option<RegionCache>,
     baseline_region: Option<RegionCache>,
     dye_lut: Option<DyeLut>,
+    /// Renders on this device when set, and on the CPU when it fails.
+    #[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
+    gpu: Option<crate::gpu::Gpu>,
 }
 
 #[derive(Clone)]
@@ -329,7 +332,26 @@ impl PreviewSession {
             region: None,
             baseline_region: None,
             dye_lut: None,
+            #[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
+            gpu: None,
         })
+    }
+
+    /// Render on `gpu` from now on, or on the CPU with `None`.
+    ///
+    /// The GPU path runs every stage on each render and keeps no stage
+    /// cache. Its dye scan is always exact, so every image it returns is
+    /// [`Fidelity::Exact`]. A GPU error falls back to the CPU for that
+    /// render.
+    #[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
+    pub fn set_gpu(&mut self, gpu: Option<crate::gpu::Gpu>) {
+        self.gpu = gpu;
+    }
+
+    /// The device renders run on, when there is one.
+    #[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
+    pub fn gpu(&self) -> Option<&crate::gpu::Gpu> {
+        self.gpu.as_ref()
     }
 
     /// Width and height of the oriented working image.
@@ -665,7 +687,59 @@ impl PreviewSession {
         control: &mut dyn DevelopControl,
     ) -> Result<SrgbImage, Cancelled> {
         let parameters = self.loaded().parameters.clone();
+        #[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
+        if let Some(image) = self.gpu_render(&parameters, &self.full, None, control)? {
+            return Ok(image);
+        }
         render::Pipeline::new(parameters).develop_controlled(&self.full, control)
+    }
+
+    /// `frame` on the GPU, or `None` when there is no device or it failed.
+    ///
+    /// `crop` is the full-frame halation sigma, the padded crop's origin in
+    /// the full frame, and the full frame's width.
+    #[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
+    fn gpu_render(
+        &self,
+        parameters: &Parameters,
+        frame: &LinearImage,
+        crop: Option<(Option<f32>, u32, u32, u32)>,
+        control: &mut dyn DevelopControl,
+    ) -> Result<Option<SrgbImage>, Cancelled> {
+        let Some(gpu) = &self.gpu else {
+            return Ok(None);
+        };
+        let (width, height) = (frame.width(), frame.height());
+        let (sigma, origin_x, origin_y, frame_width) = crop.unwrap_or((None, 0, 0, width));
+        render::begin(Stage::Exposure, height, control)?;
+        let pipeline = crate::gpu::GpuPipeline::new(gpu, parameters);
+        let region = crate::stock::GrainRegion {
+            width,
+            height,
+            origin_x,
+            origin_y,
+            frame_width,
+        };
+        let developed = pollster::block_on(pipeline.develop_frame(
+            frame.pixels(),
+            width,
+            height,
+            sigma,
+            region,
+        ));
+        let Ok(pixels) = developed else {
+            return Ok(None);
+        };
+        control.on_progress(Stage::Encode, height, height);
+        if control.cancelled() {
+            return Err(Cancelled);
+        }
+        Ok(Some(SrgbImage::from_encoded(
+            width,
+            height,
+            pixels,
+            Fidelity::Exact,
+        )))
     }
 
     fn render_fit(
@@ -674,6 +748,10 @@ impl PreviewSession {
         control: &mut dyn DevelopControl,
     ) -> Result<SrgbImage, Cancelled> {
         let parameters = self.stock(baseline).parameters.clone();
+        #[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
+        if let Some(image) = self.gpu_render(&parameters, &self.proxy, None, control)? {
+            return Ok(image);
+        }
         let lut = self.prepare_lut(&parameters, ScanMode::Preview, control)?;
         if baseline {
             render_proxy_cache(
@@ -719,6 +797,30 @@ impl PreviewSession {
         let padded_y = origin_y - pad_y;
         let padded_w = width + pad_x + pad_right;
         let padded_h = height + pad_y + pad_bottom;
+        #[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
+        if self.gpu.is_some() {
+            // Grain depends only on the full-frame coordinate, so the padded
+            // crop's grain is the crop's grain, and the padding is cut after.
+            let padded = LinearImage::new(
+                padded_w,
+                padded_h,
+                extract(&self.full, padded_x, padded_y, padded_w, padded_h),
+            )
+            .expect("extract matches its size");
+            let sigma = parameters
+                .halation()
+                .map(|halation| halation.sigma_px(self.full.width(), self.full.height()));
+            let crop = Some((sigma, padded_x, padded_y, self.full.width()));
+            if let Some(image) = self.gpu_render(&parameters, &padded, crop, control)? {
+                let pixels = crop_buffer(image.pixels(), padded_w, pad_x, pad_y, width, height);
+                return Ok(SrgbImage::from_encoded(
+                    width,
+                    height,
+                    pixels,
+                    Fidelity::Exact,
+                ));
+            }
+        }
         let key = RegionKey {
             origin_x,
             origin_y,

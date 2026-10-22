@@ -86,6 +86,12 @@ jobs:
           RAWSTOCK_REQUIRE_GPU: "1"
           WGPU_BACKEND: vulkan
         run: cargo test -p rawstock-core --features gpu --lib "gpu::"
+      - name: GPU parity on the RAW fixtures
+        env:
+          RAWSTOCK_REQUIRE_GPU: "1"
+          RAWSTOCK_REQUIRE_FIXTURES: "1"
+          WGPU_BACKEND: vulkan
+        run: cargo test --release -p rawstock-core --features gpu --test gpu
 
   gpu-dx12:
     name: GPU parity (DX12, WARP)
