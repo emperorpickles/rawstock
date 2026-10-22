@@ -13,11 +13,10 @@
 //! 32..    RGB8, the same rounding as the JPEG writer
 //! ```
 //!
-//! The samples are already oriented for display. Export does not use this
-//! buffer; it writes the sensor-oriented full frame with the camera
-//! orientation.
+//! The samples are already oriented. The session bakes the camera tag and
+//! any manual turn before it renders, and export writes those same pixels
+//! with JPEG orientation tag 1.
 
-use rawstock_core::decode::Orientation;
 use rawstock_core::render::{Fidelity, SrgbImage};
 
 pub struct FrameBytes;
@@ -27,10 +26,15 @@ impl FrameBytes {
     const VERSION: u32 = 1;
     const HEADER: usize = 32;
 
-    pub fn from_image(ticket: u64, orientation: Orientation, image: &SrgbImage) -> Vec<u8> {
+    pub fn from_image(ticket: u64, image: &SrgbImage) -> Vec<u8> {
         let rgb = image.to_rgb8();
-        let (width, height, rgb) = orientation.apply_rgb(image.width(), image.height(), &rgb);
-        Self::pack(ticket, width, height, image.fidelity(), &rgb)
+        Self::pack(
+            ticket,
+            image.width(),
+            image.height(),
+            image.fidelity(),
+            &rgb,
+        )
     }
 
     pub fn pack(ticket: u64, width: u32, height: u32, fidelity: Fidelity, rgb: &[u8]) -> Vec<u8> {

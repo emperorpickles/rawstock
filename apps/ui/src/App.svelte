@@ -3,10 +3,11 @@
   import { onMount } from "svelte";
 
   import Controls from "./lib/Controls.svelte";
-  import { CropRect } from "./lib/frame";
+  import { CropRect, ViewTurn } from "./lib/frame";
   import Preview from "./lib/Preview.svelte";
   import { PreviewLoop } from "./lib/previewLoop";
   import { CommandError, StockFileName } from "./lib/ranges";
+  import { StockList } from "./lib/stockList";
   import SaveDialog from "./lib/SaveDialog.svelte";
   import { TauriHost } from "./lib/tauriHost";
   import type { ControlEdit, Frame, Progress, SessionState, StockState, StockSummary } from "./lib/types";
@@ -58,13 +59,7 @@
   let resizeTimer: ReturnType<typeof setTimeout> | null = null;
 
   function remember(stock: StockState | null) {
-    if (!stock || stocks.some((item) => item.path === stock.path)) {
-      return;
-    }
-    stocks = [
-      ...stocks,
-      { path: stock.path, name: stock.name, model: stock.model, revision: stock.revision },
-    ];
+    stocks = StockList.include(stocks, stock);
   }
 
   async function retitle() {
@@ -150,6 +145,52 @@
       );
     }
     loop?.now();
+  }
+
+  async function rotate(direction: "clockwise" | "counterClockwise") {
+    if (!host || !session) return;
+    const previous = session;
+    const previousPan = pan;
+    frame = null;
+    fault = "";
+    notice = "";
+    try {
+      const next = await host.rotate(direction);
+      session = next;
+      if (mode === "pixel") {
+        pan = ViewTurn.panAfter(
+          direction,
+          previousPan.x,
+          previousPan.y,
+          viewport.width,
+          viewport.height,
+          previous.displayWidth,
+          previous.displayHeight,
+        );
+      }
+      loop?.now();
+    } catch (error) {
+      fault = CommandError.message(error);
+      void pull();
+    }
+  }
+
+  function onKey(event: KeyboardEvent) {
+    if (event.metaKey || event.ctrlKey || event.altKey) return;
+    const target = event.target;
+    if (
+      target instanceof HTMLElement &&
+      (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)
+    ) {
+      return;
+    }
+    if (event.key === "[") {
+      event.preventDefault();
+      void rotate("counterClockwise");
+    } else if (event.key === "]") {
+      event.preventDefault();
+      void rotate("clockwise");
+    }
   }
 
   function toggleCompare() {
@@ -285,9 +326,10 @@
   );
 
   onMount(() => {
+    window.addEventListener("keydown", onKey);
     if (!host || !loop) {
       booting = false;
-      return;
+      return () => window.removeEventListener("keydown", onKey);
     }
     const stops: Array<() => void> = [];
     let gone = false;
@@ -309,7 +351,7 @@
         return;
       }
       try {
-        stocks = await host.listStocks();
+        stocks = StockList.dedupe(await host.listStocks());
         await pull();
       } catch (error) {
         fault = CommandError.message(error);
@@ -319,6 +361,7 @@
     })();
     return () => {
       gone = true;
+      window.removeEventListener("keydown", onKey);
       for (const stop of stops) stop();
       loop.dispose();
       if (resizeTimer) clearTimeout(resizeTimer);
@@ -343,6 +386,22 @@
       <span class="spacer"></span>
       <button type="button" class:on={mode === "fit"} onclick={() => setMode("fit")}>Fit</button>
       <button type="button" class:on={mode === "pixel"} onclick={() => setMode("pixel")}>100%</button>
+      <button
+        type="button"
+        class="icon"
+        title="Rotate left ([)"
+        aria-label="Rotate left"
+        disabled={!session}
+        onclick={() => rotate("counterClockwise")}>↺</button
+      >
+      <button
+        type="button"
+        class="icon"
+        title="Rotate right (])"
+        aria-label="Rotate right"
+        disabled={!session}
+        onclick={() => rotate("clockwise")}>↻</button
+      >
       <button type="button" class:on={compare} disabled={!session?.stock} onclick={toggleCompare}>
         A/B
       </button>
@@ -362,7 +421,7 @@
     />
     <Controls
       {stocks}
-      selected={session?.stock?.path ?? ""}
+      selected={session?.stock?.id ?? ""}
       stock={session?.stock ?? null}
       fileOpen={session !== null}
       onchoose={choose}
@@ -373,7 +432,10 @@
       <span class:fault>{status}</span>
       {#if session}
         <span class="spacer"></span>
-        <span>{session.displayWidth}×{session.displayHeight} · {session.orientation}</span>
+        <span>
+          {session.displayWidth}×{session.displayHeight} · {session.orientation}{#if session.quarterTurns > 0}
+            · +{session.quarterTurns}×90°{/if}
+        </span>
       {/if}
     </footer>
   </div>

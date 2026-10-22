@@ -395,6 +395,34 @@ fn portra_400_loads_and_keeps_a_gray_near_neutral() {
     }
 }
 
+#[test]
+fn velvia_is_a_parametric_approximation_without_grain() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stocks/velvia.stock.toml");
+    let stock = Stock::load(&path).unwrap();
+    assert_eq!(stock.name(), "Velvia");
+    assert_eq!(stock.model(), StockModel::Parametric);
+    let source = stock.source().to_ascii_lowercase();
+    assert!(
+        source.contains("approximat"),
+        "source should say this is an approximation: {source}"
+    );
+    assert!(
+        source.contains("not a 3d lut"),
+        "source should say this is not a LUT: {source}"
+    );
+    assert!(stock.parameters().grain().is_none());
+    assert!(stock.parameters().halation().is_none());
+    let FilmModel::Parametric(model) = stock.parameters().film() else {
+        panic!("velvia is parametric");
+    };
+    assert!(model.coupling().is_some());
+    let developed = Pipeline::new(stock.parameters().clone()).develop(&gray_image(0.18));
+    assert_eq!(developed.pixels().len(), 3);
+    for channel in developed.pixels() {
+        assert!(channel.is_finite(), "{channel}");
+    }
+}
+
 fn gray_image(level: f32) -> LinearImage {
     LinearImage::new(1, 1, vec![level, level, level]).unwrap()
 }

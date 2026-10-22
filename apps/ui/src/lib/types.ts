@@ -3,6 +3,8 @@
 export type ModelKind = "parametric" | "spectral";
 
 export interface StockSummary {
+  /** Canonical `.stock.toml` path. The panel lists one row per id. */
+  id: string;
   path: string;
   name: string;
   model: ModelKind;
@@ -10,6 +12,8 @@ export interface StockSummary {
 }
 
 export interface StockState {
+  /** Same id as {@link StockSummary.id}. */
+  id: string;
   path: string;
   name: string;
   model: ModelKind;
@@ -35,6 +39,8 @@ export interface SessionState {
   displayWidth: number;
   displayHeight: number;
   orientation: string;
+  /** Clockwise quarter-turns added on top of the camera tag, in `0..4`. */
+  quarterTurns: number;
   stock: StockState | null;
 }
 
@@ -93,6 +99,7 @@ export interface Host {
   session(): Promise<SessionState | null>;
   openRaw(path: string): Promise<SessionState>;
   loadStock(path: string): Promise<SessionState>;
+  rotate(direction: "clockwise" | "counterClockwise"): Promise<SessionState>;
   render(request: RenderRequest): Promise<Frame>;
   exportJpeg(path: string): Promise<void>;
   saveStock(draft: SaveDraft): Promise<StockState>;

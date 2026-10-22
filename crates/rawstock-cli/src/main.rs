@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
-use rawstock_core::decode::RawImage;
+use rawstock_core::color::LinearImage;
+use rawstock_core::decode::{Orientation, RawImage};
 use rawstock_core::render::{Pipeline, SrgbImage};
 use rawstock_core::stock::Stock;
 
@@ -38,6 +39,26 @@ enum Command {
         input: PathBuf,
         /// Output `.exr` path.
         output: PathBuf,
+        /// Area-downsample so the long edge is at most this many pixels.
+        ///
+        /// The dump stays in sensor orientation. The film stock is not applied.
+        #[arg(long)]
+        long_edge: Option<u32>,
+    },
+    /// Develop a scene-linear ACEScg OpenEXR through a stock.
+    ///
+    /// This is the film pipeline after decode: exposure, the film model,
+    /// print/scan, and the sRGB output transform. The dump is already
+    /// white-balanced, so this command does not decode a camera file.
+    DevelopLinear {
+        /// Scene-linear ACEScg `.exr` from `dump-linear`.
+        input: PathBuf,
+        /// Stock file to load into the film pipeline.
+        #[arg(long = "stock")]
+        stock: PathBuf,
+        /// Output image path (`.jpg`, `.jpeg`, `.tif`, or `.tiff`).
+        #[arg(long = "out", short = 'o')]
+        output: PathBuf,
     },
 }
 
@@ -57,15 +78,42 @@ fn run(cli: Cli) -> Result<()> {
             println!("{image}");
             Ok(())
         }
-        Command::DumpLinear { input, output } => {
+        Command::DumpLinear {
+            input,
+            output,
+            long_edge,
+        } => {
             if !is_exr(&output) {
                 bail!("output must be an .exr file");
             }
             let image = RawImage::open(&input)?;
-            image.develop_linear()?.write_exr(&output)?;
+            let mut linear = image.develop_linear()?;
+            if let Some(long_edge) = long_edge {
+                linear = linear.area_downsample(long_edge)?;
+            }
+            linear.write_exr(&output)?;
             Ok(())
         }
+        Command::DevelopLinear {
+            input,
+            stock,
+            output,
+        } => develop_linear(&input, &stock, &output),
     }
+}
+
+fn develop_linear(input: &Path, stock: &Path, output: &Path) -> Result<()> {
+    if !is_exr(input) {
+        bail!("input must be an .exr file");
+    }
+    if !SrgbImage::is_supported_output(output) {
+        bail!("output must be a .jpg, .jpeg, .tif, or .tiff file");
+    }
+    let parameters = Stock::load(stock)?.into_parameters();
+    let linear = LinearImage::read_exr(input)?;
+    let developed = Pipeline::new(parameters).develop(&linear);
+    developed.write(output, Orientation::Normal)?;
+    Ok(())
 }
 
 fn develop(input: &Path, stock: &Path, output: &Path) -> Result<()> {
@@ -171,5 +219,64 @@ mod tests {
         let cli = Cli::try_parse_from(["rawstock", "dump-linear", "IMG.RAF", "out.jpg"]).unwrap();
         let err = run(cli).unwrap_err();
         assert!(err.to_string().contains(".exr"));
+    }
+
+    #[test]
+    fn dump_linear_accepts_a_long_edge() {
+        let cli = Cli::try_parse_from([
+            "rawstock",
+            "dump-linear",
+            "IMG.RAF",
+            "out.exr",
+            "--long-edge",
+            "720",
+        ]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn develop_linear_parses() {
+        let cli = Cli::try_parse_from([
+            "rawstock",
+            "develop-linear",
+            "scene.exr",
+            "--stock",
+            "neutral.stock.toml",
+            "--out",
+            "out.tif",
+        ]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn develop_linear_rejects_a_non_exr_input() {
+        let cli = Cli::try_parse_from([
+            "rawstock",
+            "develop-linear",
+            "scene.raf",
+            "--stock",
+            "neutral.stock.toml",
+            "--out",
+            "out.tif",
+        ])
+        .unwrap();
+        let err = run(cli).unwrap_err();
+        assert!(err.to_string().contains(".exr"));
+    }
+
+    #[test]
+    fn develop_linear_rejects_an_unsupported_output() {
+        let cli = Cli::try_parse_from([
+            "rawstock",
+            "develop-linear",
+            "scene.exr",
+            "--stock",
+            "neutral.stock.toml",
+            "--out",
+            "out.png",
+        ])
+        .unwrap();
+        let err = run(cli).unwrap_err();
+        assert!(err.to_string().contains(".jpg"));
     }
 }

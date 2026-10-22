@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StockSummary {
+    /// Canonical path of the `.stock.toml`. Two spellings of one file share it.
+    pub id: String,
     pub path: String,
     pub name: String,
     pub model: String,
@@ -19,6 +21,8 @@ pub struct StockSummary {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StockState {
+    /// Same id as [`StockSummary::id`]: the canonical `.stock.toml` path.
+    pub id: String,
     pub path: String,
     pub name: String,
     pub model: String,
@@ -47,7 +51,17 @@ pub struct SessionState {
     pub display_width: u32,
     pub display_height: u32,
     pub orientation: String,
+    /// Clockwise quarter-turns added on top of the camera tag, in `0..4`.
+    pub quarter_turns: u8,
     pub stock: Option<StockState>,
+}
+
+/// A 90° turn of the open image, on top of the camera orientation.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TurnDirection {
+    Clockwise,
+    CounterClockwise,
 }
 
 /// A single Milestone 1 control. Each variant dirties only its own stage.
@@ -72,8 +86,8 @@ pub enum ControlEdit {
     rename_all_fields = "camelCase"
 )]
 pub enum RenderView {
-    /// Long edge in sensor pixels. The UI sends 720 while dragging and 1440
-    /// once the pointer has been idle.
+    /// Long edge of the oriented proxy. The UI sends 720 while dragging and
+    /// 1440 once the pointer has been idle.
     Fit { long_edge: u32 },
     /// `exact` is the settled dye scan. A drag leaves it false.
     Hundred {
