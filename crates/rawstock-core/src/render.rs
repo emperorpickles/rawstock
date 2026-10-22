@@ -203,6 +203,9 @@ impl Parameters {
         if !exposure_ev.is_finite() || !print_exposure.is_finite() {
             return Err(ModelError::NonFiniteExposure);
         }
+        if print_curve.falls() {
+            return Err(ModelError::ReversalCurve);
+        }
         Ok(Self {
             exposure_ev,
             halation: None,
@@ -287,6 +290,9 @@ impl Parameters {
 
     /// Replace the print curve. Dirties [`Stage::Print`].
     pub fn set_print_curve(&mut self, print_curve: Curve) -> Result<Stage, ModelError> {
+        if print_curve.falls() {
+            return Err(ModelError::ReversalCurve);
+        }
         self.print_curve = print_curve;
         Ok(Stage::Print)
     }

@@ -36,9 +36,10 @@ curve, or output encoding is applied on top of what the core already did.
 
 ## spectral_film_lut importer
 
-`import_spectral_film_lut.py` turns the MIT-licensed Portra 400 module from
+`import_spectral_film_lut.py` turns the MIT-licensed Portra 400 and Velvia 50
+modules from
 [JanLohse/spectral_film_lut](https://github.com/JanLohse/spectral_film_lut)
-into a spectral stock. It uses only the Python standard library and reads
+into spectral stocks. Velvia is written as a reversal stock. It uses only the Python standard library and reads
 the module as source text, so the package does not have to be installed.
 Grain and halation are left out. See the script's docstring and
 [stocks/README.md](../stocks/README.md) for what is copied and what is derived.
@@ -52,6 +53,16 @@ that file and removes the tuning.
 python3 lab/import_spectral_film_lut.py \
     path/to/spectral_film_lut/src/spectral_film_lut/negative_film/kodak_portra_400.py \
     -o stocks/portra400.stock.toml
+```
+
+`stocks/velvia50-spectral.stock.toml` works the same way: the importer's
+traces plus an approximate scan curve and grain. Re-running the command
+below drops the header notes, the scan-curve comment, and the grain.
+
+```bash
+python3 lab/import_spectral_film_lut.py \
+    path/to/spectral_film_lut/src/spectral_film_lut/reversal_film/fuji_velvia_50.py \
+    -o stocks/velvia50-spectral.stock.toml
 ```
 
 ## Parametric stock fitter
