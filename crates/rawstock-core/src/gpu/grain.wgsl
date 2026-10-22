@@ -126,14 +126,14 @@ fn gather(p: Process, pixel: vec2<i32>) -> f32 {
     // can reach it.
     let lo_mm = vec2<f32>(origin + pixel) * pitch;
     let hi_mm = lo_mm + vec2<f32>(pitch);
-    // Half a pixel of slack: the exact test below is in pixels, after a
-    // division the CPU rounds differently near a pixel edge.
-    var reach = 0.5 * pitch;
+    // A little slack: the exact test below is in pixels, after a division
+    // the CPU rounds differently near a pixel edge.
+    var reach = 0.01 * pitch;
     if p.resolved {
-        reach += p.reach_mm;
+        reach = p.reach_mm + 0.5 * pitch;
     }
-    let first = vec2<i32>(floor((lo_mm - vec2<f32>(reach)) / cell)) - vec2<i32>(1);
-    let last = vec2<i32>(floor((hi_mm + vec2<f32>(reach)) / cell)) + vec2<i32>(1);
+    let first = vec2<i32>(floor((lo_mm - vec2<f32>(reach)) / cell));
+    let last = vec2<i32>(floor((hi_mm + vec2<f32>(reach)) / cell));
     var sum = 0.0;
     for (var cy = first.y; cy <= last.y; cy++) {
         for (var cx = first.x; cx <= last.x; cx++) {

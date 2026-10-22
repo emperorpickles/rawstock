@@ -2,20 +2,86 @@ name: CI
 
 on:
   push:
+    branches:
+      - main
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    # Docs-only pull requests do not start CI. Pushes to main ignore this.
+    paths-ignore:
+      - '*.md'
+      - '**/*.md'
+      - 'docs/**'
+
+# Cancel superseded PR runs. Pushes to main are left to finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
+  pull-requests: read
+  # rust-cache reads and writes the Actions cache.
+  actions: write
 
+# Main writes the shared Rust cache that pull requests restore. This branch
+# also writes, so the warm re-run of the CI speed PR can be measured before
+# main has populated the cache. Other pull requests only restore.
 jobs:
-  test:
-    name: fmt, clippy, test
+  # Pull requests only. Pushes to main skip this and run every job below.
+  changes:
+    name: changes
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+      gpu: ${{ steps.filter.outputs.gpu }}
+    steps:
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - '**'
+              - 'apps/rawstock/**'
+              - '!*.md'
+              - '!**/*.md'
+              - '!docs/**'
+            gpu:
+              - 'crates/rawstock-core/**'
+              - 'stocks/**'
+              - 'Cargo.*'
+              - '.github/workflows/**'
+
+  fmt:
+    name: fmt
+    needs: changes
+    if: >-
+      !cancelled() &&
+      (github.event_name == 'push' ||
+       (github.event.pull_request.draft == false && needs.changes.outputs.code == 'true'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ github.job }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'grok/ci-speed' }}
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+  ui:
+    name: ui
+    needs: changes
+    if: >-
+      !cancelled() &&
+      (github.event_name == 'push' ||
+       (github.event.pull_request.draft == false && needs.changes.outputs.code == 'true'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -23,6 +89,40 @@ jobs:
           cache-dependency-path: |
             apps/ui/package-lock.json
             apps/desktop/package-lock.json
+            apps/rawstock/package-lock.json
+      - name: check and build the UI
+        working-directory: apps/ui
+        run: npm ci && npm run check && npm run build
+      - name: install the desktop CLI
+        working-directory: apps/desktop
+        run: npm ci
+      - name: check and build the rawstock app
+        working-directory: apps/rawstock
+        run: npm ci && npm run check && npm run build
+
+  test:
+    name: clippy, test
+    needs: changes
+    if: >-
+      !cancelled() &&
+      (github.event_name == 'push' ||
+       (github.event.pull_request.draft == false && needs.changes.outputs.code == 'true'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ github.job }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'grok/ci-speed' }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            apps/ui/package-lock.json
             apps/rawstock/package-lock.json
       - name: system libraries
         run: |
@@ -38,17 +138,19 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf
+      # custom-protocol (the desktop default) makes generate_context! embed
+      # apps/ui/dist. The parallel ui job is the fast signal; this repeat
+      # lets clippy and test compile rawstock-desktop without waiting on it.
       - name: check and build the UI
         working-directory: apps/ui
         run: npm ci && npm run check && npm run build
-      - name: install the desktop CLI
-        working-directory: apps/desktop
-        run: npm ci
+      # custom-protocol embeds apps/rawstock/dist. Repeat the frontend build
+      # here so clippy and test can compile rawstock-app without waiting on
+      # the ui job. rawstock-app is a workspace member, so both cargo steps
+      # below build it.
       - name: check and build the rawstock app
         working-directory: apps/rawstock
         run: npm ci && npm run check && npm run build
-      - name: cargo fmt
-        run: cargo fmt --all -- --check
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: cargo test
@@ -58,12 +160,21 @@ jobs:
 
   wasm:
     name: wasm32-unknown-unknown
+    needs: changes
+    if: >-
+      !cancelled() &&
+      (github.event_name == 'push' ||
+       (github.event.pull_request.draft == false && needs.changes.outputs.code == 'true'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ github.job }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'grok/ci-speed' }}
       - name: Check rawstock-core for wasm32-unknown-unknown
         run: cargo check -p rawstock-core --target wasm32-unknown-unknown
       - name: Check the GPU path for wasm32-unknown-unknown
@@ -73,12 +184,23 @@ jobs:
   # RAWSTOCK_REQUIRE_GPU makes a missing adapter a failure, not a skip.
   gpu-vulkan:
     name: GPU parity (Vulkan, lavapipe)
+    needs: changes
+    if: >-
+      !cancelled() &&
+      (github.event_name == 'push' ||
+       (github.event.pull_request.draft == false &&
+        needs.changes.outputs.code == 'true' &&
+        needs.changes.outputs.gpu == 'true'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ github.job }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'grok/ci-speed' }}
       - name: lavapipe
         run: |
           sudo apt-get update
@@ -90,13 +212,30 @@ jobs:
           RAWSTOCK_REQUIRE_GPU: "1"
           WGPU_BACKEND: vulkan
         run: cargo test -p rawstock-core --features gpu --lib "gpu::"
+      - name: GPU parity on the RAW fixtures
+        env:
+          RAWSTOCK_REQUIRE_GPU: "1"
+          RAWSTOCK_REQUIRE_FIXTURES: "1"
+          WGPU_BACKEND: vulkan
+        run: cargo test --release -p rawstock-core --features gpu --test gpu
 
   gpu-dx12:
     name: GPU parity (DX12, WARP)
+    needs: changes
+    if: >-
+      !cancelled() &&
+      (github.event_name == 'push' ||
+       (github.event.pull_request.draft == false &&
+        needs.changes.outputs.code == 'true' &&
+        needs.changes.outputs.gpu == 'true'))
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ github.job }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'grok/ci-speed' }}
       - name: GPU parity
         env:
           RAWSTOCK_REQUIRE_GPU: "1"
