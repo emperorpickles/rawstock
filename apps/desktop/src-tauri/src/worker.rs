@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use rawstock_core::decode::{Orientation, RawImage};
+use rawstock_core::gpu::Gpu;
 use rawstock_core::render::{Cancelled, DevelopControl, Stage};
 use rawstock_core::session::{DRAG_LONG_EDGE, DisplayRect, PreviewSession, ScanMode};
 use rawstock_core::stock::{Stock, StockMeta};
@@ -372,6 +373,43 @@ struct Studio {
     raw_path: Option<PathBuf>,
     stock: Option<LoadedFile>,
     session: Option<PreviewSession>,
+    renderer: Renderer,
+}
+
+/// The GPU, found once on the first open. `RAWSTOCK_GPU=0` keeps every
+/// render on the CPU.
+#[derive(Default)]
+enum Renderer {
+    #[default]
+    Unknown,
+    Gpu(Gpu),
+    Cpu,
+}
+
+impl Renderer {
+    fn device(&mut self) -> Option<Gpu> {
+        if let Self::Unknown = self {
+            *self = if std::env::var("RAWSTOCK_GPU").as_deref() == Ok("0") {
+                eprintln!("rawstock: RAWSTOCK_GPU=0, rendering on the CPU");
+                Self::Cpu
+            } else {
+                match Gpu::new_blocking() {
+                    Ok(gpu) => {
+                        eprintln!("rawstock: rendering on {}", gpu.adapter_name());
+                        Self::Gpu(gpu)
+                    }
+                    Err(error) => {
+                        eprintln!("rawstock: {error}; rendering on the CPU");
+                        Self::Cpu
+                    }
+                }
+            };
+        }
+        match self {
+            Self::Gpu(gpu) => Some(gpu.clone()),
+            _ => None,
+        }
+    }
 }
 
 impl Studio {
@@ -415,7 +453,9 @@ impl Studio {
             return Err(Cancelled.into());
         }
         let previous = self.stock.clone();
-        self.session = Some(PreviewSession::new(linear, orientation, DRAG_LONG_EDGE)?);
+        let mut session = PreviewSession::new(linear, orientation, DRAG_LONG_EDGE)?;
+        session.set_gpu(self.renderer.device());
+        self.session = Some(session);
         self.raw_path = Some(path.to_path_buf());
         self.stock = None;
         progress.emit_progress("Opening", 1, 1);
