@@ -18,7 +18,8 @@ Phase 4 in [PLAN](PLAN.md). The film pipeline also runs on wgpu, in
 | Print/scan | yes | 1 |
 | sRGB encode | yes | 1 |
 
-Every stage runs on the GPU. A frame too large for one storage binding,
+Every stage runs on the GPU, from the CLI, the preview session, and the
+desktop tuner (slice 5). A frame too large for one storage binding,
 for the halation plane or one row of the grain band, gets
 `GpuError::FrameTooLarge`, and the caller falls back to the CPU.
 
@@ -79,6 +80,44 @@ Chunks are whole rows. Each chunk's field is evaluated on a band padded by
 the scanner kernel's reach, so the blur never clamps at a band edge for a
 pixel that is kept, and chunking does not change the result.
 
+The field is the slow part: each sample regenerates the draws of every cell
+that can reach it. It depends only on the grain's geometry (frame size,
+seed, cloud sizes) and the crop, not on its RMS or the picture. So the
+device keeps the last two fields of frames up to 8 MP, and a preview edit
+with the same grain and crop only runs the mix. The CPU session caches its
+`CloudField` the same way.
+
+## Where it runs
+
+- CLI: `rawstock develop … --gpu` (also `develop-linear`). The flag is an
+  explicit request, so without an adapter it fails rather than falling
+  back. Without the flag the CLI develops on the CPU.
+- Preview session: `PreviewSession::set_gpu`. The proxy, the 100% crop, and
+  the export try the GPU first and fall back to the CPU on any error. A GPU
+  render is always `Fidelity::Exact`.
+- Desktop: the tuner opens the device once, on the first file, and hands it
+  to every session. `RAWSTOCK_GPU=0` forces the CPU. The log names the
+  adapter or the reason for the fallback.
+- Web: the module builds for `wasm32-unknown-unknown` with the WebGPU
+  backend. The web app does not use it yet.
+
+A full-frame export keeps every chunk and its readback buffer on the GPU at
+once, about 24 bytes per pixel: roughly 600 MB for 24 MP.
+
+## Speed
+
+On lavapipe, a software Vulkan rasterizer on 4 CPU cores, release build:
+
+| 1224×816 | CPU | GPU |
+| --- | --- | --- |
+| Develop, no grain | 1.14 s | 0.41 s |
+| Density and grain, field built | 9.9 s | 10.1 s |
+| Density and grain, field cached | not measured | 0.18 s |
+
+lavapipe runs the shaders on the same CPU cores, so these show the shape of
+the work, not hardware speed. The uncached grain field is the next thing to
+speed up, by sharing each cell's clouds across a tile in workgroup memory.
+
 Setup and readback are async because WebGPU in a browser cannot block.
 `Gpu::new_blocking` and `GpuPipeline::develop_blocking` wrap them for native
 callers.
@@ -120,7 +159,19 @@ compiler may fold away.
 
 ```bash
 cargo test -p rawstock-core --features gpu --lib gpu::
+cargo test --release -p rawstock-core --features gpu --test gpu
 ```
+
+The second runs the preview session on the CC0 RAW fixtures, every stock,
+CPU against GPU. Time a frame with:
+
+```bash
+RAWSTOCK_TIMING_MP=1 cargo test --release -p rawstock-core --features gpu \
+  --lib gpu::tests::timing -- --ignored --nocapture
+```
+
+`RAWSTOCK_TIMING_FRAME` sets the full frame's width, so a small crop can
+time full-resolution grain. `RAWSTOCK_TIMING_GRAIN=0` drops grain.
 
 Without an adapter, the tests print a note and pass. Set
 `RAWSTOCK_REQUIRE_GPU=1` to make a missing adapter fail. `WGPU_BACKEND`

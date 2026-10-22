@@ -19,3 +19,14 @@ license = "GPL-3.0-or-later"
 overflow-checks = false
 [profile.test.package.rawler]
 overflow-checks = false
+
+# Develop tests spend their time in these crates. Optimize the crates only.
+# Debug assertions and overflow checks stay on the profile defaults.
+[profile.dev.package.rawstock-core]
+opt-level = 2
+[profile.dev.package.rawstock-cli]
+opt-level = 2
+[profile.test.package.rawstock-core]
+opt-level = 2
+[profile.test.package.rawstock-cli]
+opt-level = 2
