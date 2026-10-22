@@ -84,8 +84,21 @@ Chunks are whole rows. Each chunk's field is evaluated on a band padded by
 the scanner kernel's reach, so the blur never clamps at a band edge for a
 pixel that is kept, and chunking does not change the result.
 
-The field is the slow part: each sample regenerates the draws of every cell
-that can reach it. It depends only on the grain's geometry (frame size,
+The field is the slow part. Gathered per sample, each pixel would redraw
+every cell that can reach it, about 150 cells at a full-resolution Portra.
+So `grain_field` runs 8×8 tiles (#69): the tile's 64 lanes draw, one cell
+per lane, the clouds of every cell that can reach the tile, keep those whose
+footprint touches it, and a prefix sum places them in workgroup memory in
+cell order. Each pixel then sums the stored clouds, in that order, so the
+field is the one a per-pixel gather produces. The store holds 512 clouds
+(28 bytes each, inside WebGPU's 16 KiB minimum). A tile that reaches more
+sums them in batches, and a single round of 64 cells holding more than the
+store, which a Poisson count makes vanishingly rare, falls back to per-pixel
+draws. A pixel tests only the ellipse, not the CPU's square footprint: the
+ellipse lies inside the square, and the band clip cannot exclude a pixel
+inside the band.
+
+The field depends only on the grain's geometry (frame size,
 seed, cloud sizes) and the crop, not on its RMS or the picture. So the
 device keeps the last two fields of frames up to 8 MP, and a preview edit
 with the same grain and crop only runs the mix. The CPU session caches its
@@ -115,15 +128,16 @@ On lavapipe, a software Vulkan rasterizer on 4 CPU cores, release build:
 | 1224×816 | CPU | GPU |
 | --- | --- | --- |
 | Develop, no grain | 1.14 s | 0.41 s |
-| Density and grain, field built | 9.9 s | 10.1 s |
-| Density and grain, field cached | not measured | 0.18 s |
+| Density and grain of a 1224 px frame, field built | 2.3 s | 1.7 s |
+| Density and grain, a crop of a 6384 px frame, field built | 3.3 s | 3.4 s |
+| Density and grain, field cached | not measured | 0.10 s |
 
 lavapipe runs the shaders on the same CPU cores, so these show the shape of
-the work, not hardware speed. Since #64 a process whose clouds are smaller than
-a pixel draws each sample's sum directly instead of gathering clouds, so a
-coarse preview no longer pays for every cloud in the frame. These timings
-predate that. The uncached grain field is the next thing to
-speed up, by sharing each cell's clouds across a tile in workgroup memory.
+the work, not hardware speed. The CPU runs grain on at most 4 threads (3 on
+this machine). Before #64 and #69 the built field took 9.9 s on the CPU and
+10.1 s on the GPU for the 1224 px frame, and 15.6 s on the GPU for the 6384
+px crop. #64 draws a sub-pixel process per pixel, and #69 shares each tile's
+clouds in workgroup memory.
 
 Setup and readback are async because WebGPU in a browser cannot block.
 `Gpu::new_blocking` and `GpuPipeline::develop_blocking` wrap them for native

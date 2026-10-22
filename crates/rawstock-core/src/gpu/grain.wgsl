@@ -1,11 +1,11 @@
 // Dye-cloud grain, from `grain.rs` and `Grain::mix_field`.
 //
 // The CPU splats every cloud into an f64 field. Here each field sample
-// gathers the clouds that reach it. Cells are addressed by the same integer
-// hash, so a cloud's count, center, size, shape, and strength come from the
-// same draws: every draw is `hash(cell, sequence)`, so any draw can be
-// fetched directly. Only the Gaussian itself (`exp`, `sin`, `cos`) and the
-// summation order differ.
+// gathers the clouds that reach it, from a store its tile fills once. Cells
+// are addressed by the same integer hash, so a cloud's count, center, size,
+// shape, and strength come from the same draws: every draw is
+// `hash(cell, sequence)`, so any draw can be fetched directly. Only the
+// Gaussian itself (`exp`, `sin`, `cos`) and the summation order differ.
 //
 // One dispatch covers one chunk of whole rows. The field is evaluated on that
 // band plus `pad` rows and columns on each side, so the scanner blur never
@@ -146,99 +146,260 @@ fn layer_mask(layers: u32) -> vec3<f32> {
     return vec3<f32>(f32(layers & 1u), f32((layers >> 1u) & 1u), f32((layers >> 2u) & 1u));
 }
 
-// One resolved process's clouds at band pixel `pixel`.
-fn gather(p: Process, pixel: vec2<i32>) -> f32 {
+// One resolved cloud, as `paint_gaussian` sees it. The center is in band
+// pixels, as the CPU computes it, and the axes are in pixels.
+struct Cloud {
+    x: f32,
+    y: f32,
+    sx: f32,
+    sy: f32,
+    sin: f32,
+    cos: f32,
+    amplitude: f32,
+}
+
+// Cloud `k` of cell `at`, whose draws start after `drawn` Poisson draws.
+fn cloud(p: Process, at: vec2<i32>, drawn: u32, k: u32) -> Cloud {
     let pitch = params.scalars.x;
     let origin = params.origin.xy;
-    let width = i32(params.band.x);
-    let rows = i32(params.band.y);
-    let cell = p.cell_mm;
-    // The pixel's own extent in millimetres, then every cell whose clouds
-    // can reach it.
-    let lo_mm = vec2<f32>(origin + pixel) * pitch;
-    let hi_mm = lo_mm + vec2<f32>(pitch);
-    let reach = p.reach_mm + 0.5 * pitch;
-    let first = vec2<i32>(floor((lo_mm - vec2<f32>(reach)) / cell));
-    let last = vec2<i32>(floor((hi_mm + vec2<f32>(reach)) / cell));
+    let base = drawn + 6u * k;
+    let x_mm = (f32(at.x) + unit(at, base + 1u, p.seed)) * p.cell_mm;
+    let y_mm = (f32(at.y) + unit(at, base + 2u, p.seed)) * p.cell_mm;
+    let ur = unit(at, base + 3u, p.seed);
+    let ua = unit(at, base + 4u, p.seed);
+    let ut = unit(at, base + 5u, p.seed);
+    let uf = unit(at, base + 6u, p.seed);
+    let sigma = log_lerp(p.sigma_lo, p.sigma_hi, ur);
+    let strength = STRENGTH_LO + (STRENGTH_HI - STRENGTH_LO) * uf;
+    let axis = sqrt(log_lerp(1.0, p.aspect_max, ua));
+    let angle = ut * TAU;
+    return Cloud(
+        x_mm / pitch - f32(origin.x),
+        y_mm / pitch - f32(origin.y),
+        sigma / axis / pitch,
+        sigma * axis / pitch,
+        sin(angle),
+        cos(angle),
+        p.amplitude * strength,
+    );
+}
+
+// The pixels `paint_gaussian` visits for `c`, clipped to the band: x0, y0,
+// x1, y1. Empty when x0 > x1 or y0 > y1.
+fn footprint(c: Cloud) -> vec4<i32> {
+    if c.sx <= 0.0 || c.sy <= 0.0 {
+        return vec4<i32>(0, 0, -1, -1);
+    }
+    let rad = 3.5 * max(c.sx, c.sy);
+    return vec4<i32>(
+        max(i32(ceil(c.x - rad - 0.5)), 0),
+        max(i32(ceil(c.y - rad - 0.5)), 0),
+        min(i32(floor(c.x + rad - 0.5)), i32(params.band.x) - 1),
+        min(i32(floor(c.y + rad - 0.5)), i32(params.band.y) - 1),
+    );
+}
+
+// Whether `c` paints any pixel of the tile from `lo` to `hi`.
+fn touches(c: Cloud, lo: vec2<i32>, hi: vec2<i32>) -> bool {
+    let box = footprint(c);
+    return box.x <= box.z && box.y <= box.w
+        && box.x <= hi.x && box.z >= lo.x && box.y <= hi.y && box.w >= lo.y;
+}
+
+// What `c` adds at band pixel `pixel`, a pixel inside the band.
+//
+// The CPU also clips to `footprint`, the square of half-side 3.5 times the
+// longer axis. The 3.5-sigma ellipse sits inside that square, and the band
+// clip cannot exclude a pixel inside the band, so the ellipse test alone
+// decides.
+fn shade(c: Cloud, pixel: vec2<i32>) -> f32 {
+    if c.sx <= 0.0 || c.sy <= 0.0 {
+        return 0.0;
+    }
+    let dx = f32(pixel.x) + 0.5 - c.x;
+    let dy = f32(pixel.y) + 0.5 - c.y;
+    let xr = dx * c.cos + dy * c.sin;
+    let yr = -dx * c.sin + dy * c.cos;
+    let inv_sx = 1.0 / c.sx;
+    let inv_sy = 1.0 / c.sy;
+    let d2 = xr * inv_sx * xr * inv_sx + yr * inv_sy * yr * inv_sy;
+    if d2 >= SUPPORT_D2 {
+        return 0.0;
+    }
+    return c.amplitude * exp(-0.5 * d2);
+}
+
+// Every cloud of cell `at`, at band pixel `pixel`.
+fn cell_sum(p: Process, at: vec2<i32>, pixel: vec2<i32>) -> f32 {
+    let drawn = poisson(at, p.seed, p.limit);
     var sum = 0.0;
-    for (var cy = first.y; cy <= last.y; cy++) {
-        for (var cx = first.x; cx <= last.x; cx++) {
-            let at = vec2<i32>(cx, cy);
-            let drawn = poisson(at, p.seed, p.limit);
-            for (var k = 0u; k < drawn.x; k++) {
-                let base = drawn.y + 6u * k;
-                let x_mm = (f32(cx) + unit(at, base + 1u, p.seed)) * cell;
-                let y_mm = (f32(cy) + unit(at, base + 2u, p.seed)) * cell;
-                // Quick reject: the cloud cannot reach this pixel.
-                if x_mm < lo_mm.x - reach || x_mm >= hi_mm.x + reach
-                    || y_mm < lo_mm.y - reach || y_mm >= hi_mm.y + reach {
-                    continue;
-                }
-                let ur = unit(at, base + 3u, p.seed);
-                let ua = unit(at, base + 4u, p.seed);
-                let ut = unit(at, base + 5u, p.seed);
-                let uf = unit(at, base + 6u, p.seed);
-                let sigma = log_lerp(p.sigma_lo, p.sigma_hi, ur);
-                let strength = STRENGTH_LO + (STRENGTH_HI - STRENGTH_LO) * uf;
-                let amplitude = p.amplitude * strength;
-                // Cloud center in band pixels, as the CPU computes it.
-                let center = vec2<f32>(x_mm / pitch, y_mm / pitch) - vec2<f32>(origin);
-                // `paint_gaussian`.
-                let aspect = log_lerp(1.0, p.aspect_max, ua);
-                let axis = sqrt(aspect);
-                let angle = ut * TAU;
-                let s = sin(angle);
-                let c = cos(angle);
-                let sx = sigma / axis / pitch;
-                let sy = sigma * axis / pitch;
-                if sx <= 0.0 || sy <= 0.0 {
-                    continue;
-                }
-                let rad = 3.5 * max(sx, sy);
-                let x0 = max(i32(ceil(center.x - rad - 0.5)), 0);
-                let y0 = max(i32(ceil(center.y - rad - 0.5)), 0);
-                let x1 = min(i32(floor(center.x + rad - 0.5)), width - 1);
-                let y1 = min(i32(floor(center.y + rad - 0.5)), rows - 1);
-                if pixel.x < x0 || pixel.x > x1 || pixel.y < y0 || pixel.y > y1 {
-                    continue;
-                }
-                let dx = f32(pixel.x) + 0.5 - center.x;
-                let dy = f32(pixel.y) + 0.5 - center.y;
-                let xr = dx * c + dy * s;
-                let yr = -dx * s + dy * c;
-                let inv_sx = 1.0 / sx;
-                let inv_sy = 1.0 / sy;
-                let d2 = xr * inv_sx * xr * inv_sx + yr * inv_sy * yr * inv_sy;
-                if d2 >= SUPPORT_D2 {
-                    continue;
-                }
-                sum += amplitude * exp(-0.5 * d2);
-            }
-        }
+    for (var k = 0u; k < drawn.x; k++) {
+        sum += shade(cloud(p, at, drawn.y, k), pixel);
+    }
+    return sum;
+}
+
+// A workgroup is one tile of the band. Each resolved process's clouds that
+// reach the tile are drawn once, by the tile's lanes, one cell per lane,
+// into workgroup memory, in cell order. Every pixel then sums them from
+// there. Gathering per pixel instead redrew each cell for every pixel it
+// reaches, about 150 cells per pixel at a full-resolution Portra.
+const TILE: u32 = 8u;
+const LANES: u32 = 64u;
+// Clouds held at once. 28 bytes each keeps the tile store under WebGPU's
+// 16 KiB minimum. A tile that reaches more is summed in batches.
+const CAPACITY: u32 = 512u;
+
+var<workgroup> clouds: array<Cloud, CAPACITY>;
+// Clouds per lane in a round, then each lane's first slot.
+var<workgroup> slots: array<u32, LANES>;
+// First cell, cells per row, and cells of the tile's window. Zero cells for
+// a process drawn per pixel.
+var<workgroup> window_first: vec2<i32>;
+var<workgroup> window_columns: u32;
+var<workgroup> window_cells: u32;
+// Clouds in the store, and clouds drawn this round.
+var<workgroup> stored: u32;
+var<workgroup> drawn_total: u32;
+
+// Lane 0: the cells whose clouds can reach the tile, as `gather` once found
+// them for each pixel.
+fn plan_window(p: Process, lo: vec2<i32>, hi: vec2<i32>) {
+    stored = 0u;
+    if !p.resolved {
+        window_cells = 0u;
+        return;
+    }
+    let pitch = params.scalars.x;
+    let origin = params.origin.xy;
+    let reach = vec2<f32>(p.reach_mm + 0.5 * pitch);
+    let lo_mm = vec2<f32>(origin + lo) * pitch;
+    let hi_mm = vec2<f32>(origin + hi) * pitch + vec2<f32>(pitch);
+    let first = vec2<i32>(floor((lo_mm - reach) / p.cell_mm));
+    let last = vec2<i32>(floor((hi_mm + reach) / p.cell_mm));
+    let size = vec2<u32>(last - first + vec2<i32>(1));
+    window_first = first;
+    window_columns = size.x;
+    window_cells = size.x * size.y;
+}
+
+fn window_cell(index: u32) -> vec2<i32> {
+    return window_first + vec2<i32>(i32(index % window_columns), i32(index / window_columns));
+}
+
+// The sum of every stored cloud at `pixel`.
+fn stored_sum(pixel: vec2<i32>, count: u32) -> f32 {
+    var sum = 0.0;
+    for (var i = 0u; i < count; i++) {
+        sum += shade(clouds[i], pixel);
     }
     return sum;
 }
 
 // The unblurred field over the padded band.
-@compute @workgroup_size(16, 16)
-fn grain_field(@builtin(global_invocation_id) id: vec3<u32>) {
-    if id.x >= params.band.x || id.y >= params.band.y {
-        return;
-    }
+@compute @workgroup_size(8, 8)
+fn grain_field(
+    @builtin(global_invocation_id) id: vec3<u32>,
+    @builtin(local_invocation_index) lane: u32,
+    @builtin(workgroup_id) group: vec3<u32>,
+) {
+    // Every lane reaches every barrier. Lanes past the band edge draw
+    // clouds but write nothing.
+    let inside = id.x < params.band.x && id.y < params.band.y;
     let pixel = vec2<i32>(id.xy);
+    let lo = vec2<i32>(group.xy * TILE);
+    let hi = min(lo + vec2<i32>(i32(TILE) - 1), vec2<i32>(params.band.xy) - vec2<i32>(1));
     var value = vec3<f32>(0.0);
     for (var index = 0u; index < u32(params.origin.z); index++) {
         let p = process(index);
-        if p.resolved {
-            value += gather(p, pixel) * layer_mask(p.layers);
-        } else {
-            value += aggregate(p, pixel) * layer_mask(p.layers);
+        if lane == 0u {
+            plan_window(p, lo, hi);
         }
+        let cells = workgroupUniformLoad(&window_cells);
+        var sum = 0.0;
+        if !p.resolved && inside {
+            sum = aggregate(p, pixel);
+        }
+        let rounds = (cells + LANES - 1u) / LANES;
+        for (var round = 0u; round < rounds; round++) {
+            // This lane's cell, and how many of its clouds reach the tile.
+            let cell_index = round * LANES + lane;
+            let at = window_cell(cell_index);
+            var drawn = vec2<u32>(0u);
+            var reaching = 0u;
+            if cell_index < cells {
+                drawn = poisson(at, p.seed, p.limit);
+                for (var k = 0u; k < drawn.x; k++) {
+                    if touches(cloud(p, at, drawn.y, k), lo, hi) {
+                        reaching += 1u;
+                    }
+                }
+            }
+            slots[lane] = reaching;
+            workgroupBarrier();
+            if lane == 0u {
+                var total = 0u;
+                for (var i = 0u; i < LANES; i++) {
+                    let count = slots[i];
+                    slots[i] = total;
+                    total += count;
+                }
+                drawn_total = total;
+            }
+            let total = workgroupUniformLoad(&drawn_total);
+            let held = workgroupUniformLoad(&stored);
+            if held + total > CAPACITY {
+                // The store is full: sum it, then start it over.
+                if inside {
+                    sum += stored_sum(pixel, held);
+                }
+                workgroupBarrier();
+                if lane == 0u {
+                    stored = 0u;
+                }
+            }
+            let start = workgroupUniformLoad(&stored);
+            if total > CAPACITY {
+                // More than the store holds in one round, which a Poisson
+                // count makes vanishingly rare: each pixel draws this
+                // round's cells itself, still in cell order.
+                for (var other = 0u; other < LANES; other++) {
+                    let other_index = round * LANES + other;
+                    if inside && other_index < cells {
+                        sum += cell_sum(p, window_cell(other_index), pixel);
+                    }
+                }
+            } else {
+                if cell_index < cells {
+                    var slot = start + slots[lane];
+                    for (var k = 0u; k < drawn.x; k++) {
+                        let c = cloud(p, at, drawn.y, k);
+                        if touches(c, lo, hi) {
+                            clouds[slot] = c;
+                            slot += 1u;
+                        }
+                    }
+                }
+                workgroupBarrier();
+                if lane == 0u {
+                    stored = start + total;
+                }
+            }
+        }
+        let held = workgroupUniformLoad(&stored);
+        if inside {
+            sum += stored_sum(pixel, held);
+        }
+        // The next process reuses the store.
+        workgroupBarrier();
+        value += sum * layer_mask(p.layers);
     }
-    let base = (id.y * params.band.x + id.x) * 3u;
-    field[base] = value.x;
-    field[base + 1u] = value.y;
-    field[base + 2u] = value.z;
+    if inside {
+        let base = (id.y * params.band.x + id.x) * 3u;
+        field[base] = value.x;
+        field[base + 1u] = value.y;
+        field[base + 2u] = value.z;
+    }
 }
 
 fn tap(offset: u32) -> f32 {

@@ -35,8 +35,9 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   Sub-pixel grain drawn per pixel, and grain painted in parallel on a pool
   capped at 4 threads with one core free (#64). X-Trans opens on a
   third-size develop while Markesteijn runs in the background, and the GPU
-  opens at startup (#67). Next: GPU grain with tile-shared clouds, then the
-  other CPU film stages on the capped pool.
+  opens at startup (#67). GPU grain draws each tile's clouds once in
+  workgroup memory (#69). Next: the other CPU film stages on the capped
+  pool.
 
 ## Next
 

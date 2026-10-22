@@ -1095,7 +1095,9 @@ impl GrainUpload {
         );
         let tiles = (params.band[0].div_ceil(16), params.band[1].div_ceil(16));
         if !band.cached {
-            dispatch(encoder, &gpu.grain_kernels[0], &group, tiles);
+            // `grain_field` tiles are 8 by 8.
+            let field_tiles = (params.band[0].div_ceil(8), params.band[1].div_ceil(8));
+            dispatch(encoder, &gpu.grain_kernels[0], &group, field_tiles);
             if self.plan.blur {
                 dispatch(encoder, &gpu.grain_kernels[1], &group, tiles);
                 dispatch(encoder, &gpu.grain_kernels[2], &group, tiles);
