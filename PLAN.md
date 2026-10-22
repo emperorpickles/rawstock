@@ -32,6 +32,12 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   `stage: working`).
 - **#23** — GPU slice 1: wgpu scaffold and per-pixel stages (`agent: claude`,
   `stage: working`).
+- **#49, #50, #51** — 1.0 app Preferences and settings store, Help menu
+  (About, generated Licenses, Report an issue, log), and the first-launch
+  welcome (`agent: claude`, `stage: ready`). Built on the `apps/rawstock`
+  shell in #47, so they merge after it. #52 (presets) and #53 (export
+  queue) stay `stage: holding` until #39 and #41 land.
+
 
 ## Next
 
