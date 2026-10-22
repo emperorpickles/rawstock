@@ -29,9 +29,7 @@ BSD, LGPL). `rawler` is LGPL-2.1-only and is fine to link.
 Implemented order:
 
 1. **Decode** with `rawler`. Bayer uses PPG. Linear DNG (ProRAW) is already
-   demosaiced and passes through. **X-Trans on `main` is still bilinear.**
-   The demosaic to land is rawler's 3-pass Markesteijn (#14, not on `main`
-   yet). Do not describe `main` as Markesteijn until that merge.
+   demosaiced and passes through. X-Trans uses rawler's 3-pass Markesteijn.
 2. **White balance, then ACEScg.** As-shot white balance is in camera RGB,
    baked into the camera → ACEScg matrix. ACEScg (scene-linear AP1) is the
    working space. **Exposure (`exposure_ev`) is a stop scale after that
