@@ -166,8 +166,14 @@ names.
 Velvia JPEGs (film simulation F2/Fujichrome), not a datasheet of Fujichrome
 Velvia and not a 3D LUT. The camera was set to DR100, Color 0, Highlight
 Tone 0, Shadow Tone 0, Sharpness Normal, Noise Reduction 0, and White
-Balance Auto. Grain Effect was Weak on those frames, so this file has no
-`[grain]` table: the fit was made with grain off.
+Balance Auto. Grain Effect was Weak on those frames, and the fit was made
+with grain off.
+
+The `[grain]` table is a separate **approximate aesthetic tuning**, not part
+of the fit and not a Fujifilm granularity table. Velvia 50 is a very fine
+slide film, so rms is about a third of Portra 400's and the dye clouds are
+smaller (6 to 10 µm). A developed gray ramp shows roughly half of Portra's
+midtone luma noise.
 
 `lab/fit_stock.py` develops each RAF, aligns it to the JPEG, and minimizes
 CIEDE2000 on the tone curves, the print curve, and the 3×3 log-exposure

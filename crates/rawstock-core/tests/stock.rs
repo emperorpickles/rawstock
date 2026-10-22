@@ -396,7 +396,7 @@ fn portra_400_loads_and_keeps_a_gray_near_neutral() {
 }
 
 #[test]
-fn velvia_is_a_parametric_approximation_without_grain() {
+fn velvia_is_a_parametric_approximation_with_fine_grain() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stocks/velvia.stock.toml");
     let stock = Stock::load(&path).unwrap();
     assert_eq!(stock.name(), "Velvia");
@@ -410,7 +410,24 @@ fn velvia_is_a_parametric_approximation_without_grain() {
         source.contains("not a 3d lut"),
         "source should say this is not a LUT: {source}"
     );
-    assert!(stock.parameters().grain().is_none());
+    // Velvia 50 is a finer film than Portra 400: lower rms in every layer
+    // across the midtones, and smaller dye clouds.
+    let grain = stock.parameters().grain().expect("velvia has grain");
+    let portra_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stocks/portra400.stock.toml");
+    let portra = Stock::load(&portra_path).unwrap();
+    let portra_grain = portra.parameters().grain().unwrap();
+    for layer in 0..3 {
+        for density in [0.4, 0.8, 1.2, 1.7] {
+            let velvia_rms = grain.layers()[layer].eval(density);
+            let portra_rms = portra_grain.layers()[layer].eval(density);
+            assert!(
+                velvia_rms > 0.0 && velvia_rms < 0.5 * portra_rms,
+                "layer {layer} at density {density}: {velvia_rms} vs Portra {portra_rms}"
+            );
+        }
+        assert!(grain.size_mm()[layer] < portra_grain.size_mm()[layer]);
+    }
     assert!(stock.parameters().halation().is_none());
     let FilmModel::Parametric(model) = stock.parameters().film() else {
         panic!("velvia is parametric");
