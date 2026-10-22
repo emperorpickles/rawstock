@@ -3352,6 +3352,7 @@ dependencies = [
  "image",
  "pollster",
  "rawler",
+ "rayon",
  "serde",
  "sha2",
  "thiserror 2.0.21",

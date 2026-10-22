@@ -22,6 +22,10 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
 
 ## In flight
 
+- **#62** — Lateral chromatic aberration correction for X-Trans and Bayer
+  (`agent: claude`, `stage: ready`). Fixes pink/blue edge fringes that
+  Velvia amplified.
+
 - **#17** — Provia simulation fit (`agent: grok`, `stage: holding`).
   Waiting on more Provia RAF+JPEG pairs from Caleb. Pairs already in hand
   are held out. Do not commit them.

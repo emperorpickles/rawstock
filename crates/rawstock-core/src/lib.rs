@@ -17,6 +17,7 @@ pub mod decode;
 pub mod gpu;
 mod grain;
 mod icc;
+mod lateral_ca;
 mod matrices;
 pub mod render;
 pub mod session;
