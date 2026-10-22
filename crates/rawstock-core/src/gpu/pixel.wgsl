@@ -306,10 +306,10 @@ fn upsample(value: vec3<f32>) -> Upsample {
     if peak == 0.0 {
         return Upsample(vec3<f32>(0.0), 0.0);
     }
-    if peak <= 1.0 {
-        return Upsample(fetch(ap0), 1.0);
-    }
-    return Upsample(fetch(ap0 / peak), peak);
+    // Every color at a fixed AP0 peak of 1/2, so exposure scales the
+    // spectrum without changing its shape (#42).
+    let scale = 2.0 * peak;
+    return Upsample(fetch(ap0 / scale), scale);
 }
 
 // `eval`: the sigmoid of a quadratic in nanometres.
