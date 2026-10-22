@@ -10,9 +10,13 @@
 use std::path::Path;
 
 use rawler::imgop::develop::{Intermediate, ProcessingStep, RawDevelop};
+use rawler::imgop::sensor::Demosaic;
+use rawler::imgop::sensor::xtrans::markesteijn::XTransMarkesteijnDemosaic;
+use rawler::imgop::{Point, Rect};
+use rawler::rawimage::RawPhotometricInterpretation;
 use thiserror::Error;
 
-use crate::decode::RawImage;
+use crate::decode::{CfaKind, RawImage};
 use crate::matrices;
 
 /// Failure while developing a RAW file to scene-linear ACEScg or writing it.
@@ -253,9 +257,13 @@ impl RawImage {
     /// into ACEScg. White balance is already in the samples, so the matrix
     /// sees an identity balance.
     pub fn develop_linear(&self) -> Result<LinearImage, DevelopError> {
-        let developed = RawDevelop::new_with(&[ProcessingStep::Rescale, ProcessingStep::Demosaic])
-            .develop_intermediate(self.decoded())
-            .map_err(|source| DevelopError::Demosaic { source })?;
+        let developed = if self.cfa() == CfaKind::XTrans {
+            self.demosaic_xtrans()?
+        } else {
+            RawDevelop::new_with(&[ProcessingStep::Rescale, ProcessingStep::Demosaic])
+                .develop_intermediate(self.decoded())
+                .map_err(|source| DevelopError::Demosaic { source })?
+        };
 
         let (width, height, mut samples) = match developed {
             Intermediate::ThreeColor(pixels) => take_rgb(pixels)?,
@@ -272,6 +280,53 @@ impl RawImage {
         let transform = acescg_transform(self.camera_matrix(), [1.0, 1.0, 1.0, 0.0])?;
         apply_transform(&mut samples, transform);
         LinearImage::new(width, height, samples)
+    }
+}
+
+impl RawImage {
+    /// Rescale, then demosaic X-Trans with 3-pass Markesteijn.
+    ///
+    /// `rawler`'s own develop path uses bilinear for X-Trans, which zippers
+    /// and fringes on high-contrast edges. Its Markesteijn demosaic is
+    /// directional and works in CIELab, so edges stay clean.
+    fn demosaic_xtrans(&self) -> Result<Intermediate, DevelopError> {
+        let scaled = RawDevelop::new_with(&[ProcessingStep::Rescale])
+            .develop_intermediate(self.decoded())
+            .map_err(|source| DevelopError::Demosaic { source })?;
+        let Intermediate::Monochrome(mosaic) = scaled else {
+            return Err(DevelopError::UnexpectedChannels { channels: 0 });
+        };
+        let RawPhotometricInterpretation::Cfa(config) = &self.decoded().photometric else {
+            return Err(DevelopError::UnexpectedChannels { channels: 0 });
+        };
+        // Demosaic the active area only: the sensor strip outside it is
+        // optical black and would bleed into the edge pixels.
+        let decoded = self.decoded();
+        let full = mosaic.rect();
+        let active = decoded.active_area.unwrap_or(full);
+        let rgb = XTransMarkesteijnDemosaic::new_pass_3().demosaic(
+            &mosaic,
+            &config.cfa,
+            &config.colors,
+            active,
+        );
+        // Then the camera's default crop, which sits in full-sensor
+        // coordinates, so the result matches the camera's own JPEG framing.
+        let Some(crop) = decoded.crop_area else {
+            return Ok(Intermediate::ThreeColor(rgb));
+        };
+        let inside = crop.p.x >= active.p.x
+            && crop.p.y >= active.p.y
+            && crop.p.x + crop.d.w <= active.p.x + active.d.w
+            && crop.p.y + crop.d.h <= active.p.y + active.d.h;
+        if !inside {
+            return Ok(Intermediate::ThreeColor(rgb));
+        }
+        let local = Rect::new(
+            Point::new(crop.p.x - active.p.x, crop.p.y - active.p.y),
+            crop.d,
+        );
+        Ok(Intermediate::ThreeColor(rgb.crop(local)))
     }
 }
 
