@@ -136,7 +136,7 @@ impl LateralCa {
                         *out = frame.cubic(&plane, 1, 0, sx, sy);
                     }
                 });
-            for (pixel, value) in samples.chunks_exact_mut(3).zip(corrected) {
+            for (pixel, value) in samples.as_chunks_mut::<3>().0.iter_mut().zip(corrected) {
                 pixel[channel] = value;
             }
         }
