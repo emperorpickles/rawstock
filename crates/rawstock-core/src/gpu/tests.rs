@@ -205,19 +205,22 @@ fn spectral_density_matches() {
 #[test]
 fn dye_scan_matches() {
     let Some(gpu) = gpu() else { return };
-    let parameters = bare("portra400");
-    let pipeline = GpuPipeline::new(gpu, &parameters);
-    let density: Vec<f32> = (0..65_536 * 3)
-        .map(|index| -0.2 + 3.5 * unit(index, 13))
-        .collect();
-    let cpu = parameters
-        .film()
-        .printing_density(&density)
-        .expect("Portra has dye curves");
-    let gpu = pollster::block_on(pipeline.run(&[Kernel::DyeScan], &density)).unwrap();
-    assert_close("dye scan", &cpu, &gpu, |value| {
-        DYE_SCAN_TOLERANCE * value.abs().max(1.0)
-    });
+    // Portra is a negative. Velvia is a reversal stock, whose scan is negated.
+    for name in ["portra400", "velvia50-spectral"] {
+        let parameters = bare(name);
+        let pipeline = GpuPipeline::new(gpu, &parameters);
+        let density: Vec<f32> = (0..65_536 * 3)
+            .map(|index| -0.2 + 3.5 * unit(index, 13))
+            .collect();
+        let cpu = parameters
+            .film()
+            .printing_density(&density)
+            .expect("stock has dye curves");
+        let gpu = pollster::block_on(pipeline.run(&[Kernel::DyeScan], &density)).unwrap();
+        assert_close(&format!("{name} dye scan"), &cpu, &gpu, |value| {
+            DYE_SCAN_TOLERANCE * value.abs().max(1.0)
+        });
+    }
 }
 
 #[test]
@@ -453,7 +456,7 @@ fn develop_matches_the_cpu_pipeline() {
         }
     }
     let image = LinearImage::new(width as u32, height as u32, pixels).unwrap();
-    for name in ["velvia", "neutral", "portra400"] {
+    for name in ["velvia", "neutral", "portra400", "velvia50-spectral"] {
         let mut parameters = stock(name);
         parameters.set_exposure_ev(0.4).unwrap();
         let cpu = Pipeline::new(parameters.clone()).develop(&image);
@@ -516,7 +519,7 @@ fn sessions(gpu: &Gpu, name: &str) -> (PreviewSession, PreviewSession) {
 #[test]
 fn session_renders_match_the_cpu() {
     let Some(gpu) = gpu() else { return };
-    for name in ["velvia", "portra400"] {
+    for name in ["velvia", "portra400", "velvia50-spectral"] {
         let (mut cpu, mut on_gpu) = sessions(gpu, name);
         // A crop away from the corner, so halation pads on every side and
         // grain sits at a full-frame offset.

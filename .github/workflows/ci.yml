@@ -42,6 +42,7 @@ jobs:
           filters: |
             code:
               - '**'
+              - 'apps/rawstock/**'
               - '!*.md'
               - '!**/*.md'
               - '!docs/**'
@@ -88,12 +89,16 @@ jobs:
           cache-dependency-path: |
             apps/ui/package-lock.json
             apps/desktop/package-lock.json
+            apps/rawstock/package-lock.json
       - name: check and build the UI
         working-directory: apps/ui
         run: npm ci && npm run check && npm run build
       - name: install the desktop CLI
         working-directory: apps/desktop
         run: npm ci
+      - name: check and build the rawstock app
+        working-directory: apps/rawstock
+        run: npm ci && npm run check && npm run build
 
   test:
     name: clippy, test
@@ -116,7 +121,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: apps/ui/package-lock.json
+          cache-dependency-path: |
+            apps/ui/package-lock.json
+            apps/rawstock/package-lock.json
       - name: system libraries
         run: |
           sudo apt-get update
@@ -136,6 +143,13 @@ jobs:
       # lets clippy and test compile rawstock-desktop without waiting on it.
       - name: check and build the UI
         working-directory: apps/ui
+        run: npm ci && npm run check && npm run build
+      # custom-protocol embeds apps/rawstock/dist. Repeat the frontend build
+      # here so clippy and test can compile rawstock-app without waiting on
+      # the ui job. rawstock-app is a workspace member, so both cargo steps
+      # below build it.
+      - name: check and build the rawstock app
+        working-directory: apps/rawstock
         run: npm ci && npm run check && npm run build
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
