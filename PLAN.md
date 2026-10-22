@@ -32,10 +32,11 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
 - **#20** — Add grain to the Velvia stock (`agent: claude`, `stage: ready`).
   PR #22.
 - **Performance** (`agent: claude`). rawler optimized in dev builds (#61).
-  Sub-pixel grain drawn per pixel, and grain painted on every core (#64).
-  X-Trans opens on a third-size develop while Markesteijn runs in the
-  background, and the GPU opens at startup (#67). Next: the other CPU film
-  stages on every core.
+  Sub-pixel grain drawn per pixel, and grain painted in parallel on a pool
+  capped at 4 threads with one core free (#64). X-Trans opens on a
+  third-size develop while Markesteijn runs in the background, and the GPU
+  opens at startup (#67). Next: GPU grain with tile-shared clouds, then the
+  other CPU film stages on the capped pool.
 
 ## Next
 

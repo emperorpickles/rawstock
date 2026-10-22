@@ -19,6 +19,7 @@ use thiserror::Error;
 
 use crate::decode::{CfaKind, RawImage};
 use crate::matrices;
+use crate::workers::Workers;
 
 /// Failure while developing a RAW file to scene-linear ACEScg or writing it.
 #[derive(Debug, Error)]
@@ -271,7 +272,14 @@ impl RawImage {
     /// Bradford adaptation takes D65 to the ACES white and AP1 takes that XYZ
     /// into ACEScg. White balance is already in the samples, so the matrix
     /// sees an identity balance.
+    ///
+    /// Markesteijn runs on the capped [`Workers`] pool.
     pub fn develop_linear(&self) -> Result<LinearImage, DevelopError> {
+        Workers::install(|| self.develop_linear_here())
+    }
+
+    /// [`Self::develop_linear`] on whatever pool the caller is on.
+    fn develop_linear_here(&self) -> Result<LinearImage, DevelopError> {
         let developed = if self.cfa() == CfaKind::XTrans {
             self.demosaic_xtrans()?
         } else {
@@ -295,18 +303,11 @@ impl RawImage {
 
     /// [`Self::develop_linear`] on a pool of its own, `threads` wide.
     ///
-    /// Markesteijn queues its tiles on rayon's global pool. A preview that
-    /// renders while a background demosaic runs there waits behind every
-    /// tile; on its own pool the two only share the cores.
+    /// A preview that renders on the shared pool while a background
+    /// demosaic runs there waits behind every Markesteijn tile. On its own
+    /// pool the two only share the cores.
     pub fn develop_linear_on(&self, threads: usize) -> Result<LinearImage, DevelopError> {
-        match rayon::ThreadPoolBuilder::new()
-            .num_threads(threads.max(1))
-            .thread_name(|index| format!("rawstock-demosaic-{index}"))
-            .build()
-        {
-            Ok(pool) => pool.install(|| self.develop_linear()),
-            Err(_) => self.develop_linear(),
-        }
+        Workers::install_separate(threads, || self.develop_linear_here())
     }
 
     /// A third-size develop of an X-Trans frame, for the first preview.
@@ -339,31 +340,33 @@ impl RawImage {
             return Err(DevelopError::Dimension { value: 0 });
         }
         let mut samples = vec![0.0_f32; width * height * 3];
-        samples
-            .par_chunks_mut(width * 3)
-            .enumerate()
-            .for_each(|(row, out)| {
-                for column in 0..width {
-                    let mut sum = [0.0_f32; 3];
-                    let mut count = [0_u32; 3];
-                    for dy in 0..3 {
-                        let y = frame.p.y + row * 3 + dy;
-                        for dx in 0..3 {
-                            let x = frame.p.x + column * 3 + dx;
-                            let color = config.cfa.color_at(y, x).min(2);
-                            sum[color] += mosaic.data[y * mosaic.width + x];
-                            count[color] += 1;
+        Workers::install(|| {
+            samples
+                .par_chunks_mut(width * 3)
+                .enumerate()
+                .for_each(|(row, out)| {
+                    for column in 0..width {
+                        let mut sum = [0.0_f32; 3];
+                        let mut count = [0_u32; 3];
+                        for dy in 0..3 {
+                            let y = frame.p.y + row * 3 + dy;
+                            for dx in 0..3 {
+                                let x = frame.p.x + column * 3 + dx;
+                                let color = config.cfa.color_at(y, x).min(2);
+                                sum[color] += mosaic.data[y * mosaic.width + x];
+                                count[color] += 1;
+                            }
+                        }
+                        for channel in 0..3 {
+                            out[column * 3 + channel] = if count[channel] == 0 {
+                                0.0
+                            } else {
+                                sum[channel] / count[channel] as f32
+                            };
                         }
                     }
-                    for channel in 0..3 {
-                        out[column * 3 + channel] = if count[channel] == 0 {
-                            0.0
-                        } else {
-                            sum[channel] / count[channel] as f32
-                        };
-                    }
-                }
-            });
+                });
+        });
         let image = self.finish_linear(
             u32::try_from(width).map_err(|_| DevelopError::Dimension { value: width })?,
             u32::try_from(height).map_err(|_| DevelopError::Dimension { value: height })?,

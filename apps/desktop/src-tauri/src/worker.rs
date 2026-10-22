@@ -21,6 +21,7 @@ use rawstock_core::gpu::Gpu;
 use rawstock_core::render::{Cancelled, DevelopControl, Stage};
 use rawstock_core::session::{DRAG_LONG_EDGE, DisplayRect, PreviewSession, ScanMode};
 use rawstock_core::stock::{Stock, StockMeta};
+use rawstock_core::workers::Workers;
 use tauri::{AppHandle, Emitter};
 
 use crate::api::{
@@ -778,10 +779,10 @@ impl FullDevelop {
         thread::Builder::new()
             .name("rawstock-demosaic".to_string())
             .spawn(move || {
-                // One core is left to the preview, which renders meanwhile.
-                let threads = thread::available_parallelism()
-                    .map_or(2, |count| count.get())
-                    .saturating_sub(1);
+                // Half the capped pool's width, so the demosaic and the
+                // preview that renders meanwhile stay under the cap
+                // together, near enough.
+                let threads = (Workers::threads() / 2).max(1);
                 let result = raw
                     .develop_linear_on(threads)
                     .map_err(|err| format!("develop {label}: {err}"));

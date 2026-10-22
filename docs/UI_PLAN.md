@@ -82,7 +82,8 @@ Opening a file runs decode, demosaic, and ACEScg once. An X-Trans file
 opens on a third-size develop first (`RawImage::develop_quick_linear`, each
 3×3 block's per-color means), which takes about 0.2 s where Markesteijn
 takes about 5 s. The fit proxy is built from it, so the first preview does
-not wait. Markesteijn runs on a thread of its own, on its own rayon pool so
+not wait. Markesteijn runs on a thread of its own, on a separate pool half as wide
+as the capped `Workers` pool (at most 4 threads, one core always free), so
 the preview's grain is not queued behind its tiles, and
 `PreviewSession::install_full` swaps it in when the worker is idle or when a
 100% view or export needs it. That full-resolution ACEScg image stays for
@@ -354,7 +355,10 @@ a decimal that round-trips through `f32`.
 ## Core API
 
 All of this stays in `rawstock-core`. `#![forbid(unsafe_code)]` stays. No
-egui, Tauri, wgpu, tokio, or rayon dependency. No `std::thread`. File
+egui, Tauri, or tokio dependency. wgpu is behind the `gpu` feature. Rayon
+(already linked through rawler) runs grain and the quick develop on the
+capped `Workers` pool, at most 4 threads with one core free; nothing else
+in core starts a thread. File
 dialogs and the worker live in `apps/desktop`. The session takes an owned
 `LinearImage` and a `Parameters` value, so a wasm host can build both
 from memory.

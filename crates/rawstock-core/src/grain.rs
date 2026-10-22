@@ -14,6 +14,7 @@
 use rayon::prelude::*;
 
 use crate::render::{Cancelled, DevelopControl};
+use crate::workers::Workers;
 
 /// Gaussian dye-cloud field for one frame.
 ///
@@ -455,22 +456,24 @@ impl Band<'_> {
         if stride == 0 {
             return Ok(());
         }
-        let round = Self::ROWS * rayon::current_num_threads().max(1) * 2;
+        let round = Self::ROWS * Workers::threads() * 2;
         for (round_index, rows) in field.chunks_mut(round * target.width * 3).enumerate() {
             if control.cancelled() {
                 return Err(Cancelled);
             }
             let first = round_index * round;
-            rows.par_chunks_mut(stride)
-                .enumerate()
-                .for_each(|(index, field)| {
-                    let rows = field.len() / (target.width * 3);
-                    work(Band {
-                        field,
-                        first_row: first + index * Self::ROWS,
-                        rows,
+            Workers::install(|| {
+                rows.par_chunks_mut(stride)
+                    .enumerate()
+                    .for_each(|(index, field)| {
+                        let rows = field.len() / (target.width * 3);
+                        work(Band {
+                            field,
+                            first_row: first + index * Self::ROWS,
+                            rows,
+                        });
                     });
-                });
+            });
         }
         if control.cancelled() {
             return Err(Cancelled);
@@ -855,43 +858,48 @@ impl Scanner {
         if control.cancelled() {
             return Err(Cancelled);
         }
-        temp.par_chunks_mut(stride)
-            .zip(field.par_chunks(stride))
-            .for_each(|(out, row)| {
-                for x in 0..width {
-                    let mut acc = [0.0_f64; 3];
-                    for (index, tap) in kernel.iter().enumerate() {
-                        let src_x =
-                            (x as i32 + index as i32 - radius).clamp(0, width as i32 - 1) as usize;
-                        let tap = f64::from(*tap);
-                        acc[0] += row[src_x * 3] * tap;
-                        acc[1] += row[src_x * 3 + 1] * tap;
-                        acc[2] += row[src_x * 3 + 2] * tap;
+        Workers::install(|| {
+            temp.par_chunks_mut(stride)
+                .zip(field.par_chunks(stride))
+                .for_each(|(out, row)| {
+                    for x in 0..width {
+                        let mut acc = [0.0_f64; 3];
+                        for (index, tap) in kernel.iter().enumerate() {
+                            let src_x = (x as i32 + index as i32 - radius)
+                                .clamp(0, width as i32 - 1)
+                                as usize;
+                            let tap = f64::from(*tap);
+                            acc[0] += row[src_x * 3] * tap;
+                            acc[1] += row[src_x * 3 + 1] * tap;
+                            acc[2] += row[src_x * 3 + 2] * tap;
+                        }
+                        out[x * 3..x * 3 + 3].copy_from_slice(&acc);
                     }
-                    out[x * 3..x * 3 + 3].copy_from_slice(&acc);
-                }
-            });
+                });
+        });
         if control.cancelled() {
             return Err(Cancelled);
         }
-        field
-            .par_chunks_mut(stride)
-            .enumerate()
-            .for_each(|(y, out)| {
-                for x in 0..width {
-                    let mut acc = [0.0_f64; 3];
-                    for (index, tap) in kernel.iter().enumerate() {
-                        let src_y =
-                            (y as i32 + index as i32 - radius).clamp(0, rows as i32 - 1) as usize;
-                        let src = (src_y * width + x) * 3;
-                        let tap = f64::from(*tap);
-                        acc[0] += temp[src] * tap;
-                        acc[1] += temp[src + 1] * tap;
-                        acc[2] += temp[src + 2] * tap;
+        Workers::install(|| {
+            field
+                .par_chunks_mut(stride)
+                .enumerate()
+                .for_each(|(y, out)| {
+                    for x in 0..width {
+                        let mut acc = [0.0_f64; 3];
+                        for (index, tap) in kernel.iter().enumerate() {
+                            let src_y = (y as i32 + index as i32 - radius).clamp(0, rows as i32 - 1)
+                                as usize;
+                            let src = (src_y * width + x) * 3;
+                            let tap = f64::from(*tap);
+                            acc[0] += temp[src] * tap;
+                            acc[1] += temp[src + 1] * tap;
+                            acc[2] += temp[src + 2] * tap;
+                        }
+                        out[x * 3..x * 3 + 3].copy_from_slice(&acc);
                     }
-                    out[x * 3..x * 3 + 3].copy_from_slice(&acc);
-                }
-            });
+                });
+        });
         if control.cancelled() {
             return Err(Cancelled);
         }
