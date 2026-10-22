@@ -1,0 +1,172 @@
+:root {
+  color-scheme: dark;
+  font-family: "Segoe UI", "Avenir Next", sans-serif;
+  font-size: 15px;
+  line-height: 1.4;
+  background: #141414;
+  color: #f2f2f2;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  height: 100%;
+}
+
+button,
+input,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  background: transparent;
+  border: 1px solid #3a3a3a;
+  border-radius: 999px;
+  padding: 0.35rem 0.8rem;
+  cursor: pointer;
+}
+
+button.primary {
+  background: #f2f2f2;
+  color: #141414;
+  border-color: #f2f2f2;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+canvas:focus-visible {
+  outline: 2px solid #f7f7f7;
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+.app {
+  height: 100%;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  background: #141414;
+}
+
+.toolbar,
+.status {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.45rem 0.7rem;
+  background: #1c1c1c;
+}
+
+.toolbar {
+  border-bottom: 1px solid #3a3a3a;
+}
+
+.status {
+  border-top: 1px solid #3a3a3a;
+  color: #b8b8b8;
+  min-height: 2rem;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.toolbar button[aria-pressed="true"] {
+  background: #2e2e2e;
+  border-color: #8a8a8a;
+}
+
+.banner {
+  display: flex;
+  gap: 0.8rem;
+  align-items: flex-start;
+  padding: 0.7rem 0.85rem;
+  background: #2a2a2a;
+  border-bottom: 1px solid #3a3a3a;
+}
+
+.banner p {
+  margin: 0 0 0.35rem;
+}
+
+.workspace {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr) 280px;
+}
+
+h1 {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+}
+
+dialog {
+  background: #1c1c1c;
+  color: #f2f2f2;
+  border: 1px solid #3a3a3a;
+  border-radius: 10px;
+  max-width: 36rem;
+  width: calc(100% - 2rem);
+  padding: 1.1rem 1.2rem 1.2rem;
+}
+
+dialog::backdrop {
+  background: rgba(0, 0, 0, 0.55);
+}
+
+dialog h2 {
+  margin: 0 0 0.6rem;
+  font-size: 1.05rem;
+}
+
+dialog p,
+dialog li {
+  color: #d4d4d4;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.4rem;
+  margin-top: 1rem;
+}
+
+.field {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0.7rem 0;
+}
+
+@media (max-width: 860px) {
+  .workspace {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+  }
+}
