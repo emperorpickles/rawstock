@@ -33,8 +33,9 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   PR #22.
 - **Performance** (`agent: claude`). rawler optimized in dev builds (#61).
   Sub-pixel grain drawn per pixel, and grain painted on every core (#64).
-  Next: a quick binned first preview while Markesteijn runs in the
-  background, then the other CPU film stages on every core.
+  X-Trans opens on a third-size develop while Markesteijn runs in the
+  background, and the GPU opens at startup (#67). Next: the other CPU film
+  stages on every core.
 
 ## Next
 

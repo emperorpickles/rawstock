@@ -10,11 +10,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use rawstock_core::color::LinearImage;
 use rawstock_core::decode::{Orientation, RawImage};
 use rawstock_core::gpu::Gpu;
 use rawstock_core::render::{Cancelled, DevelopControl, Stage};
@@ -31,6 +32,9 @@ use crate::frame::FrameBytes;
 use crate::paths::DevelopPaths;
 
 const STOPPED: &str = "The develop worker has stopped.";
+
+/// How often the idle worker checks for a finished full develop.
+const IDLE_POLL: Duration = Duration::from_millis(100);
 
 type Reply<T> = Sender<Result<T, String>>;
 
@@ -214,13 +218,26 @@ impl Worker {
         Self {
             app,
             latest,
-            studio: Studio::default(),
+            studio: Studio {
+                renderer: Renderer::start(),
+                ..Studio::default()
+            },
         }
     }
 
     fn run(mut self, rx: Receiver<Job>) {
-        while let Ok(job) = rx.recv() {
-            self.dispatch(job);
+        loop {
+            match rx.recv_timeout(IDLE_POLL) {
+                Ok(job) => self.dispatch(job),
+                // Idle: take a finished full develop now, so the next 100%
+                // view or export does not wait for it.
+                Err(RecvTimeoutError::Timeout) => {
+                    if let Err(err) = self.studio.poll_full() {
+                        self.publish(Err(err));
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
         }
     }
 
@@ -373,36 +390,59 @@ struct Studio {
     raw_path: Option<PathBuf>,
     stock: Option<LoadedFile>,
     session: Option<PreviewSession>,
+    /// The full develop of a staged session, still running.
+    full: Option<Receiver<Result<LinearImage, String>>>,
     renderer: Renderer,
 }
 
-/// The GPU, found once on the first open. `RAWSTOCK_GPU=0` keeps every
+/// The GPU, opened once in the background when the worker starts, so the
+/// first file's decode does not wait for it. `RAWSTOCK_GPU=0` keeps every
 /// render on the CPU.
 #[derive(Default)]
 enum Renderer {
     #[default]
-    Unknown,
-    Gpu(Gpu),
     Cpu,
+    Starting(Receiver<Option<Gpu>>),
+    Gpu(Gpu),
 }
 
 impl Renderer {
-    fn device(&mut self) -> Option<Gpu> {
-        if let Self::Unknown = self {
-            *self = if std::env::var("RAWSTOCK_GPU").as_deref() == Ok("0") {
-                eprintln!("rawstock: RAWSTOCK_GPU=0, rendering on the CPU");
-                Self::Cpu
-            } else {
-                match Gpu::new_blocking() {
+    fn start() -> Self {
+        if std::env::var("RAWSTOCK_GPU").as_deref() == Ok("0") {
+            eprintln!("rawstock: RAWSTOCK_GPU=0, rendering on the CPU");
+            return Self::Cpu;
+        }
+        let (tx, rx) = mpsc::channel();
+        let spawned = thread::Builder::new()
+            .name("rawstock-gpu".to_string())
+            .spawn(move || {
+                let gpu = match Gpu::new_blocking() {
                     Ok(gpu) => {
                         eprintln!("rawstock: rendering on {}", gpu.adapter_name());
-                        Self::Gpu(gpu)
+                        Some(gpu)
                     }
                     Err(error) => {
                         eprintln!("rawstock: {error}; rendering on the CPU");
-                        Self::Cpu
+                        None
                     }
-                }
+                };
+                let _ = tx.send(gpu);
+            });
+        match spawned {
+            Ok(_) => Self::Starting(rx),
+            Err(error) => {
+                eprintln!("rawstock: {error}; rendering on the CPU");
+                Self::Cpu
+            }
+        }
+    }
+
+    /// The device, waiting for it if it is still opening.
+    fn device(&mut self) -> Option<Gpu> {
+        if let Self::Starting(rx) = self {
+            *self = match rx.recv() {
+                Ok(Some(gpu)) => Self::Gpu(gpu),
+                _ => Self::Cpu,
             };
         }
         match self {
@@ -445,17 +485,35 @@ impl Studio {
             return Err(Cancelled.into());
         }
         let orientation = raw.orientation();
-        let linear = raw
-            .develop_linear()
+        let quick = raw
+            .develop_quick_linear()
             .with_context(|| format!("develop {}", path.display()))?;
-        drop(raw);
+        // X-Trans opens on a third-size develop. Markesteijn runs on its own
+        // thread, and the session takes it when idle or when a 100% view or
+        // export needs it.
+        let (mut session, full) = match quick {
+            Some(quick) => {
+                let session = PreviewSession::staged(quick, orientation, DRAG_LONG_EDGE)?;
+                (session, Some(FullDevelop::spawn(raw, path)?))
+            }
+            None => {
+                let linear = raw
+                    .develop_linear()
+                    .with_context(|| format!("develop {}", path.display()))?;
+                drop(raw);
+                (
+                    PreviewSession::new(linear, orientation, DRAG_LONG_EDGE)?,
+                    None,
+                )
+            }
+        };
         if progress.cancelled() {
             return Err(Cancelled.into());
         }
         let previous = self.stock.clone();
-        let mut session = PreviewSession::new(linear, orientation, DRAG_LONG_EDGE)?;
         session.set_gpu(self.renderer.device());
         self.session = Some(session);
+        self.full = full;
         self.raw_path = Some(path.to_path_buf());
         self.stock = None;
         progress.emit_progress("Opening", 1, 1);
@@ -495,6 +553,7 @@ impl Studio {
 
     fn export(&mut self, path: PathBuf, progress: &mut JobControl) -> Result<()> {
         let path = DevelopPaths::ensure_jpeg(path);
+        self.settle_full(progress)?;
         let session = self.require_ready()?;
         let image = session.render_full(progress)?;
         if progress.cancelled() {
@@ -589,6 +648,7 @@ impl Studio {
                 }
             }
             RenderView::Full => {
+                self.settle_full(progress)?;
                 let session = self.require_ready()?;
                 if compare {
                     Ok(session.render_baseline_full(progress)?)
@@ -603,6 +663,7 @@ impl Studio {
                 height,
                 exact,
             } => {
+                self.settle_full(progress)?;
                 let session = self.require_ready()?;
                 let rect = DisplayRect {
                     x,
@@ -622,6 +683,59 @@ impl Studio {
                 }
             }
         }
+    }
+
+    /// Wait for a staged session's full develop and install it. A newer job
+    /// cancels the wait, not the develop.
+    fn settle_full(&mut self, progress: &mut JobControl) -> Result<()> {
+        let Some(rx) = &self.full else {
+            return Ok(());
+        };
+        progress.emit_progress("Demosaic", 0, 1);
+        loop {
+            match rx.recv_timeout(IDLE_POLL) {
+                Ok(result) => {
+                    self.full = None;
+                    self.install_full(result)?;
+                    progress.emit_progress("Demosaic", 1, 1);
+                    return Ok(());
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    if progress.cancelled() {
+                        return Err(Cancelled.into());
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    self.full = None;
+                    anyhow::bail!("The full develop stopped.");
+                }
+            }
+        }
+    }
+
+    /// Install a finished full develop without waiting for one.
+    fn poll_full(&mut self) -> Result<()> {
+        let Some(rx) = &self.full else {
+            return Ok(());
+        };
+        match rx.try_recv() {
+            Ok(result) => {
+                self.full = None;
+                self.install_full(result)
+            }
+            Err(TryRecvError::Empty) => Ok(()),
+            Err(TryRecvError::Disconnected) => {
+                self.full = None;
+                anyhow::bail!("The full develop stopped.")
+            }
+        }
+    }
+
+    fn install_full(&mut self, result: Result<LinearImage, String>) -> Result<()> {
+        let linear = result.map_err(anyhow::Error::msg)?;
+        let session = self.session.as_mut().context("Open a RAW file first.")?;
+        session.install_full(linear)?;
+        Ok(())
     }
 
     fn require_ready(&mut self) -> Result<&mut PreviewSession> {
@@ -651,6 +765,31 @@ impl Studio {
             quarter_turns: session.quarter_turns(),
             stock: self.stock.as_ref().map(|stock| describe(stock, session)),
         }
+    }
+}
+
+/// Markesteijn for a staged session, on its own thread.
+struct FullDevelop;
+
+impl FullDevelop {
+    fn spawn(raw: RawImage, path: &Path) -> Result<Receiver<Result<LinearImage, String>>> {
+        let (tx, rx) = mpsc::channel();
+        let label = path.display().to_string();
+        thread::Builder::new()
+            .name("rawstock-demosaic".to_string())
+            .spawn(move || {
+                // One core is left to the preview, which renders meanwhile.
+                let threads = thread::available_parallelism()
+                    .map_or(2, |count| count.get())
+                    .saturating_sub(1);
+                let result = raw
+                    .develop_linear_on(threads)
+                    .map_err(|err| format!("develop {label}: {err}"));
+                // The session may be gone: a newer open drops the receiver.
+                let _ = tx.send(result);
+            })
+            .context("start the demosaic thread")?;
+        Ok(rx)
     }
 }
 

@@ -78,8 +78,15 @@ GPL-3.0-or-later can link this shell. No new crate goes into
 
 ### What is cached
 
-Opening a file runs decode, demosaic, and ACEScg once. That full-resolution
-ACEScg image stays for the life of the file. Changing a stock does not
+Opening a file runs decode, demosaic, and ACEScg once. An X-Trans file
+opens on a third-size develop first (`RawImage::develop_quick_linear`, each
+3×3 block's per-color means), which takes about 0.2 s where Markesteijn
+takes about 5 s. The fit proxy is built from it, so the first preview does
+not wait. Markesteijn runs on a thread of its own, on its own rayon pool so
+the preview's grain is not queued behind its tiles, and
+`PreviewSession::install_full` swaps it in when the worker is idle or when a
+100% view or export needs it. That full-resolution ACEScg image stays for
+the life of the file. Changing a stock does not
 touch it. White balance is already baked into that image, which is the
 CLI's behavior.
 
@@ -449,8 +456,11 @@ orients that buffer for display.
 ### Decode on the worker
 
 The open message carries a path. The worker calls `RawImage::open` and
-`develop_linear`, builds the session, and drops the `RawImage`. The UI
-thread never holds sensor samples. `RawImage` does not have to be `Send`.
+`develop_linear`, builds the session, and drops the `RawImage`. For X-Trans
+it builds a staged session on the quick develop and moves the `RawImage`
+to the demosaic thread, so `RawImage` has to be `Send`. The UI thread never
+holds sensor samples. The GPU device opens on its own thread when the
+worker starts, so the first decode does not wait for it.
 `LinearImage` and `Parameters` do, because the worker owns them; they
 already are, and new fields need to stay `Send` (no `Rc`, no UI handles).
 
