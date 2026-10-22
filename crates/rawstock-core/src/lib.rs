@@ -5,13 +5,16 @@
 //! print/scan, the sRGB output transform, and export. [`stock::Stock::load`]
 //! reads a versioned stock file into [`render::Parameters`].
 //! [`session::PreviewSession`] caches those stages for a live preview. It does
-//! not open files or start threads.
+//! not open files or start threads. With the `gpu` feature, `gpu` runs the
+//! same stages on wgpu.
 
 #![forbid(unsafe_code)]
 
 mod cie1931;
 pub mod color;
 pub mod decode;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 mod grain;
 mod icc;
 mod matrices;

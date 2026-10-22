@@ -62,3 +62,39 @@ jobs:
           targets: wasm32-unknown-unknown
       - name: Check rawstock-core for wasm32-unknown-unknown
         run: cargo check -p rawstock-core --target wasm32-unknown-unknown
+      - name: Check the GPU path for wasm32-unknown-unknown
+        run: cargo check -p rawstock-core --features gpu --target wasm32-unknown-unknown
+
+  # CPU/GPU parity on software adapters: lavapipe (Vulkan) and WARP (DX12).
+  # RAWSTOCK_REQUIRE_GPU makes a missing adapter a failure, not a skip.
+  gpu-vulkan:
+    name: GPU parity (Vulkan, lavapipe)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: lavapipe
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers
+      - name: cargo clippy (gpu)
+        run: cargo clippy -p rawstock-core --features gpu --all-targets -- -D warnings
+      - name: GPU parity
+        env:
+          RAWSTOCK_REQUIRE_GPU: "1"
+          WGPU_BACKEND: vulkan
+        run: cargo test -p rawstock-core --features gpu --lib gpu::
+
+  gpu-dx12:
+    name: GPU parity (DX12, WARP)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: GPU parity
+        env:
+          RAWSTOCK_REQUIRE_GPU: "1"
+          WGPU_BACKEND: dx12
+        run: cargo test -p rawstock-core --features gpu --lib gpu::

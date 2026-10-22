@@ -14,8 +14,9 @@
 //! 6. output transform: ACEScg to encoded sRGB, clipping out-of-gamut channels
 //! 7. export: baked orientation (JPEG tag 1), an sRGB ICC profile, 8-bit JPEG or 16-bit TIFF
 //!
-//! A GPU path is not part of this pipeline. The grain hash is integer-only so
-//! a later WGSL port can match it bit for bit.
+//! This is the reference for the GPU path in `gpu` (the `gpu` feature), which
+//! is held to it within the tolerances in `docs/GPU.md`. The grain hash is
+//! integer-only so the WGSL port can match it bit for bit.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
