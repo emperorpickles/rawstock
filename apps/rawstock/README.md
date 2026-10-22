@@ -32,7 +32,7 @@ port 1430, which is separate from the tuner. Open a Fuji RAF or an iPhone
 ProRAW DNG from the File menu, or drop one on the window. `.raf` and `.dng`
 are registered as file associations for a bundled build.
 
-`npm run check` typechecks the UI. `npm run build` writes `dist/`, which
+`npm run check` typechecks the UI and runs the `node --test` unit tests. `npm run build` writes `dist/`, which
 `cargo` embeds for a release build. A dev compile creates an empty `dist/`
 if that folder is missing so the shell can start from a fresh checkout.
 
@@ -41,3 +41,16 @@ overrides that path.
 
 The app config and log directories use the identifier `dev.rawstock.app`,
 so they do not collide with the tuner.
+
+## Licenses and the log
+
+`npm run dev` and `npm run build` first run `scripts/licenses.mjs`. It reads
+`cargo metadata` for `rawstock-app` and the production packages in
+`package-lock.json`, and writes `src/generated/licenses.json` (gitignored)
+for Help > Licenses. It fails the build when a dependency's license is not
+on the GPL-3.0-compatible allowlist in `scripts/spdx.mjs`. Run it alone with
+`npm run licenses`.
+
+The app writes `rawstock.log` to its log directory. Each line has a UTC time
+and a level, and the file rotates to `rawstock.log.1` at 5 MB. Help > Show
+Log File reveals it. Nothing is uploaded.

@@ -162,7 +162,7 @@ fn save_sidecar(
     settings: EditSettings,
 ) -> Result<SaveResult, AppError> {
     let saved = lock(&app.state::<AppState>().stub).save_sidecar(&image_id, &settings)?;
-    state::log_detail(
+    state::log_info(
         &app.state::<AppState>().log_dir,
         "save_sidecar validated the edit and did not write it; the atomic write is issue #37",
     );
@@ -242,6 +242,11 @@ fn apply_settings(app: &AppHandle, settings: &AppSettings, clear_recent: bool) {
 }
 
 #[tauri::command]
+fn app_info(state: State<'_, AppState>) -> crate::help::AppInfo {
+    crate::help::AppInfo::current(&state.log_dir)
+}
+
+#[tauri::command]
 fn dispatch_menu_action(app: AppHandle, action: String) -> bool {
     let state = app.state::<AppState>();
     if state.shortcuts_suspended.load(Ordering::Relaxed) {
@@ -305,6 +310,7 @@ pub fn handlers() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sy
         get_app_settings,
         set_app_settings,
         reset_app_settings,
+        app_info,
         dispatch_menu_action,
         set_shortcuts_suspended,
         request_open,
