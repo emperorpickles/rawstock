@@ -116,6 +116,10 @@ export class Host {
     return this.invoke("reset_app_settings", { clearRecent });
   }
 
+  async onboardingSample(): Promise<string | null> {
+    return this.invoke("onboarding_sample");
+  }
+
   async appInfo(): Promise<AppInfo> {
     return this.invoke("app_info");
   }
