@@ -66,27 +66,27 @@ density = [0.866, 0.8704, 0.8762, 0.8923, 0.9244, 0.9788, 1.0495, 1.1295, 1.2129
 log_exposure = [-1.6, -0.85, -0.25, 0.14, 0.50, 1.05, 1.9]
 density = [0.06, 0.14, 0.30, 0.60, 0.96, 1.26, 1.48]
 
-# Approximate aesthetic tuning, not a published granularity table or a measured
-# dye-cloud size. Vision3-style RMS-versus-density shape for a fine ISO 400
-# color negative: rms rises through the midtones and falls toward D-max, and
-# the blue layer is the grainiest. size_mm sets the dye-cloud size, red coarser
-# than blue, so the field reads as fine overlapping clumps.
+# Approximate aesthetic tuning, not a published granularity table. Vision3-style
+# RMS-versus-density shape for a fine ISO 400 color negative: rms rises through
+# the midtones and falls toward D-max, and the blue layer is the grainiest.
+# size_mm is the primary dye-cloud sigma. Cyan dye (red record) is coarsest,
+# yellow dye (blue record) finest, at Portra's 10–18 µm rather than coarse clumps.
 # rms is 1000 times the density standard deviation through a 48 µm aperture.
 [grain]
 frame_mm = 35
 seed = 400
 [grain.red]
 density = [0.15, 0.40, 0.80, 1.20, 1.70, 2.30, 2.80]
-rms = [8, 12, 16, 20, 18, 13, 10]
-size_mm = 0.070
+rms = [10, 14, 19, 24, 22, 16, 12]
+size_mm = 0.018
 [grain.green]
 density = [0.15, 0.40, 0.80, 1.20, 1.70, 2.30, 2.80]
-rms = [10, 16, 22, 26, 22, 16, 12]
-size_mm = 0.048
+rms = [12, 19, 26, 31, 26, 19, 14]
+size_mm = 0.013
 [grain.blue]
 density = [0.15, 0.40, 0.80, 1.20, 1.70, 2.30, 2.80]
-rms = [12, 18, 26, 32, 26, 18, 14]
-size_mm = 0.034
+rms = [14, 22, 31, 38, 31, 22, 17]
+size_mm = 0.010
 
 # Approximate aesthetic tuning. Portra has an anti-halation layer, so this is
 # only a faint red fringe on highlights well above middle gray. Threshold is

@@ -64,10 +64,17 @@ fn develop_fixture(fixture: &Fixture, patch: GrayPatch) {
     let linear = raw.develop_linear().unwrap_or_else(|err| {
         panic!("develop {} failed: {err}", path.display());
     });
-    assert_eq!(
-        (linear.width(), linear.height()),
-        fixture.dimensions,
-        "developed dimensions differ from the decoded frame"
+    // X-Trans develops the camera's default crop, which trims the sensor's
+    // optical-black border. It never grows the frame or trims much.
+    let (raw_width, raw_height) = fixture.dimensions;
+    let (width, height) = (linear.width(), linear.height());
+    assert!(
+        width <= raw_width && height <= raw_height,
+        "developed {width}x{height} is larger than the decoded {raw_width}x{raw_height}"
+    );
+    assert!(
+        raw_width - width <= 192 && raw_height - height <= 64,
+        "developed {width}x{height} trims too much of {raw_width}x{raw_height}"
     );
     assert_eq!(raw.orientation(), fixture.orientation);
     let mean = patch_mean(&linear, patch.x, patch.y, patch.size);
@@ -98,16 +105,9 @@ fn develop_fixture(fixture: &Fixture, patch: GrayPatch) {
     developed
         .write(&tiff, raw.orientation())
         .unwrap_or_else(|err| panic!("tiff export failed: {err}"));
-    assert_eq!(
-        jpeg_dimensions(&jpeg),
-        fixture.export_dimensions,
-        "jpeg dimensions"
-    );
-    assert_eq!(
-        tiff_dimensions(&tiff),
-        fixture.export_dimensions,
-        "tiff dimensions"
-    );
+    let export_dimensions = raw.orientation().dimensions(width, height);
+    assert_eq!(jpeg_dimensions(&jpeg), export_dimensions, "jpeg dimensions");
+    assert_eq!(tiff_dimensions(&tiff), export_dimensions, "tiff dimensions");
     assert_eq!(tiff_bits_per_sample(&tiff), [16, 16, 16]);
     let _ = std::fs::remove_file(jpeg);
     let _ = std::fs::remove_file(tiff);

@@ -702,24 +702,26 @@ impl GrainRegion {
 
 /// Per-layer film grain in density.
 ///
-/// Dye clouds are a Poisson field of compact grains in the film plane, summed
-/// in density. Centers, radii, and orientations come from [`Self::hash`], so
-/// there is no `rand` and the pattern repeats for a given seed. The hash
-/// itself is integer-only, so a WGSL port can match it bit for bit.
+/// Dye clouds are a Poisson field of soft grains in the film plane, summed
+/// in density and filtered by a scanner aperture. Centers and shapes come
+/// from [`Self::hash`], so there is no `rand` and the pattern repeats for a
+/// given seed. The hash itself is integer-only, so a WGSL port can match it
+/// bit for bit. The renderer lives in `grain`.
 ///
-/// The model follows the Boolean grain construction in Newson, Delon, and
-/// Galerne, "A Stochastic Film Grain Model for Resolution-Independent
-/// Rendering", Computer Graphics Forum 36(8), 2017 (doi:10.1111/cgf.13159):
-/// Poisson centers and i.i.d. compact grains, evaluated in millimetres.
-/// agx-emulsion (now spektrafilm) is prior art for doing that on the
-/// negative. This is an original shot-noise sum, not either implementation.
+/// The construction follows the Boolean model in Newson, Delon, and Galerne,
+/// "A Stochastic Film Grain Model for Resolution-Independent Rendering",
+/// Computer Graphics Forum 36(8), 2017 (doi:10.1111/cgf.13159): Poisson
+/// centers and i.i.d. compact grains, evaluated in millimetres. This is an
+/// original gaussian shot-noise sum, not that paper's renderer and not
+/// spektrafilm.
 ///
 /// [`Self::APERTURE_MM`] is the Kodak 48 µm measurement window, not a tile.
 /// While that window covers at least one pixel, the density standard
 /// deviation is `rms / 1000`. Below one pixel per aperture, each pixel
 /// averages several windows and the standard deviation scales with
-/// `sqrt(cell_px)`. Cloud size is [`Self::size_mm`], per dye layer, and
-/// scales with [`Self::frame_mm`] rather than with the pixel.
+/// `sqrt(cell_px)`. [`Self::size_mm`] is the primary dye-cloud sigma of each
+/// layer, in millimetres. It scales with [`Self::frame_mm`], not with the
+/// pixel.
 #[derive(Debug, Clone)]
 pub struct Grain {
     frame_mm: f32,
@@ -811,11 +813,11 @@ impl Grain {
     /// Kodak RMS measurement aperture, in millimetres.
     pub const APERTURE_MM: f32 = 0.048;
 
-    /// Characteristic dye-cloud size, red, green, then blue, in millimetres.
+    /// Primary dye-cloud sigma, red, green, then blue, in millimetres.
     ///
     /// Cyan dye (the red record) is the coarsest, yellow dye (the blue
-    /// record) the finest.
-    pub const DEFAULT_SIZE_MM: [f32; 3] = [0.028, 0.019, 0.013];
+    /// record) the finest. These are Portra-scale clouds, about 10–18 µm.
+    pub const DEFAULT_SIZE_MM: [f32; 3] = [0.018, 0.013, 0.010];
 
     /// `layers` are red, green, and blue, in that order.
     ///
@@ -960,67 +962,26 @@ impl Grain {
     ///
     /// The field does not depend on the granularity tables. [`Self::mix_field`]
     /// applies RMS. A crop uses the full frame's pitch, so the same film-plane
-    /// coordinate gets the same cloud.
-    ///
-    /// Clouds smaller than a pixel are left as point samples: the photosite
-    /// already averages them, and widening them would pin the density
-    /// deviation to the pixel instead of to the 48 µm aperture. Once the
-    /// finest cloud covers more than about a pixel, the compact kernel is
-    /// reconstructed with a short gaussian. The stamp is padded by that
-    /// kernel so a crop matches the full frame, including at the frame edge.
+    /// coordinate gets the same cloud. Clouds smaller than a pixel are
+    /// deposited into that pixel. Resolved clouds are gaussian stamps filtered
+    /// by the scanner aperture, padded so the crop matches the full frame.
     pub(crate) fn unit_field(
         &self,
         region: GrainRegion,
         rows: usize,
         control: &mut dyn crate::render::DevelopControl,
     ) -> Result<Vec<f32>, crate::render::Cancelled> {
-        let width = region.width;
-        let frame_width = region.frame_width;
         crate::render::begin(crate::render::Stage::Grain, rows as u32, control)?;
-        let pitch = self.frame_mm / frame_width as f32;
-        let finest = self.size_mm.into_iter().fold(f32::MAX, f32::min).max(0.0);
-        let finest_px = DYE_CLOUDS[0].radius_scale[0] * finest / pitch;
-        let sigma = reconstruction_sigma(finest_px);
-        let pad = reconstruction_pad(sigma);
-        let origin_x = region.origin_x as i32 - pad;
-        let origin_y = region.origin_y as i32 - pad;
-        let padded_w = width as usize + pad as usize * 2;
-        let padded_h = rows + pad as usize * 2;
-        let mut field = vec![0.0_f32; padded_h * padded_w * 3];
-        let (mean, deviation) = self.accumulate_clouds(
-            &mut field,
-            CloudTarget {
-                width: padded_w as u32,
-                rows: padded_h,
-                origin_x,
-                origin_y,
-                pitch,
+        let out = crate::grain::FilmGrain::new(self.frame_mm, self.seed, self.size_mm).render(
+            crate::grain::Plane {
+                width: region.width,
+                rows,
+                origin_x: region.origin_x,
+                origin_y: region.origin_y,
+                frame_width: region.frame_width,
             },
             control,
         )?;
-        if sigma > 0.0 {
-            gaussian_blur(&mut field, padded_w, padded_h, sigma, control)?;
-        }
-        let atten = self.size_mm.map(|size| {
-            let radius_px = 0.45 * size / pitch;
-            reconstruction_atten(radius_px, sigma)
-        });
-        let mut out = vec![0.0_f32; rows * width as usize * 3];
-        for y in 0..rows {
-            let src = ((y + pad as usize) * padded_w + pad as usize) * 3;
-            let dst = y * width as usize * 3;
-            out[dst..dst + width as usize * 3]
-                .copy_from_slice(&field[src..src + width as usize * 3]);
-        }
-        for (index, sample) in out.iter_mut().enumerate() {
-            let layer = index % 3;
-            let spread = deviation[layer] * atten[layer];
-            if spread == 0.0 {
-                *sample = 0.0;
-            } else {
-                *sample = (*sample - mean[layer]) / spread;
-            }
-        }
         control.on_progress(crate::render::Stage::Grain, rows as u32, rows as u32);
         if control.cancelled() {
             return Err(crate::render::Cancelled);
@@ -1041,132 +1002,6 @@ impl Grain {
             }
             *sample += *unit * rms * scale;
         }
-    }
-
-    /// Splats every cloud process and returns the analytical mean and
-    /// standard deviation of the raw field, per layer.
-    fn accumulate_clouds(
-        &self,
-        field: &mut [f32],
-        target: CloudTarget,
-        control: &mut dyn crate::render::DevelopControl,
-    ) -> Result<([f32; 3], [f32; 3]), crate::render::Cancelled> {
-        let mut mean = [0.0_f32; 3];
-        let mut variance = [0.0_f32; 3];
-        for cloud in DYE_CLOUDS {
-            let (cloud_mean, cloud_variance) = self.splat_cloud(field, target, *cloud, control)?;
-            for layer in 0..3 {
-                mean[layer] += cloud_mean[layer];
-                variance[layer] += cloud_variance[layer];
-            }
-        }
-        Ok((mean, variance.map(f32::sqrt)))
-    }
-
-    /// Add one Poisson process. Layers named by the mask share grain centers.
-    fn splat_cloud(
-        &self,
-        field: &mut [f32],
-        target: CloudTarget,
-        cloud: DyeCloud,
-        control: &mut dyn crate::render::DevelopControl,
-    ) -> Result<([f32; 3], [f32; 3]), crate::render::Cancelled> {
-        let CloudTarget {
-            width,
-            rows,
-            origin_x,
-            origin_y,
-            pitch,
-        } = target;
-        let (amp_mean, amp_second) = amplitude_moments();
-        let lambda = cloud.mu / (cloud.cell_mm * cloud.cell_mm);
-        let scale_second = radius_scale_second(cloud.radius_scale);
-        let mut amplitude = [0.0_f32; 3];
-        let mut mean = [0.0_f32; 3];
-        let mut variance = [0.0_f32; 3];
-        let mut radius_lo = [0.0_f32; 3];
-        let mut radius_hi = [0.0_f32; 3];
-        let mut margin = 0.0_f32;
-        for layer in 0..3 {
-            if cloud.layers & (1 << layer) == 0 || cloud.variance <= 0.0 {
-                continue;
-            }
-            let size = self.size_mm[layer];
-            radius_lo[layer] = cloud.radius_scale[0] * size;
-            radius_hi[layer] = cloud.radius_scale[1] * size;
-            let expected_r2 = size * size * scale_second;
-            let amp = (cloud.variance * KERNEL_SECOND
-                / (lambda * std::f32::consts::PI * expected_r2 * amp_second))
-                .sqrt();
-            amplitude[layer] = amp;
-            mean[layer] =
-                lambda * amp * amp_mean * std::f32::consts::PI * expected_r2 / KERNEL_MEAN;
-            variance[layer] = cloud.variance;
-            margin = margin.max(radius_hi[layer] * cloud.aspect_max.sqrt());
-        }
-        if margin == 0.0 {
-            return Ok((mean, variance));
-        }
-
-        let cell = cloud.cell_mm;
-        let origin_x_mm = origin_x as f32 * pitch;
-        let origin_y_mm = origin_y as f32 * pitch;
-        let width_mm = width as f32 * pitch;
-        let height_mm = rows as f32 * pitch;
-        let x_first = ((origin_x_mm - margin) / cell).floor() as i32;
-        let y_first = ((origin_y_mm - margin) / cell).floor() as i32;
-        let x_last = ((origin_x_mm + width_mm + margin) / cell).floor() as i32;
-        let y_last = ((origin_y_mm + height_mm + margin) / cell).floor() as i32;
-        let seed = self.seed.wrapping_add(cloud.salt);
-        for cy in y_first..=y_last {
-            if control.cancelled() {
-                return Err(crate::render::Cancelled);
-            }
-            for cx in x_first..=x_last {
-                let mut rng = CloudRng::new(cx as u32, cy as u32, seed);
-                let count = poisson_count(cloud.mu, &mut rng);
-                for _ in 0..count {
-                    let ux = rng.unit();
-                    let uy = rng.unit();
-                    let ur = rng.unit();
-                    let ua = rng.unit();
-                    let ut = rng.unit();
-                    let uf = rng.unit();
-                    let x_mm = (cx as f32 + ux) * cell;
-                    let y_mm = (cy as f32 + uy) * cell;
-                    let aspect = log_lerp(1.0, cloud.aspect_max, ua);
-                    let axis = aspect.sqrt();
-                    let (sin, cos) = (ut * std::f32::consts::TAU).sin_cos();
-                    let strength = AMPLITUDE_LO + (AMPLITUDE_HI - AMPLITUDE_LO) * uf;
-                    for layer in 0..3 {
-                        let amp = amplitude[layer];
-                        if amp == 0.0 {
-                            continue;
-                        }
-                        let radius = log_lerp(radius_lo[layer], radius_hi[layer], ur);
-                        stamp_cloud(
-                            field,
-                            width,
-                            rows,
-                            pitch,
-                            origin_x as f32,
-                            origin_y as f32,
-                            Stamp {
-                                x_mm,
-                                y_mm,
-                                rx: radius / axis,
-                                ry: radius * axis,
-                                sin,
-                                cos,
-                                amplitude: amp * strength,
-                                layer,
-                            },
-                        );
-                    }
-                }
-            }
-        }
-        Ok((mean, variance))
     }
 }
 
@@ -1298,325 +1133,6 @@ impl Halation {
         }
         control.on_progress(crate::render::Stage::Halation, height, height);
         Ok(())
-    }
-}
-
-/// Map a hash to a zero-mean value of variance 1.
-///
-/// The top 24 bits become a uniform `[0, 1)` sample. Uniform `[0, 1)` has
-/// variance `1/12`, so the scale is `sqrt(12)`.
-/// Kernel `A (1 - d²)^1` on an ellipse. `∫k = A π R² / KERNEL_MEAN` and
-/// `∫k² = A² π R² / KERNEL_SECOND`, with `R²` the product of the radii.
-const KERNEL_MEAN: f32 = 2.0;
-const KERNEL_SECOND: f32 = 3.0;
-
-/// Per-grain amplitude is uniform on this interval, so clouds are not equally dense.
-const AMPLITUDE_LO: f32 = 0.45;
-const AMPLITUDE_HI: f32 = 1.0;
-
-/// One Poisson process of dye clouds.
-///
-/// `layers` is a bitmask, red = 1, green = 2, blue = 4. Bits that are set
-/// share grain centers and differ only in radius. `variance` is the
-/// variance that process contributes to each active layer. `radius_scale`
-/// is the min and max radius as a multiple of that layer's `size_mm`.
-#[derive(Clone, Copy)]
-struct DyeCloud {
-    cell_mm: f32,
-    mu: f32,
-    salt: u32,
-    variance: f32,
-    radius_scale: [f32; 2],
-    aspect_max: f32,
-    layers: u8,
-}
-
-/// Fine shared grains, coarse shared clumps, then a private process per layer.
-///
-/// Variances sum to 1, so the normalized field has unit standard deviation
-/// before the RMS scale.
-const DYE_CLOUDS: &[DyeCloud] = &[
-    DyeCloud {
-        cell_mm: 0.012,
-        mu: 1.35,
-        salt: 0x51C0_0001,
-        variance: 0.22,
-        radius_scale: [0.30, 0.58],
-        aspect_max: 2.1,
-        layers: 0b111,
-    },
-    DyeCloud {
-        cell_mm: 0.020,
-        mu: 1.05,
-        salt: 0xA11C_0002,
-        variance: 0.40,
-        radius_scale: [0.62, 1.15],
-        aspect_max: 2.5,
-        layers: 0b111,
-    },
-    DyeCloud {
-        cell_mm: 0.046,
-        mu: 0.62,
-        salt: 0xC0A5_0003,
-        variance: 0.18,
-        radius_scale: [1.45, 2.70],
-        aspect_max: 2.8,
-        layers: 0b111,
-    },
-    DyeCloud {
-        cell_mm: 0.016,
-        mu: 0.85,
-        salt: 0xB1E7_0004,
-        variance: 0.20,
-        radius_scale: [0.42, 0.90],
-        aspect_max: 2.3,
-        layers: 0b001,
-    },
-    DyeCloud {
-        cell_mm: 0.016,
-        mu: 0.85,
-        salt: 0xB1E7_0005,
-        variance: 0.20,
-        radius_scale: [0.42, 0.90],
-        aspect_max: 2.3,
-        layers: 0b010,
-    },
-    DyeCloud {
-        cell_mm: 0.016,
-        mu: 0.85,
-        salt: 0xB1E7_0006,
-        variance: 0.20,
-        radius_scale: [0.42, 0.90],
-        aspect_max: 2.3,
-        layers: 0b100,
-    },
-];
-
-/// Mean and second moment of a uniform draw on [`AMPLITUDE_LO`], [`AMPLITUDE_HI`].
-fn amplitude_moments() -> (f32, f32) {
-    let span = AMPLITUDE_HI - AMPLITUDE_LO;
-    let mean = 0.5 * (AMPLITUDE_LO + AMPLITUDE_HI);
-    let second = AMPLITUDE_LO * AMPLITUDE_LO + AMPLITUDE_LO * span + span * span / 3.0;
-    (mean, second)
-}
-
-/// `E[S²]` for `S` log-uniform on `scale`.
-fn radius_scale_second(scale: [f32; 2]) -> f32 {
-    let lo = scale[0];
-    let hi = scale[1];
-    let ratio = hi / lo;
-    (hi * hi - lo * lo) / (2.0 * ratio.ln())
-}
-
-fn log_lerp(lo: f32, hi: f32, unit: f32) -> f32 {
-    lo * (hi / lo).powf(unit)
-}
-
-struct CloudRng {
-    x: u32,
-    y: u32,
-    seed: u32,
-    seq: u32,
-}
-
-impl CloudRng {
-    fn new(x: u32, y: u32, seed: u32) -> Self {
-        Self { x, y, seed, seq: 0 }
-    }
-
-    fn unit(&mut self) -> f32 {
-        self.seq = self.seq.wrapping_add(1);
-        let hash = Grain::hash(self.x, self.y, self.seq, self.seed);
-        (hash >> 8) as f32 * (1.0 / 16_777_216.0)
-    }
-}
-
-/// Knuth's Poisson generator. `mu` is small for every cloud process.
-fn poisson_count(mu: f32, rng: &mut CloudRng) -> u32 {
-    let limit = (-mu).exp();
-    let mut product = 1.0_f32;
-    let mut count = 0_u32;
-    while count < 64 {
-        product *= rng.unit();
-        if product <= limit {
-            return count;
-        }
-        count += 1;
-    }
-    count
-}
-
-/// Where a dye-cloud splat lands. Origins are pixels and may be negative so a
-/// reconstruction kernel can read grains that sit just outside the crop.
-#[derive(Clone, Copy)]
-struct CloudTarget {
-    width: u32,
-    rows: usize,
-    origin_x: i32,
-    origin_y: i32,
-    pitch: f32,
-}
-
-/// Gaussian sigma, in pixels, once dye clouds are large enough to alias.
-///
-/// The finest process uses [`DYE_CLOUDS`] radius scale `0.30`. Under about
-/// 1.15 px that cloud is smaller than the photosite, and the aperture scaling
-/// in [`Grain::mix_field`] is what sets the deviation. Above that, a
-/// point-sampled compact kernel stair-steps. The sigma reaches 1.05 px by
-/// 1.7 px and then stays there, so a finer scan does not get a stronger blur.
-fn reconstruction_sigma(finest_radius_px: f32) -> f32 {
-    const START: f32 = 1.15;
-    const FULL: f32 = 1.7;
-    const SIGMA: f32 = 1.05;
-    if !(finest_radius_px.is_finite()) || finest_radius_px <= START {
-        return 0.0;
-    }
-    let t = ((finest_radius_px - START) / (FULL - START)).min(1.0);
-    SIGMA * t
-}
-
-fn reconstruction_pad(sigma: f32) -> i32 {
-    if sigma <= 0.0 {
-        0
-    } else {
-        (sigma * 3.0).ceil() as i32
-    }
-}
-
-/// How much of the analytical deviation remains after [`gaussian_blur`].
-///
-/// `radius_px` is the layer's mid fine-cloud radius. A blur that is small
-/// next to that radius barely moves the deviation; a blur comparable to it
-/// does. The 1.35 was fit so a 40 MP Portra-sized field stays at unit
-/// deviation after the reconstruction.
-fn reconstruction_atten(radius_px: f32, sigma: f32) -> f32 {
-    if sigma <= 0.0 || !(radius_px.is_finite()) || radius_px <= 0.0 {
-        return 1.0;
-    }
-    let ratio = sigma / radius_px;
-    1.0 / (1.0 + 1.35 * ratio * ratio).sqrt()
-}
-
-/// Separable gaussian. `field` is interleaved RGB of `width` by `rows`.
-fn gaussian_blur(
-    field: &mut [f32],
-    width: usize,
-    rows: usize,
-    sigma: f32,
-    control: &mut dyn crate::render::DevelopControl,
-) -> Result<(), crate::render::Cancelled> {
-    let radius = reconstruction_pad(sigma);
-    if radius <= 0 || width == 0 || rows == 0 {
-        return Ok(());
-    }
-    let mut kernel = Vec::with_capacity(radius as usize * 2 + 1);
-    let mut weight = 0.0_f32;
-    for offset in -radius..=radius {
-        let tap = (-0.5 * (offset as f32 / sigma).powi(2)).exp();
-        kernel.push(tap);
-        weight += tap;
-    }
-    for tap in &mut kernel {
-        *tap /= weight;
-    }
-    let mut temp = vec![0.0_f32; field.len()];
-    for y in 0..rows {
-        if control.cancelled() {
-            return Err(crate::render::Cancelled);
-        }
-        for x in 0..width {
-            let mut acc = [0.0_f32; 3];
-            for (index, tap) in kernel.iter().enumerate() {
-                let src_x = (x as i32 + index as i32 - radius).clamp(0, width as i32 - 1) as usize;
-                let src = (y * width + src_x) * 3;
-                acc[0] += field[src] * tap;
-                acc[1] += field[src + 1] * tap;
-                acc[2] += field[src + 2] * tap;
-            }
-            let dst = (y * width + x) * 3;
-            temp[dst] = acc[0];
-            temp[dst + 1] = acc[1];
-            temp[dst + 2] = acc[2];
-        }
-    }
-    for y in 0..rows {
-        if control.cancelled() {
-            return Err(crate::render::Cancelled);
-        }
-        for x in 0..width {
-            let mut acc = [0.0_f32; 3];
-            for (index, tap) in kernel.iter().enumerate() {
-                let src_y = (y as i32 + index as i32 - radius).clamp(0, rows as i32 - 1) as usize;
-                let src = (src_y * width + x) * 3;
-                acc[0] += temp[src] * tap;
-                acc[1] += temp[src + 1] * tap;
-                acc[2] += temp[src + 2] * tap;
-            }
-            let dst = (y * width + x) * 3;
-            field[dst] = acc[0];
-            field[dst + 1] = acc[1];
-            field[dst + 2] = acc[2];
-        }
-    }
-    Ok(())
-}
-
-struct Stamp {
-    x_mm: f32,
-    y_mm: f32,
-    rx: f32,
-    ry: f32,
-    sin: f32,
-    cos: f32,
-    amplitude: f32,
-    layer: usize,
-}
-
-fn stamp_cloud(
-    field: &mut [f32],
-    width: u32,
-    rows: usize,
-    pitch: f32,
-    origin_x: f32,
-    origin_y: f32,
-    stamp: Stamp,
-) {
-    let Stamp {
-        x_mm,
-        y_mm,
-        rx,
-        ry,
-        sin,
-        cos,
-        amplitude,
-        layer,
-    } = stamp;
-    let major = rx.max(ry);
-    let px = x_mm / pitch - origin_x;
-    let py = y_mm / pitch - origin_y;
-    let rad = major / pitch;
-    let x0 = ((px - rad - 0.5).ceil() as i32).max(0);
-    let y0 = ((py - rad - 0.5).ceil() as i32).max(0);
-    let x1 = ((px + rad - 0.5).floor() as i32).min(width as i32 - 1);
-    let y1 = ((py + rad - 0.5).floor() as i32).min(rows as i32 - 1);
-    if x0 > x1 || y0 > y1 || rx <= 0.0 || ry <= 0.0 {
-        return;
-    }
-    let inv_rx = 1.0 / rx;
-    let inv_ry = 1.0 / ry;
-    let width = width as usize;
-    for y in y0 as usize..=y1 as usize {
-        let dy = (origin_y + y as f32 + 0.5) * pitch - y_mm;
-        let row_start = y * width * 3;
-        for x in x0 as usize..=x1 as usize {
-            let dx = (origin_x + x as f32 + 0.5) * pitch - x_mm;
-            let dxr = dx * cos + dy * sin;
-            let dyr = -dx * sin + dy * cos;
-            let d2 = (dxr * inv_rx) * (dxr * inv_rx) + (dyr * inv_ry) * (dyr * inv_ry);
-            if d2 < 1.0 {
-                field[row_start + x * 3 + layer] += amplitude * (1.0 - d2);
-            }
-        }
     }
 }
 

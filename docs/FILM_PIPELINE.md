@@ -306,95 +306,90 @@ the same `log10` → coupling → `Curve::eval` path as the parametric model.
 
 ## 6. Density-space grain
 
-**On #6 at `a883587`.** `Grain` and `Granularity` in `stock.rs`. Omit
-`[grain]` and the stage is skipped. #7 still has the previous model, one
-hashed value per 48 µm cell. That read as digital noise. This section is
-the replacement.
+`Grain` and `Granularity` in `stock.rs`, rendered by `FilmGrain` in
+`grain.rs`. Omit `[grain]` and the stage is skipped.
 
 Grain is the density variation from dye clouds in the emulsion. It runs
 after the film model and before print, in density. Adding the same noise
 in ACEScg or in sRGB would follow the display encoding instead of how
 dense the negative is.
 
-The pattern is a **Boolean model**: a Poisson field of independent compact
-grains, summed where they overlap. That is the construction in Newson,
-Delon, and Galerne, "A Stochastic Film Grain Model for
+### What was wrong
+
+The previous field was a Poisson sum of compact ellipses, `(1 - d²)` inside
+a hard edge, with per-layer radii of 70 / 48 / 34 µm on Portra and a 1 px
+reconstruction blur. Measured on a neutral field at a 6160-wide pitch:
+
+- Lag-1 autocorrelation was 0.98 and the high-frequency power was gone.
+  The clumps were tens of pixels across. That is a stain, not Portra grain.
+  Dye clouds on this film are about 10–25 µm (a few pixels on a 6K scan of
+  35 mm), and they overlap.
+- Red/green correlation was 0.73 and `(R−G)` was 0.76× the luma standard
+  deviation. Shared centers used a different radius per layer, so each clump
+  had a chromatic core and a ring of the other hue. The 20% private
+  processes added more. Those colored blobs, cut by an object edge, read as
+  halos and sudden hue jumps. The dye scan (`10^(−optical density)`) turns
+  a density spike into a hue jump.
+- There was no pixel grid. The periodogram had no spike. The blocky look
+  was the older one-hash-per-48 µm-cell model. This one overshot the other
+  way.
+- Residual variance beside a hard density step already matched the flat
+  field at that density (ratios 1.05 and 1.00). Grain is not sharpened, and
+  the blur ran on the grain field before the RMS multiply, so it did not
+  ring the picture. The "edge artifact" was the clump itself.
+
+### Model
+
+A gaussian shot-noise field, the high-overlap limit of the Boolean model in
+Newson, Delon, and Galerne, "A Stochastic Film Grain Model for
 Resolution-Independent Rendering", Computer Graphics Forum 36(8), 2017
-(doi:10.1111/cgf.13159). They place Poisson centers and i.i.d. compact
-grains in millimetres, so the look does not depend on the pixel grid.
-agx-emulsion (now spektrafilm) is prior art for doing that on a negative.
-`Grain::apply` is an original shot-noise sum. It is not either of those
-implementations.
+(doi:10.1111/cgf.13159). Centers are a Poisson process in millimetres.
+Each cloud is `A exp(−½ d²)`, truncated at 3.5σ. The code is an original
+sum. It is not the Newson renderer, and it is not spektrafilm or darktable
+(those are GPL, and this project does not copy them). What it takes from
+that work is the construction: Poisson centers, compact grains, a filter
+that stands in for the scanner.
 
-Each grain is a soft elliptical cloud. Inside the ellipse the kernel is
-`amplitude * (1 - d²)`, where `d` is the distance from the center in units
-of the ellipse; outside, it is zero. The aspect ratio is log-uniform from
-1 up to a per-process maximum (about 2.1 to 2.8), and the orientation is a
-uniform angle, so the blob is an ellipse rather than a disc. The radius is
-log-uniform between two scales of that layer's `size_mm`. The strength of
-one cloud is uniform on `[0.45, 1]`.
+Six processes, variances summing to 1 on each layer:
 
-When the finest cloud is still smaller than about 1.15 px, that kernel is
-point-sampled: the photosite is already the average. Once it covers more
-than that, a 1.05 px gaussian reconstructs the stamp before the field is
-normalized. The pad around a crop is the kernel support, so the 100% view
-still matches the full frame. The analytical deviation is reduced by the
-same blur, and the 48 µm aperture scaling is unchanged.
+| Process | Variance | Sigma, in units of the reference size |
+| --- | --- | --- |
+| Fine, shared | 0.72 | 0.80–1.15 |
+| Mid, shared | 0.20 | 1.70–2.50 |
+| Coarse, shared | 0.03 | 3.20–4.60 |
+| Private, per layer | 0.05 | 0.85–1.25 of that layer |
 
-The field is **multi-scale**. `DYE_CLOUDS` is six Poisson processes. Three
-of them are shared by all three dye layers, at cell sizes 0.012 mm (fine),
-0.020 mm (mid), and 0.046 mm (coarse). Their variances are 0.22, 0.40, and
-0.18. Each layer also has a private process at 0.016 mm with variance
-0.20. Variances on one layer sum to 1.
+A shared process stamps one geometry on all three layers. The reference
+size is the geometric mean of the three `size_mm` values, so a clump is
+not a colored ring. The private process is the chroma, and it is the same
+fine scale as the body of the grain, so the color is a tint in the grain
+rather than a blotch. Aspect runs from 1 to about 1.6.
 
-The layers are **partially correlated**. A shared process uses one set of
-centers for red, green, and blue, and only the radius changes per layer,
-so a clump shows up in every channel. A private process stamps one layer.
-Most of the variance (0.80) is shared centers; the rest (0.20) is that
-layer alone.
+`size_mm` is that primary sigma, in millimetres. The default, and Portra,
+is `[0.018, 0.013, 0.010]`: cyan dye coarsest, yellow dye finest, inside
+the 10–25 µm dye-cloud range reported for this family of films. Below
+about 0.75 px of sigma the photosite is the aperture and the cloud's whole
+mass is deposited in the pixel that contains its center. Above that, the
+gaussian is evaluated and a 6 µm scanner aperture blurs the field. The crop
+is padded by that kernel, so a 100% view matches the full frame.
 
-Positions are in millimetres on the frame. The image width spans
-`frame_mm` (default 35, the film gauge). Pixel pitch is `frame_mm / width`
-millimetres. Each process tiles the film plane into cells of its own
-`cell_mm`. A cell draws a Poisson count with mean `mu` (Knuth's generator:
-a product of uniform draws until it falls below `e^{-mu}`, capped at 64)
-and places that many centers uniformly inside the cell. Cells extend past
-the frame by the largest cloud, so a center just outside still stamps
-pixels inside. A wider export grows the same clouds in pixels. It does not
-reveal a finer noise.
+The working sum is `f64`. A coarse pixel covers millions of clouds whose
+masses sit below the unit in the last place of an `f32` total, and the
+lost mass is a density bias (a 1×1 frame of Portra came out several tenths
+dark and colored). The stored field is `f32` after the mean is removed.
 
-The **48 µm aperture** sets the RMS amplitude and nothing else. Kodak
-quotes RMS granularity as 1000 times the standard deviation of density
-read through a 48 µm window. `Granularity` stores that datasheet number as
-`(density, rms)`. Density must strictly increase. RMS may rise and then
-fall, the shape of a Vision3 sheet. Outside the knots, evaluation clamps
-to the end RMS. `cell_px = width * 0.048 / frame_mm` is how many pixels
-that window covers. It is not a tile, and pixels in it do not share one
-hash. While the window covers at least one pixel, the density standard
-deviation is `rms / 1000`. Below one pixel per aperture, each pixel
-averages several windows and the standard deviation scales with
-`sqrt(cell_px)`.
+The **48 µm aperture** still sets only the RMS amplitude. `Granularity`
+stores `(density, rms)`. Density must strictly increase. RMS may rise and
+fall. `cell_px = width * 0.048 / frame_mm`. While that window covers at
+least one pixel, the density standard deviation is `rms / 1000`. Below one
+pixel per aperture it scales with `sqrt(cell_px)`. RMS is evaluated at the
+pixel's own density, after the field is built, so an edge does not grow
+extra grain. The amount slider scales the tables and reuses the field.
 
-`Grain::apply` splats every process into a density field, then subtracts
-the analytical mean and divides by the analytical standard deviation of
-that layer. The result is zero-mean with unit variance, then multiplied by
-`rms * scale`. Mean density is unchanged in expectation. The amplitude of
-each process is chosen so its variance matches the number in `DYE_CLOUDS`
-before that normalisation.
-
-`size_mm` is the characteristic cloud size of a layer, in millimetres.
-The default is `[0.028, 0.019, 0.013]`: cyan dye (the red record) is the
-coarsest, yellow dye (the blue record) the finest. A stock can set
-`size_mm` on `[grain.red]`, `[grain.green]`, or `[grain.blue]`. An omitted
-layer keeps its default. A non-positive size is a load error.
-
-The draws come from `Grain::hash`, the PCG hash of Jarzynski and Hill,
-"Hash Functions for GPU Rendering", JCGT 2020. The inputs are the integer
-cell coordinate (negative cells pass their wrapping `u32` bits), a stream
-index, and `seed` plus a per-process salt. Only wrapping `u32` arithmetic
-is used. There is no `rand` and no floating-point inside the hash, so a
-later WGSL port can match the draws bit for bit. The same seed, frame
-width, and pixel dimensions produce the same picture.
+`Grain::hash` is unchanged: the PCG hash of Jarzynski and Hill, integer
+only, so a later WGSL port can match the draws. Mean density is unchanged
+in expectation. The splatted field is normalized with the analytical mean
+and variance, including the scanner's effect on `∫k²`.
 
 ## 7. Print/scan
 
@@ -551,9 +546,9 @@ parametric stock already uses, so the version stays 1:
 - `[coupling]` with a row-major `matrix`. Absent means independent layers.
 - `[grain]` with `frame_mm` (default 35), `seed` (default 0), per-layer
   `density` / `rms`, and optional per-layer `size_mm`. Omitted sizes use
-  0.028, 0.019, and 0.013 mm (red, green, blue). Density must strictly
-  increase; rms may rise and fall. `size_mm` is the dye-cloud size. The
-  48 µm aperture is not a file field.
+  0.018, 0.013, and 0.010 mm (red, green, blue), the primary dye-cloud
+  sigma. Density must strictly increase; rms may rise and fall. The 48 µm
+  aperture is not a file field.
 - `[halation]` with `threshold`, `radius`, and `weight` of length 3.
 
 `model = "spectral"` adds:
@@ -704,9 +699,9 @@ curve, or a published RMS table:
 - Mild coupling, each row summing to 1.
 - A Vision3-style RMS-versus-density grain shape (rises, then falls; blue
   grainiest) at a level chosen so grain is visible at 100% in an 8-bit
-  JPEG. The magnitudes are higher than a real datasheet RMS. The #7 file
-  still describes that as a 48 µm cell. That is the per-cell grain on #7,
-  not the dye-cloud model on #6 at `a883587`.
+  JPEG. The magnitudes are higher than a real datasheet RMS, so the fine
+  grain is still visible at 100%. `size_mm` is the primary dye-cloud sigma,
+  18 / 13 / 10 µm. See the grain section.
 - A faint red halation fringe. Portra has an anti-halation layer, so the
   effect is a fringe, not a glow.
 
