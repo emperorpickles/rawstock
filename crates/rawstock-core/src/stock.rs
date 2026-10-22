@@ -553,6 +553,43 @@ impl Spectral {
     }
 }
 
+/// What the GPU uploads for a spectral stock. Borrowed from the model.
+#[cfg(feature = "gpu")]
+pub(crate) struct SpectralTables<'a> {
+    pub wavelengths: &'a [f32],
+    pub weighted_sensitivity: &'a [Vec<f32>; 3],
+    /// Present when the stock has dye spectra.
+    pub scan: Option<ScanTables<'a>>,
+}
+
+/// The dye scan's inputs on the stock's wavelength grid.
+#[cfg(feature = "gpu")]
+#[derive(Clone, Copy)]
+pub(crate) struct ScanTables<'a> {
+    pub dyes: &'a [Vec<f32>; 3],
+    pub observer: &'a [Vec<f32>; 3],
+    pub balance: [f32; 3],
+}
+
+#[cfg(feature = "gpu")]
+impl Spectral {
+    pub(crate) fn gpu_tables(&self) -> SpectralTables<'_> {
+        let scan = match (&self.dye_density, &self.observer) {
+            (Some(dyes), Some(observer)) => Some(ScanTables {
+                dyes,
+                observer: observer.rows(),
+                balance: self.scan_balance,
+            }),
+            _ => None,
+        };
+        SpectralTables {
+            wavelengths: &self.wavelengths,
+            weighted_sensitivity: &self.weighted_sensitivity,
+            scan,
+        }
+    }
+}
+
 impl FilmModel {
     /// Per-layer density for interleaved scene-linear RGB exposure.
     ///
@@ -1780,7 +1817,7 @@ fn widen(
     Ok(())
 }
 
-fn box_radii(sigma: f32) -> [usize; 3] {
+pub(crate) fn box_radii(sigma: f32) -> [usize; 3] {
     let passes = 3.0_f32;
     let ideal = (12.0 * sigma * sigma / passes + 1.0)
         .sqrt()
