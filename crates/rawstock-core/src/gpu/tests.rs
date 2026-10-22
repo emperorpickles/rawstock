@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 
 use super::*;
 use crate::render::{NopControl, Pipeline};
-use crate::stock::{Grain, Granularity, Halation, Stock};
+use crate::stock::{Grain, GrainRegion, Halation, Stock};
 
 /// Exposure is one multiply by the same f32 scale: bit for bit.
 const EXPOSURE_TOLERANCE: f32 = 0.0;
@@ -22,6 +22,11 @@ const DYE_SCAN_TOLERANCE: f32 = 5.0e-5;
 /// Scene-linear exposure after halation, relative above 1. The GPU sums each
 /// box window directly in f32; the CPU slides an f64 running sum.
 const HALATION_TOLERANCE: f32 = 1.0e-5;
+/// Density after grain, per sample. The clouds are the same draws, so only
+/// the Gaussian's `exp`, `sin`, and `cos` and the summation order differ.
+const GRAIN_TOLERANCE: f32 = 1.0e-3;
+/// The same, as an RMS over the frame: well under a thousandth of the grain.
+const GRAIN_RMS_TOLERANCE: f64 = 2.0e-5;
 /// Display-linear transmission from print/scan, relative to the value.
 const PRINT_TOLERANCE: f32 = 1.0e-4;
 /// Encoded sRGB in `0..=1`.
@@ -55,17 +60,11 @@ fn stock(name: &str) -> Parameters {
     Stock::load(path).expect("stock loads").into_parameters()
 }
 
-/// `name` without grain, the stage the GPU does not run yet.
-fn grainless(name: &str) -> Parameters {
-    let mut parameters = stock(name);
-    parameters.set_grain(None).unwrap();
-    parameters
-}
-
 /// `name` without halation or grain, for the per-pixel stage tests.
 fn bare(name: &str) -> Parameters {
-    let mut parameters = grainless(name);
+    let mut parameters = stock(name);
     parameters.set_halation(None).unwrap();
+    parameters.set_grain(None).unwrap();
     parameters
 }
 
@@ -161,7 +160,7 @@ fn exposure_matches_bit_for_bit() {
     let Some(gpu) = gpu() else { return };
     let mut parameters = stock("velvia");
     parameters.set_exposure_ev(1.37).unwrap();
-    let pipeline = GpuPipeline::new(gpu, &parameters).unwrap();
+    let pipeline = GpuPipeline::new(gpu, &parameters);
     let input = scene_samples(4096);
     let cpu =
         crate::render::exposure_buffer(&input, parameters.exposure_ev(), &mut NopControl).unwrap();
@@ -175,7 +174,7 @@ fn parametric_density_matches_with_and_without_coupling() {
     // Velvia has a coupling matrix. Neutral does not.
     for name in ["velvia", "neutral"] {
         let parameters = stock(name);
-        let pipeline = GpuPipeline::new(gpu, &parameters).unwrap();
+        let pipeline = GpuPipeline::new(gpu, &parameters);
         let input = scene_samples(65_536);
         let cpu = parameters.film().density(&input);
         let gpu = pollster::block_on(pipeline.run(&[Kernel::DensityParametric], &input)).unwrap();
@@ -189,7 +188,7 @@ fn parametric_density_matches_with_and_without_coupling() {
 fn spectral_density_matches() {
     let Some(gpu) = gpu() else { return };
     let parameters = bare("portra400");
-    let pipeline = GpuPipeline::new(gpu, &parameters).unwrap();
+    let pipeline = GpuPipeline::new(gpu, &parameters);
     let mut input = scene_samples(65_536);
     // Neutrals take the flat-spectrum branch; values above 1 take the
     // scale extension.
@@ -205,7 +204,7 @@ fn spectral_density_matches() {
 fn dye_scan_matches() {
     let Some(gpu) = gpu() else { return };
     let parameters = bare("portra400");
-    let pipeline = GpuPipeline::new(gpu, &parameters).unwrap();
+    let pipeline = GpuPipeline::new(gpu, &parameters);
     let density: Vec<f32> = (0..65_536 * 3)
         .map(|index| -0.2 + 3.5 * unit(index, 13))
         .collect();
@@ -229,16 +228,115 @@ fn halation_matches() {
         .unwrap();
     let image = highlights(301, 197);
     let halation = parameters.halation().unwrap().clone();
-    let pipeline = GpuPipeline::new(gpu, &parameters).unwrap();
+    let pipeline = GpuPipeline::new(gpu, &parameters);
     // Below half a pixel there is no blur, only the add-back. Then the
     // stock's own sigma, and a radius wider than the frame.
     for sigma in [0.3, halation.sigma_px(301, 197), 150.0] {
         let cpu = cpu_halation(&parameters, &image, sigma);
-        let gpu =
-            pollster::block_on(pipeline.run_with_halation(&halation, sigma, &image, &[])).unwrap();
+        let stages = Stages {
+            pre: &[Kernel::Exposure],
+            halation: Some((&halation, sigma)),
+            mid: &[],
+            grain: None,
+            post: &[],
+        };
+        let gpu = pollster::block_on(pipeline.run_frame(image.pixels(), 301, 197, stages)).unwrap();
         assert_close(&format!("halation sigma {sigma}"), &cpu, &gpu, |value| {
             HALATION_TOLERANCE * value.abs().max(1.0)
         });
+    }
+}
+
+/// Grain on its own: density in, density with grain out.
+fn grain_case(gpu: &Gpu, grain: &Grain, region: GrainRegion) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let pixels = region.width * region.height;
+    let density: Vec<f32> = (0..pixels * 3)
+        .map(|index| {
+            let pixel = index / 3;
+            let x = (pixel % region.width) as f32 / region.width as f32;
+            let y = (pixel / region.width) as f32 / region.height as f32;
+            0.2 + 2.3 * (0.5 * x + 0.5 * y) + 0.05 * (index % 3) as f32
+        })
+        .collect();
+    let mut cpu = density.clone();
+    grain
+        .apply_region(&mut cpu, region, &mut NopControl)
+        .unwrap();
+    let pipeline = GpuPipeline::new(gpu, &bare("portra400"));
+    let stages = Stages {
+        pre: &[],
+        halation: None,
+        mid: &[],
+        grain: Some((grain, region)),
+        post: &[],
+    };
+    let gpu = pollster::block_on(pipeline.run_frame(&density, region.width, region.height, stages))
+        .unwrap();
+    (density, cpu, gpu)
+}
+
+#[test]
+fn grain_matches() {
+    let Some(gpu) = gpu() else { return };
+    let grain = stock("portra400").grain().unwrap().clone();
+    let cases = [
+        // A coarse preview: every cloud is smaller than a pixel.
+        (
+            "preview",
+            GrainRegion {
+                width: 384,
+                height: 256,
+                origin_x: 0,
+                origin_y: 0,
+                frame_width: 384,
+            },
+        ),
+        // Between: fine clouds deposit, coarse ones are Gaussian stamps.
+        (
+            "mixed",
+            GrainRegion {
+                width: 200,
+                height: 120,
+                origin_x: 900,
+                origin_y: 600,
+                frame_width: 2000,
+            },
+        ),
+        // A 100% crop of a 24 MP frame: resolved clouds and the scanner blur.
+        (
+            "full",
+            GrainRegion {
+                width: 160,
+                height: 96,
+                origin_x: 2400,
+                origin_y: 1500,
+                frame_width: 6000,
+            },
+        ),
+    ];
+    for (label, region) in cases {
+        let (density, cpu, gpu) = grain_case(gpu, &grain, region);
+        let mut worst = 0.0f32;
+        let mut energy = 0.0f64;
+        let mut error = 0.0f64;
+        for ((input, expected), actual) in density.iter().zip(&cpu).zip(&gpu) {
+            let delta = expected - input;
+            energy += f64::from(delta * delta);
+            let miss = (expected - actual).abs();
+            error += f64::from(miss * miss);
+            worst = worst.max(miss);
+        }
+        let rms = (energy / cpu.len() as f64).sqrt();
+        let error_rms = (error / cpu.len() as f64).sqrt();
+        eprintln!(
+            "grain {label}: grain rms {rms:.3e}, error rms {error_rms:.3e}, worst {worst:.3e}"
+        );
+        assert!(rms > 1.0e-4, "{label}: no grain on the CPU");
+        assert!(worst <= GRAIN_TOLERANCE, "{label}: worst {worst}");
+        assert!(
+            error_rms <= GRAIN_RMS_TOLERANCE,
+            "{label}: error rms {error_rms}"
+        );
     }
 }
 
@@ -246,7 +344,7 @@ fn halation_matches() {
 fn print_scan_matches() {
     let Some(gpu) = gpu() else { return };
     let parameters = stock("velvia");
-    let pipeline = GpuPipeline::new(gpu, &parameters).unwrap();
+    let pipeline = GpuPipeline::new(gpu, &parameters);
     let density: Vec<f32> = (0..65_536 * 3)
         .map(|index| -0.5 + 4.0 * unit(index, 7))
         .collect();
@@ -260,7 +358,7 @@ fn print_scan_matches() {
 #[test]
 fn encode_matches() {
     let Some(gpu) = gpu() else { return };
-    let pipeline = GpuPipeline::new(gpu, &stock("neutral")).unwrap();
+    let pipeline = GpuPipeline::new(gpu, &stock("neutral"));
     let mut linear: Vec<f32> = (0..65_536 * 3)
         .map(|index| -0.25 + 1.75 * unit(index, 11))
         .collect();
@@ -317,11 +415,10 @@ fn develop_matches_the_cpu_pipeline() {
     }
     let image = LinearImage::new(width as u32, height as u32, pixels).unwrap();
     for name in ["velvia", "neutral", "portra400"] {
-        let mut parameters = grainless(name);
+        let mut parameters = stock(name);
         parameters.set_exposure_ev(0.4).unwrap();
         let cpu = Pipeline::new(parameters.clone()).develop(&image);
         let developed = GpuPipeline::new(gpu, &parameters)
-            .unwrap()
             .develop_blocking(&image)
             .unwrap();
         assert_eq!(developed.fidelity(), Fidelity::Exact);
@@ -349,36 +446,19 @@ fn chunks_do_not_change_the_result() {
     let input = scene_samples(1000);
     for name in ["velvia", "portra400"] {
         let parameters = bare(name);
-        let whole = GpuPipeline::new(gpu, &parameters).unwrap();
-        let chunked = GpuPipeline::new(&gpu.with_chunk_limit(7), &parameters).unwrap();
+        let whole = GpuPipeline::new(gpu, &parameters);
+        let chunked = GpuPipeline::new(&gpu.with_chunk_limit(7), &parameters);
         let expected = pollster::block_on(whole.run(&whole.sequence, &input)).unwrap();
         let actual = pollster::block_on(chunked.run(&chunked.sequence, &input)).unwrap();
         assert_eq!(expected, actual, "{name}");
     }
-    // Halation reads across chunk borders.
-    let parameters = grainless("portra400");
+    // Halation and grain read across chunk borders.
+    let parameters = stock("portra400");
     let image = highlights(97, 61);
-    let whole = GpuPipeline::new(gpu, &parameters).unwrap();
-    let chunked = GpuPipeline::new(&gpu.with_chunk_limit(500), &parameters).unwrap();
+    let whole = GpuPipeline::new(gpu, &parameters);
+    let chunked = GpuPipeline::new(&gpu.with_chunk_limit(500), &parameters);
     assert_eq!(
         whole.develop_blocking(&image).unwrap().pixels(),
         chunked.develop_blocking(&image).unwrap().pixels(),
     );
-}
-
-#[test]
-fn unported_stages_are_refused() {
-    let Some(gpu) = gpu() else { return };
-    // Portra carries grain.
-    assert!(matches!(
-        GpuPipeline::new(gpu, &stock("portra400")),
-        Err(GpuError::Unsupported(Stage::Grain))
-    ));
-    let layer = Granularity::new([(0.0, 4.0), (3.0, 4.0)]).unwrap();
-    let grain = Grain::new(Grain::FRAME_MM, 1, [layer.clone(), layer.clone(), layer]).unwrap();
-    let grained = stock("velvia").with_grain(grain);
-    assert!(matches!(
-        GpuPipeline::new(gpu, &grained),
-        Err(GpuError::Unsupported(Stage::Grain))
-    ));
 }
