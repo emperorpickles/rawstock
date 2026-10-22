@@ -10,7 +10,7 @@ Phase 4 in [PLAN](PLAN.md). The film pipeline also runs on wgpu, in
 | Stage | GPU | Slice |
 | --- | --- | --- |
 | Exposure | yes | 1 |
-| Halation | not yet | 3 |
+| Halation | yes | 3 |
 | Parametric density (curves, coupling) | yes | 1 |
 | Spectral density | yes | 2 |
 | Grain | not yet | 4 |
@@ -33,11 +33,23 @@ exists only because that integral is slow on the CPU.
   stage. Each names the CPU function it mirrors. Spectral stocks upload
   their wavelength tables. The 9.4 MB Jakob-Hanika coefficient table is
   uploaded once per device, on the first spectral stock.
+- `crates/rawstock-core/src/gpu/halation.wgsl`: threshold, the three Kovesi
+  box passes, and the add-back.
 - `crates/rawstock-core/src/gpu/tests.rs`: the parity tests.
 
 Buffers use the CPU layout: interleaved RGB, one `f32` per sample. A frame
 larger than one storage binding is split into chunks. Per-pixel stages do not
 read neighbors, so chunks cannot change the result. A test checks this.
+
+Halation does read neighbors. Every chunk stays on the GPU through
+exposure. The excess goes into one full-frame plane, one `f32` per pixel,
+which is blurred and then added back to each chunk before the film model.
+That plane must fit one storage binding: about 268 megapixels at the 1 GiB
+cap. A larger frame gets `GpuError::FrameTooLarge`.
+
+The CPU box blur slides an `f64` running sum along each row. The GPU sums
+each output's window directly in `f32`, one thread per sample, so no error
+builds up along a row. Out-of-frame taps repeat the edge, as on the CPU.
 
 Setup and readback are async because WebGPU in a browser cannot block.
 `Gpu::new_blocking` and `GpuPipeline::develop_blocking` wrap them for native
@@ -53,9 +65,10 @@ part of a curve.
 | Exposure | bit for bit | 0 |
 | Density, parametric and spectral | 2e-5 density | 5e-7 |
 | Dye scan | 5e-5 density, relative above 1 | 8.4e-5 at density 4.6 |
+| Halation | 1e-5 scene-linear, relative above 1 | 6.6e-7 relative |
 | Print/scan | 1e-4 relative transmission | 2e-7 |
 | Encode | 2e-5, encoded `0..=1` | 1.3e-6 |
-| Full develop | 8-bit codes: none off by more than 1, at most 0.1% off by 1 | Velvia 3, Neutral 4, Portra 7, of 393,216 off by 1 |
+| Full develop | 8-bit codes: none off by more than 1, at most 0.1% off by 1 | Velvia 3, Neutral 4, Portra 6 (with halation), of 393,216 off by 1 |
 
 Exposure matches bit for bit because the CPU computes `2^ev` once and the
 shader multiplies by that same `f32`. WGSL requires multiplication to be
