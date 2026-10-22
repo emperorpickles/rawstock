@@ -25,8 +25,10 @@ use crate::spectrum::{self, Observer};
 /// A monotone D-logH characteristic curve.
 ///
 /// Points are `(log10(exposure), density)`. Log-exposure must strictly
-/// increase and density must not decrease. Evaluation clamps to the end
-/// densities outside the first and last points.
+/// increase. Density must not decrease for a negative or print curve
+/// ([`Curve::new`]), and must not increase for a reversal layer
+/// ([`Curve::falling`]). Evaluation clamps to the end densities outside the
+/// first and last points.
 #[derive(Debug, Clone)]
 pub struct Curve {
     log_h: Vec<f32>,
@@ -52,6 +54,10 @@ pub struct Parametric {
 /// is the spectral density of one unit of that layer's characteristic
 /// density. The print stage integrates `10` to the power of minus the summed
 /// dye density against a D65 / CIE 1931 observer.
+///
+/// Falling curves make a reversal (slide) film. The dyes are then the image,
+/// so the scan hands the print stage the negated slide density and the
+/// usual inversion views the slide directly.
 #[derive(Debug, Clone)]
 pub struct Spectral {
     wavelengths: Vec<f32>,
@@ -66,6 +72,27 @@ pub struct Spectral {
     reference_log_exposure: Option<f32>,
     curves: [Curve; 3],
     coupling: Option<[[f32; 3]; 3]>,
+    process: Process,
+}
+
+/// How a film is processed, which decides how its density is viewed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Process {
+    /// Density rises with exposure. The print stage inverts it.
+    #[default]
+    Negative,
+    /// Slide film. Density falls with exposure and the dyes are the image.
+    Reversal,
+}
+
+impl fmt::Display for Process {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Negative => "negative",
+            Self::Reversal => "reversal",
+        })
+    }
 }
 
 /// Maps scene-linear exposure to per-layer density.
@@ -157,6 +184,22 @@ pub enum ModelError {
     /// The wavelength grid missed the visible observer, so dye density cannot be scanned.
     #[error("wavelength grid does not meet the visible scan observer")]
     Observer,
+
+    /// A density sample was higher than the one before it on a reversal curve.
+    #[error("reversal characteristic curve density must not increase")]
+    ReversalDensityOrder,
+
+    /// A reversal stock had no dye curves to view.
+    #[error("a reversal stock needs dye density curves")]
+    ReversalWithoutDye,
+
+    /// Falling curves were used where only a negative or print curve fits.
+    #[error("falling curves are only valid for the layers of a spectral reversal stock")]
+    ReversalCurve,
+
+    /// A spectral stock's layer curves did not all rise or all fall.
+    #[error("characteristic curves must all rise (negative) or all fall (reversal)")]
+    MixedProcess,
 }
 
 /// Exposures at or below this are lifted before `log10`.
@@ -167,7 +210,26 @@ const EXPOSURE_FLOOR: f32 = 1.0e-6;
 
 impl Curve {
     /// Build a curve from `(log10(exposure), density)` points, in order.
+    ///
+    /// Density must not decrease: a negative layer or a print curve.
     pub fn new(points: impl IntoIterator<Item = (f32, f32)>) -> Result<Self, ModelError> {
+        Self::build(points, Process::Negative)
+    }
+
+    /// Build a reversal layer curve. Density must not increase.
+    pub fn falling(points: impl IntoIterator<Item = (f32, f32)>) -> Result<Self, ModelError> {
+        Self::build(points, Process::Reversal)
+    }
+
+    /// The last density is below the first, so this is a reversal layer.
+    pub fn falls(&self) -> bool {
+        self.density[self.density.len() - 1] < self.density[0]
+    }
+
+    fn build(
+        points: impl IntoIterator<Item = (f32, f32)>,
+        process: Process,
+    ) -> Result<Self, ModelError> {
         let mut log_h = Vec::new();
         let mut density = Vec::new();
         for (exposure, value) in points {
@@ -178,8 +240,13 @@ impl Curve {
                 if exposure <= previous {
                     return Err(ModelError::LogExposureOrder);
                 }
-                if value < density[density.len() - 1] {
-                    return Err(ModelError::DensityOrder);
+                let last = density[density.len() - 1];
+                match process {
+                    Process::Negative if value < last => return Err(ModelError::DensityOrder),
+                    Process::Reversal if value > last => {
+                        return Err(ModelError::ReversalDensityOrder);
+                    }
+                    _ => {}
                 }
             }
             log_h.push(exposure);
@@ -221,7 +288,11 @@ impl Parametric {
     /// `curves` are red, green, and blue, in that order.
     ///
     /// `coupling` is row-major and multiplies the log-exposure column vector.
+    /// Every curve must rise: a parametric stock is a negative.
     pub fn new(curves: [Curve; 3], coupling: Option<[[f32; 3]; 3]>) -> Result<Self, ModelError> {
+        if curves.iter().any(Curve::falls) {
+            return Err(ModelError::ReversalCurve);
+        }
         if let Some(matrix) = coupling
             && matrix.iter().flatten().any(|entry| !entry.is_finite())
         {
@@ -277,6 +348,9 @@ impl Spectral {
     /// trapezoidal rule on `wavelengths`. `dye_density` uses the same grid
     /// and the same channel order. `reference_log_exposure`, when dye curves
     /// are present, is the log exposure the print balances to neutral.
+    ///
+    /// Curves all rise for a negative or all fall for a reversal film, see
+    /// [`Self::process`]. A reversal film needs dye curves.
     pub fn new(
         wavelengths: Vec<f32>,
         sensitivity: [Vec<f32>; 3],
@@ -311,6 +385,19 @@ impl Spectral {
                 {
                     return Err(ModelError::DyeDensity);
                 }
+            }
+        }
+        let process = if curves.iter().any(Curve::falls) {
+            Process::Reversal
+        } else {
+            Process::Negative
+        };
+        if process == Process::Reversal {
+            if !curves.iter().all(Curve::falls) {
+                return Err(ModelError::MixedProcess);
+            }
+            if dye_density.is_none() {
+                return Err(ModelError::ReversalWithoutDye);
             }
         }
         if let Some(exposure) = reference_log_exposure {
@@ -349,6 +436,7 @@ impl Spectral {
             reference_log_exposure,
             curves,
             coupling,
+            process,
         };
         if let Some(log_h) = reference_log_exposure {
             let density = [
@@ -391,6 +479,11 @@ impl Spectral {
     /// Log exposure the spectral print balances to a neutral, when set.
     pub fn reference_log_exposure(&self) -> Option<f32> {
         self.reference_log_exposure
+    }
+
+    /// Negative or reversal, from the direction of the curves.
+    pub fn process(&self) -> Process {
+        self.process
     }
 
     /// Dye curves multiplied by `scales`, with the scan balance recomputed.
@@ -495,11 +588,7 @@ impl Spectral {
                 let scanned = observer
                     .apply(&transmittance)
                     .map(|channel| -channel.max(EXPOSURE_FLOOR).log10());
-                printed.extend([
-                    scanned[0] - self.scan_balance[0],
-                    scanned[1] - self.scan_balance[1],
-                    scanned[2] - self.scan_balance[2],
-                ]);
+                printed.extend(self.printing(scanned));
             }
             control.on_progress(crate::render::Stage::DyeScan, y as u32 + 1, rows);
         }
@@ -521,11 +610,24 @@ impl Spectral {
         let scanned = observer
             .apply(transmittance)
             .map(|channel| -channel.max(EXPOSURE_FLOOR).log10());
-        Some([
+        Some(self.printing(scanned))
+    }
+
+    /// Balanced scan density in the form the print stage inverts.
+    ///
+    /// A negative passes through. A slide is negated: the print stage turns
+    /// `print_exposure - density` into light, so `print_exposure + slide
+    /// density` views the slide itself, denser and darker.
+    fn printing(&self, scanned: [f32; 3]) -> [f32; 3] {
+        let balanced = [
             scanned[0] - self.scan_balance[0],
             scanned[1] - self.scan_balance[1],
             scanned[2] - self.scan_balance[2],
-        ])
+        ];
+        match self.process {
+            Process::Negative => balanced,
+            Process::Reversal => balanced.map(|channel| -channel),
+        }
     }
 
     /// Density of a neutral filter with the same ACEScg transmittance.
@@ -1447,6 +1549,9 @@ struct StockFile {
     /// Log exposure the spectral print balances to neutral.
     #[serde(default, deserialize_with = "de_option_f32")]
     reference_log_exposure: Option<f32>,
+    /// `negative` (the default) or `reversal`. Spectral stocks only.
+    #[serde(default)]
+    process: Option<Process>,
 }
 
 /// Three sampled spectra on the stock's wavelength grid.
@@ -1650,10 +1755,11 @@ impl Stock {
         let name = require_text("name", &file.name)?.to_string();
         let source = require_text("source", &file.source)?.to_string();
         let license = require_text("license", &file.license)?.to_string();
-        let red = curve_from_samples("red", &file.red)?;
-        let green = curve_from_samples("green", &file.green)?;
-        let blue = curve_from_samples("blue", &file.blue)?;
-        let print = curve_from_samples("print", &file.print)?;
+        let process = file.process.unwrap_or_default();
+        let red = curve_from_samples("red", &file.red, process)?;
+        let green = curve_from_samples("green", &file.green, process)?;
+        let blue = curve_from_samples("blue", &file.blue, process)?;
+        let print = curve_from_samples("print", &file.print, Process::Negative)?;
         let coupling = file.coupling.as_ref().map(|coupling| coupling.matrix);
         let film = match file.model {
             StockModel::Parametric => {
@@ -1722,7 +1828,11 @@ fn require_text<'a>(field: &'static str, value: &'a str) -> Result<&'a str, Stoc
     }
 }
 
-fn curve_from_samples(curve: &'static str, samples: &CurveSamples) -> Result<Curve, StockError> {
+fn curve_from_samples(
+    curve: &'static str,
+    samples: &CurveSamples,
+    process: Process,
+) -> Result<Curve, StockError> {
     if samples.log_exposure.len() != samples.density.len() {
         return Err(StockError::ArrayLength {
             curve,
@@ -1735,7 +1845,11 @@ fn curve_from_samples(curve: &'static str, samples: &CurveSamples) -> Result<Cur
         .iter()
         .copied()
         .zip(samples.density.iter().copied());
-    Curve::new(points).map_err(|source| StockError::Curve { curve, source })
+    match process {
+        Process::Negative => Curve::new(points),
+        Process::Reversal => Curve::falling(points),
+    }
+    .map_err(|source| StockError::Curve { curve, source })
 }
 
 fn grain_from_samples(samples: GrainSamples) -> Result<Grain, StockError> {
@@ -1901,6 +2015,9 @@ fn reject_spectral_fields(file: &StockFile) -> Result<(), StockError> {
         return Err(StockError::NotParametric {
             field: "reference_log_exposure",
         });
+    }
+    if file.process.is_some() {
+        return Err(StockError::NotParametric { field: "process" });
     }
     Ok(())
 }
@@ -2072,6 +2189,9 @@ impl StockText {
         text.key_float("exposure_ev", stock.parameters.exposure_ev());
         text.key_float("print_exposure", stock.parameters.print_exposure());
         if let FilmModel::Spectral(model) = stock.parameters.film() {
+            if model.process() == Process::Reversal {
+                text.key_raw("process", &model.process().to_string());
+            }
             if let Some(reference) = model.reference_log_exposure() {
                 text.key_float("reference_log_exposure", reference);
             }
@@ -2417,6 +2537,122 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, ModelError::Sensitivity));
+    }
+
+    fn falling_curve() -> Curve {
+        Curve::falling([
+            (-3.0, 3.2),
+            (-1.5, 2.0),
+            (-0.5, 0.9),
+            (0.5, 0.2),
+            (1.0, 0.15),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn falling_curves_are_only_reversal_layers() {
+        let curve = falling_curve();
+        assert!(curve.falls());
+        assert!(!sample_curve().falls());
+        assert!(curve.eval(-1.0) > curve.eval(0.0));
+        let err = Curve::falling([(0.0, 0.5), (1.0, 1.0)]).unwrap_err();
+        assert!(matches!(err, ModelError::ReversalDensityOrder));
+
+        let err = Parametric::new([curve.clone(), curve.clone(), curve.clone()], None).unwrap_err();
+        assert!(matches!(err, ModelError::ReversalCurve));
+        let parametric = FilmModel::Parametric(
+            Parametric::new([sample_curve(), sample_curve(), sample_curve()], None).unwrap(),
+        );
+        let err = Parameters::new(0.0, parametric.clone(), 0.0, curve.clone()).unwrap_err();
+        assert!(matches!(err, ModelError::ReversalCurve));
+        let mut parameters = Parameters::new(0.0, parametric, 0.0, sample_curve()).unwrap();
+        let err = parameters.set_print_curve(curve).unwrap_err();
+        assert!(matches!(err, ModelError::ReversalCurve));
+    }
+
+    #[test]
+    fn reversal_needs_dyes_and_all_layers_falling() {
+        let wavelengths: Vec<f32> = (0..41).map(|index| 380.0 + index as f32 * 10.0).collect();
+        let flat = flat_sensitivity(&wavelengths);
+        let dyes = vec![1.0 / 3.0; wavelengths.len()];
+        let falling = falling_curve();
+        let err = Spectral::new(
+            wavelengths.clone(),
+            [flat.clone(), flat.clone(), flat.clone()],
+            None,
+            [falling.clone(), falling.clone(), falling.clone()],
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ModelError::ReversalWithoutDye));
+        let err = Spectral::new(
+            wavelengths.clone(),
+            [flat.clone(), flat.clone(), flat.clone()],
+            Some([dyes.clone(), dyes.clone(), dyes.clone()]),
+            [falling.clone(), sample_curve(), falling.clone()],
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ModelError::MixedProcess));
+        let negative = Spectral::new(
+            wavelengths,
+            [flat.clone(), flat.clone(), flat],
+            Some([dyes.clone(), dyes.clone(), dyes]),
+            [sample_curve(), sample_curve(), sample_curve()],
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(negative.process(), Process::Negative);
+    }
+
+    #[test]
+    fn reversal_scan_views_the_slide() {
+        use crate::color::LinearImage;
+        use crate::render::Pipeline;
+
+        let wavelengths: Vec<f32> = (0..41).map(|index| 380.0 + index as f32 * 10.0).collect();
+        let flat = flat_sensitivity(&wavelengths);
+        // Three neutral dyes that sum to a flat unit density.
+        let dyes = vec![1.0 / 3.0; wavelengths.len()];
+        let falling = falling_curve();
+        let model = Spectral::new(
+            wavelengths,
+            [flat.clone(), flat.clone(), flat],
+            Some([dyes.clone(), dyes.clone(), dyes]),
+            [falling.clone(), falling.clone(), falling.clone()],
+            None,
+            Some(-0.5),
+        )
+        .unwrap();
+        assert_eq!(model.process(), Process::Reversal);
+        let film = FilmModel::Spectral(Box::new(model));
+        // The print stage inverts, so the slide reaches it negated.
+        let printed = film.printing_density(&[1.2, 1.2, 1.2]).unwrap();
+        for channel in &printed {
+            assert!((channel + 1.2).abs() < 1.0e-3, "{printed:?}");
+        }
+        // Through an identity print curve the output is the slide's own
+        // transmittance, so more light develops brighter.
+        let identity = Curve::new([(-4.0, -4.0), (4.0, 4.0)]).unwrap();
+        let pipeline = Pipeline::new(Parameters::new(0.0, film, 0.0, identity).unwrap());
+        let levels = [0.01_f32, 0.1, 1.0];
+        let mut pixels = Vec::new();
+        for gray in levels {
+            pixels.extend([gray, gray, gray]);
+        }
+        let image = LinearImage::new(levels.len() as u32, 1, pixels).unwrap();
+        let developed = pipeline.develop(&image);
+        let pixels = developed.pixels();
+        assert!(pixels[0] < pixels[3] && pixels[3] < pixels[6], "{pixels:?}");
+        let expected = crate::color::encode_srgb(&[10f32.powf(-falling.eval(-1.0)); 3]);
+        assert!(
+            (pixels[3] - expected[0]).abs() < 1.0e-3,
+            "{pixels:?} vs {expected:?}"
+        );
     }
 
     #[test]

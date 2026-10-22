@@ -388,8 +388,13 @@ fn frame_of(session: &PreviewSession) -> LinearImage {
 }
 
 #[test]
-fn neutral_round_trips_and_portra_round_trips() {
-    for name in ["neutral.stock.toml", "portra400.stock.toml"] {
+fn shipped_stocks_round_trip() {
+    for name in [
+        "neutral.stock.toml",
+        "portra400.stock.toml",
+        "velvia.stock.toml",
+        "velvia50-spectral.stock.toml",
+    ] {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../../stocks/{name}"));
         let stock = Stock::load(&path).unwrap();
         let text = stock.to_toml();

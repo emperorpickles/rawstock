@@ -56,6 +56,8 @@ export type ControlEdit =
 
 export type RenderView =
   | { kind: "fit"; longEdge: number }
+  /** Exact full frame. Pan and zoom stay in the window. */
+  | { kind: "full" }
   | {
       kind: "hundred";
       x: number;

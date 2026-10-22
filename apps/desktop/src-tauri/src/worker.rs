@@ -588,6 +588,14 @@ impl Studio {
                     Ok(session.render_proxy(progress)?)
                 }
             }
+            RenderView::Full => {
+                let session = self.require_ready()?;
+                if compare {
+                    Ok(session.render_baseline_full(progress)?)
+                } else {
+                    Ok(session.render_full(progress)?)
+                }
+            }
             RenderView::Hundred {
                 x,
                 y,
