@@ -1,0 +1,49 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "rawstock",
+  "version": "0.0.1",
+  "identifier": "dev.rawstock.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1430",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "rawstock",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 960,
+        "minHeight": 640,
+        "backgroundColor": "#141414"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico"],
+    "fileAssociations": [
+      {
+        "ext": ["raf"],
+        "name": "Fujifilm RAF",
+        "description": "Fujifilm RAW",
+        "mimeType": "image/x-fuji-raf",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["dng"],
+        "name": "Digital Negative",
+        "description": "Adobe Digital Negative",
+        "mimeType": "image/x-adobe-dng",
+        "role": "Viewer"
+      }
+    ]
+  }
+}

@@ -23,6 +23,7 @@ jobs:
           cache-dependency-path: |
             apps/ui/package-lock.json
             apps/desktop/package-lock.json
+            apps/rawstock/package-lock.json
       - name: system libraries
         run: |
           sudo apt-get update
@@ -43,6 +44,9 @@ jobs:
       - name: install the desktop CLI
         working-directory: apps/desktop
         run: npm ci
+      - name: check and build the rawstock app
+        working-directory: apps/rawstock
+        run: npm ci && npm run check && npm run build
       - name: cargo fmt
         run: cargo fmt --all -- --check
       - name: cargo clippy

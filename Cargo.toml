@@ -4,6 +4,7 @@ members = [
     "crates/rawstock-core",
     "crates/rawstock-cli",
     "apps/desktop/src-tauri",
+    "apps/rawstock/src-tauri",
 ]
 
 [workspace.package]
