@@ -1176,6 +1176,7 @@ fn crop_buffer(
 
 #[derive(Clone, PartialEq, Eq)]
 struct DyeKey {
+    process: crate::stock::Process,
     reference: Option<u32>,
     samples: Vec<u32>,
 }
@@ -1191,6 +1192,7 @@ impl DyeKey {
             samples.extend(layer.iter().map(|sample| sample.to_bits()));
         }
         Some(Self {
+            process: model.process(),
             reference: model.reference_log_exposure().map(f32::to_bits),
             samples,
         })
