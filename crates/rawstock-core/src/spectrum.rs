@@ -49,6 +49,12 @@ impl Observer {
         project_rows(wavelengths, &CIE_D65, matrix)
     }
 
+    /// Weights per channel, the trapezoid and white already folded in.
+    #[cfg(feature = "gpu")]
+    pub(crate) fn rows(&self) -> &[Vec<f32>; 3] {
+        &self.rows
+    }
+
     /// ACEScg channels of a transmittance sampled on this observer's grid.
     pub(crate) fn apply(&self, transmittance: &[f32]) -> [f32; 3] {
         let mut rgb = [0.0f32; 3];
@@ -244,6 +250,16 @@ fn upsample(rgb: [f32; 3]) -> Upsample {
 fn eval(coeff: [f32; COEFFS], lambda: f32) -> f32 {
     let polynomial = (coeff[0] * lambda + coeff[1]) * lambda + coeff[2];
     0.5 * polynomial / (polynomial * polynomial + 1.0).sqrt() + 0.5
+}
+
+/// The upsampling table and the AP1 → AP0 matrix, for the GPU.
+///
+/// Returns the cube resolution, the z scale, and the coefficients, in the
+/// layout [`Rgb2Spec::fetch`] reads.
+#[cfg(feature = "gpu")]
+pub(crate) fn gpu_upsample() -> (u32, &'static [f32], &'static [f32], [[f32; 3]; 3]) {
+    let table = table();
+    (table.res as u32, &table.scale, &table.data, ap1_to_ap0())
 }
 
 fn ap1_to_ap0() -> [[f32; 3]; 3] {

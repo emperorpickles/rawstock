@@ -15,6 +15,10 @@ use crate::stock::{Grain, Granularity, Stock};
 const EXPOSURE_TOLERANCE: f32 = 0.0;
 /// Density, after log10 and the D-logH curve.
 const DENSITY_TOLERANCE: f32 = 2.0e-5;
+/// Scanned printing density, after 41 transmittances and a log10. Relative
+/// above a density of 1: a dense patch sums tiny transmittances against an
+/// observer with negative lobes, so the sum cancels.
+const DYE_SCAN_TOLERANCE: f32 = 5.0e-5;
 /// Display-linear transmission from print/scan, relative to the value.
 const PRINT_TOLERANCE: f32 = 1.0e-4;
 /// Encoded sRGB in `0..=1`.
@@ -46,6 +50,14 @@ fn stock(name: &str) -> Parameters {
         .join("../../stocks")
         .join(format!("{name}.stock.toml"));
     Stock::load(path).expect("stock loads").into_parameters()
+}
+
+/// `name` without halation or grain, the stages the GPU does not run yet.
+fn bare(name: &str) -> Parameters {
+    let mut parameters = stock(name);
+    parameters.set_halation(None).unwrap();
+    parameters.set_grain(None).unwrap();
+    parameters
 }
 
 /// A hash in `0..1`, so the inputs are the same on every run.
@@ -84,7 +96,10 @@ fn assert_close(stage: &str, cpu: &[f32], gpu: &[f32], tolerance: impl Fn(f32) -
             worst = (error, index);
         }
     }
-    eprintln!("{stage}: worst error {} at sample {}", worst.0, worst.1);
+    eprintln!(
+        "{stage}: worst error {} at sample {} (cpu {})",
+        worst.0, worst.1, cpu[worst.1]
+    );
 }
 
 fn cpu_print(parameters: &Parameters, density: &[f32]) -> Vec<f32> {
@@ -124,6 +139,40 @@ fn parametric_density_matches_with_and_without_coupling() {
             DENSITY_TOLERANCE
         });
     }
+}
+
+#[test]
+fn spectral_density_matches() {
+    let Some(gpu) = gpu() else { return };
+    let parameters = bare("portra400");
+    let pipeline = GpuPipeline::new(gpu, &parameters).unwrap();
+    let mut input = scene_samples(65_536);
+    // Neutrals take the flat-spectrum branch; values above 1 take the
+    // scale extension.
+    for gray in [0.0, 1.0e-3, 0.18, 1.0, 4.0] {
+        input.extend([gray, gray, gray]);
+    }
+    let cpu = parameters.film().density(&input);
+    let gpu = pollster::block_on(pipeline.run(&[Kernel::DensitySpectral], &input)).unwrap();
+    assert_close("portra density", &cpu, &gpu, |_| DENSITY_TOLERANCE);
+}
+
+#[test]
+fn dye_scan_matches() {
+    let Some(gpu) = gpu() else { return };
+    let parameters = bare("portra400");
+    let pipeline = GpuPipeline::new(gpu, &parameters).unwrap();
+    let density: Vec<f32> = (0..65_536 * 3)
+        .map(|index| -0.2 + 3.5 * unit(index, 13))
+        .collect();
+    let cpu = parameters
+        .film()
+        .printing_density(&density)
+        .expect("Portra has dye curves");
+    let gpu = pollster::block_on(pipeline.run(&[Kernel::DyeScan], &density)).unwrap();
+    assert_close("dye scan", &cpu, &gpu, |value| {
+        DYE_SCAN_TOLERANCE * value.abs().max(1.0)
+    });
 }
 
 #[test]
@@ -200,8 +249,8 @@ fn develop_matches_the_cpu_pipeline() {
         }
     }
     let image = LinearImage::new(width as u32, height as u32, pixels).unwrap();
-    for name in ["velvia", "neutral"] {
-        let mut parameters = stock(name);
+    for name in ["velvia", "neutral", "portra400"] {
+        let mut parameters = bare(name);
         parameters.set_exposure_ev(0.4).unwrap();
         let cpu = Pipeline::new(parameters.clone()).develop(&image);
         let developed = GpuPipeline::new(gpu, &parameters)
@@ -230,22 +279,24 @@ fn develop_matches_the_cpu_pipeline() {
 #[test]
 fn chunks_do_not_change_the_result() {
     let Some(gpu) = gpu() else { return };
-    let parameters = stock("velvia");
     let input = scene_samples(1000);
-    let whole = GpuPipeline::new(gpu, &parameters).unwrap();
-    let chunked = GpuPipeline::new(&gpu.with_chunk_limit(7), &parameters).unwrap();
-    let expected = pollster::block_on(whole.run(&Kernel::ALL, &input)).unwrap();
-    let actual = pollster::block_on(chunked.run(&Kernel::ALL, &input)).unwrap();
-    assert_eq!(expected, actual);
+    for name in ["velvia", "portra400"] {
+        let parameters = bare(name);
+        let whole = GpuPipeline::new(gpu, &parameters).unwrap();
+        let chunked = GpuPipeline::new(&gpu.with_chunk_limit(7), &parameters).unwrap();
+        let expected = pollster::block_on(whole.run(&whole.sequence, &input)).unwrap();
+        let actual = pollster::block_on(chunked.run(&chunked.sequence, &input)).unwrap();
+        assert_eq!(expected, actual, "{name}");
+    }
 }
 
 #[test]
 fn unported_stages_are_refused() {
     let Some(gpu) = gpu() else { return };
-    let spectral = stock("portra400");
+    // Portra carries halation and grain.
     assert!(matches!(
-        GpuPipeline::new(gpu, &spectral),
-        Err(GpuError::Unsupported(_))
+        GpuPipeline::new(gpu, &stock("portra400")),
+        Err(GpuError::Unsupported(Stage::Halation))
     ));
     let layer = Granularity::new([(0.0, 4.0), (3.0, 4.0)]).unwrap();
     let grain = Grain::new(Grain::FRAME_MM, 1, [layer.clone(), layer.clone(), layer]).unwrap();
