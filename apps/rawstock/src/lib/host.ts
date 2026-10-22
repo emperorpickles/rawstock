@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import { appError } from "./contract";
+import type { AppInfo } from "./help/report";
 import type {
   CacheEvictedEvent,
   CacheReadyEvent,
@@ -100,6 +101,10 @@ export class Host {
 
   async clearRecent(): Promise<void> {
     await this.invoke("clear_recent");
+  }
+
+  async appInfo(): Promise<AppInfo> {
+    return this.invoke("app_info");
   }
 
   async dispatchMenuAction(action: string): Promise<boolean> {

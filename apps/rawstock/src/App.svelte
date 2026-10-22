@@ -1,6 +1,6 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
-  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { onMount } from "svelte";
@@ -11,6 +11,10 @@
   import Filmstrip from "./lib/Filmstrip.svelte";
   import { FrameBuffer } from "./lib/frame";
   import type { PackedFrame } from "./lib/frame";
+  import About from "./lib/help/About.svelte";
+  import Licenses from "./lib/help/Licenses.svelte";
+  import { Report } from "./lib/help/report";
+  import type { AppInfo } from "./lib/help/report";
   import { Host } from "./lib/host";
   import { Shortcuts } from "./lib/shortcuts";
   import SidePanel from "./lib/SidePanel.svelte";
@@ -35,6 +39,7 @@
   let exportOpen = $state(false);
   let aboutOpen = $state(false);
   let licensesOpen = $state(false);
+  let appInfo = $state<AppInfo | null>(null);
   let quality = $state(90);
   let frame = $state<PackedFrame | null>(null);
   let frameMode = $state<"texture" | "region" | "empty">("empty");
@@ -44,15 +49,11 @@
   let cacheWidth = $state(0);
   let cacheHeight = $state(0);
   let exportDialog = $state<HTMLDialogElement | null>(null);
-  let aboutDialog = $state<HTMLDialogElement | null>(null);
-  let licensesDialog = $state<HTMLDialogElement | null>(null);
 
   const selectedImage = $derived(images.find((image) => image.imageId === selected) ?? null);
 
   $effect(() => {
     syncDialog(exportDialog, exportOpen);
-    syncDialog(aboutDialog, aboutOpen);
-    syncDialog(licensesDialog, licensesOpen);
   });
 
   function syncDialog(dialog: HTMLDialogElement | null, openDialog: boolean) {
@@ -157,6 +158,11 @@
         }),
       ]);
       cleanups.push(...unlisten);
+      try {
+        appInfo = await host.appInfo();
+      } catch (error) {
+        errors = [appError(error).message];
+      }
       try {
         stocks = await host.listStocks();
       } catch (error) {
@@ -290,8 +296,17 @@
         licensesOpen = true;
         break;
       case "report-issue":
-        if (host) {
-          await openUrl("https://github.com/emperorpickles/rawstock/issues/new");
+        if (host && appInfo) {
+          await openUrl(Report.issueUrl(appInfo));
+        }
+        break;
+      case "show-log":
+        if (host && appInfo) {
+          try {
+            await revealItemInDir(appInfo.logPath);
+          } catch {
+            errors = [`The log file could not be shown. It is at ${appInfo.logPath}`];
+          }
         }
         break;
       default:
@@ -447,23 +462,14 @@
   </div>
 </dialog>
 
-<dialog bind:this={aboutDialog} aria-labelledby="about-title" onclose={() => (aboutOpen = false)}>
-  <h2 id="about-title">About rawstock</h2>
-  <p>rawstock 0.0.1 develops RAW photos through film stocks. This window is the app shell.</p>
-  <p>Licensed under GPL-3.0-or-later.</p>
-  <div class="dialog-actions">
-    <button type="button" onclick={() => (aboutOpen = false)}>Close</button>
-  </div>
-</dialog>
+<About
+  open={aboutOpen}
+  info={appInfo}
+  onclose={() => (aboutOpen = false)}
+  onlicenses={() => {
+    aboutOpen = false;
+    licensesOpen = true;
+  }}
+/>
 
-<dialog bind:this={licensesDialog} aria-labelledby="licenses-title" onclose={() => (licensesOpen = false)}>
-  <h2 id="licenses-title">Licenses</h2>
-  <p>rawstock is free software under the GNU General Public License, version 3 or any later version. You can redistribute it and modify it under those terms. The full text ships with the source as LICENSE.</p>
-  <ul>
-    <li>rawler is LGPL-2.1-only.</li>
-    <li>Tauri, serde, toml, and the Svelte toolchain are MIT or Apache-2.0.</li>
-  </ul>
-  <div class="dialog-actions">
-    <button type="button" onclick={() => (licensesOpen = false)}>Close</button>
-  </div>
-</dialog>
+<Licenses open={licensesOpen} onclose={() => (licensesOpen = false)} />
