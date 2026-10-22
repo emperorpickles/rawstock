@@ -299,7 +299,8 @@ fn grain_matches() {
                 frame_width: 384,
             },
         ),
-        // Between: fine clouds deposit, coarse ones are Gaussian stamps.
+        // Between: fine clouds are drawn per pixel, coarse ones are Gaussian
+        // stamps.
         (
             "mixed",
             GrainRegion {

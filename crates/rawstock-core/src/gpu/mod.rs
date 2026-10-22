@@ -966,6 +966,9 @@ struct GrainParams {
 }
 
 /// The grain plan and its tables for one run.
+/// Words in one process record of the grain tables.
+const PROCESS_WORDS: usize = 16;
+
 struct GrainUpload {
     plan: crate::grain::GpuPlan,
     region: GrainRegion,
@@ -977,8 +980,21 @@ impl GrainUpload {
     fn new(gpu: &Inner, grain: &Grain, region: GrainRegion) -> Self {
         let plan = crate::grain::FilmGrain::new(grain.frame_mm(), grain.seed(), grain.size_mm())
             .gpu_plan(region.frame_width);
+        // Process records first, then each unresolved process's count table.
         let mut tables = Vec::new();
+        let mut cdf_offset = (plan.processes.len() * PROCESS_WORDS) as u32;
         for process in &plan.processes {
+            let (cdf_len, mass_mean, mass_spread) =
+                process
+                    .aggregate
+                    .as_ref()
+                    .map_or((0, 0.0, 0.0), |aggregate| {
+                        (
+                            aggregate.cdf.len() as u32,
+                            aggregate.mass_mean,
+                            aggregate.mass_spread,
+                        )
+                    });
             tables.extend([
                 process.cell_mm,
                 process.poisson_limit,
@@ -990,9 +1006,17 @@ impl GrainUpload {
                 f32::from_bits(process.seed),
                 f32::from_bits(process.layers),
                 f32::from_bits(u32::from(process.resolved)),
+                f32::from_bits(cdf_offset),
+                f32::from_bits(cdf_len),
+                mass_mean,
+                mass_spread,
                 0.0,
                 0.0,
             ]);
+            cdf_offset += cdf_len;
+        }
+        for aggregate in plan.processes.iter().filter_map(|p| p.aggregate.as_ref()) {
+            tables.extend_from_slice(&aggregate.cdf);
         }
         let kernel_offset = tables.len() as u32;
         tables.extend_from_slice(&plan.kernel);

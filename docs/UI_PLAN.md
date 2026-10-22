@@ -115,7 +115,8 @@ Grain is why 100% exists. `size_mm` is the primary dye-cloud sigma
 (Portra is 0.018, 0.013, and 0.010 mm). On the X-S10 those clouds are
 about 3.3, 2.4, and 1.8 pixels, and the shared field uses their geometric
 mean. On the 1440 proxy the same clouds are smaller than a pixel, so the
-fit view is for tone and color. The 100% view is for grain. The fit view
+proxy draws each pixel's summed grain directly, with the export's
+statistics but not its individual clouds. The fit view is for tone and color. The 100% view is for grain. The fit view
 says so on screen. The 48 µm aperture only sets amplitude (`rms / 1000`
 while that window covers at least one pixel). It is not a tile. The 720 px
 drag proxy puts that window just under one pixel, so amplitude there is a

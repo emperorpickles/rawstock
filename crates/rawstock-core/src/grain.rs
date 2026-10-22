@@ -11,6 +11,8 @@
 //! The implementation is original. It does not copy darktable, spektrafilm,
 //! or the Newson reference renderer.
 
+use rayon::prelude::*;
+
 use crate::render::{Cancelled, DevelopControl};
 
 /// Gaussian dye-cloud field for one frame.
@@ -60,7 +62,6 @@ impl FilmGrain {
         let mut field = vec![0.0_f64; padded_h * padded_w * 3];
         let target = Target {
             width: padded_w,
-            rows: padded_h,
             origin_x,
             origin_y,
             pitch,
@@ -136,6 +137,8 @@ pub(crate) struct GpuProcess {
     pub seed: u32,
     pub layers: u32,
     pub resolved: bool,
+    /// The per-pixel draw when the process is not resolved.
+    pub aggregate: Option<Aggregate>,
 }
 
 #[cfg(feature = "gpu")]
@@ -165,6 +168,7 @@ impl FilmGrain {
                 seed: self.seed.wrapping_add(process.salt),
                 layers: u32::from(process.layers),
                 resolved: splat.resolved,
+                aggregate: (!splat.resolved).then(|| process.aggregate(splat.amplitude, pitch)),
             });
         }
         let (pad, kernel) = if blur {
@@ -198,7 +202,6 @@ pub(crate) struct Plane {
 #[derive(Clone, Copy)]
 struct Target {
     width: usize,
-    rows: usize,
     origin_x: i32,
     origin_y: i32,
     pitch: f32,
@@ -295,6 +298,50 @@ impl Process {
         }
     }
 
+    /// Per-pixel distribution of this process when its clouds are smaller
+    /// than a pixel. Shared by the CPU fill and the GPU upload.
+    ///
+    /// Each sub-pixel cloud lands whole in the pixel that holds its center,
+    /// so where a cloud sits inside the pixel does not matter. A pixel's sum
+    /// is a compound Poisson: `N` clouds, `N ~ Poisson(λ · pitch²)`, each
+    /// adding `amplitude · strength · 2πσ² / pitch²`.
+    fn aggregate(&self, amplitude: f32, pitch: f32) -> Aggregate {
+        let clouds = f64::from(self.mu) * f64::from(pitch / self.cell_mm).powi(2);
+        let (strength_mean, strength_second) = strength_moments();
+        let sigma2 = f64::from(log_moment(self.sigma_lo, self.sigma_hi, 2));
+        let sigma4 = f64::from(log_moment(self.sigma_lo, self.sigma_hi, 4));
+        let scale = f64::from(amplitude) * std::f64::consts::TAU / f64::from(pitch).powi(2);
+        let mass_mean = scale * f64::from(strength_mean) * sigma2;
+        let mass_second = scale * scale * f64::from(strength_second) * sigma4;
+        let mass_spread = (mass_second - mass_mean * mass_mean).max(0.0).sqrt();
+        if clouds > AGGREGATE_TABLE_CLOUDS {
+            return Aggregate {
+                cdf: Vec::new(),
+                mass_mean: (clouds * mass_mean) as f32,
+                mass_spread: (clouds * mass_second).sqrt() as f32,
+            };
+        }
+        // P(N <= k), until it rounds to 1 in f32.
+        let mut cdf = Vec::new();
+        let mut term = (-clouds).exp();
+        let mut total = term;
+        while cdf.len() < AGGREGATE_TABLE_LEN {
+            let value = total as f32;
+            cdf.push(value);
+            if value >= 1.0 {
+                break;
+            }
+            let next = cdf.len() as f64;
+            term *= clouds / next;
+            total += term;
+        }
+        Aggregate {
+            cdf,
+            mass_mean: mass_mean as f32,
+            mass_spread: mass_spread as f32,
+        }
+    }
+
     fn splat(
         &self,
         field: &mut [f64],
@@ -313,22 +360,38 @@ impl Process {
             mean,
             variance: layer_variance,
         } = self.constants(pitch, scanner);
+        if !resolved {
+            let seed = seed.wrapping_add(self.salt);
+            self.aggregate(amplitude, pitch)
+                .fill(field, target, seed, self.layers, control)?;
+            return Ok((mean, layer_variance));
+        }
 
+        let seed = seed.wrapping_add(self.salt);
+        Band::split(field, target, control, |band| {
+            self.splat_band(band, target, seed, amplitude);
+        })?;
+        Ok((mean, layer_variance))
+    }
+
+    /// Every cloud that reaches `band`'s rows, painted into them.
+    ///
+    /// Cells are visited in the same order for every band, and a pixel sums
+    /// its clouds in that order, so the field does not depend on the banding.
+    fn splat_band(&self, band: Band<'_>, target: Target, seed: u32, amplitude: f32) {
+        let pitch = target.pitch;
         let margin = self.reach_mm() + self.cell_mm;
         let origin_x_mm = target.origin_x as f32 * pitch;
-        let origin_y_mm = target.origin_y as f32 * pitch;
+        let origin_y_mm = (target.origin_y + band.first_row as i32) as f32 * pitch;
         let width_mm = target.width as f32 * pitch;
-        let height_mm = target.rows as f32 * pitch;
+        let height_mm = band.rows as f32 * pitch;
         let cell = self.cell_mm;
         let x_first = ((origin_x_mm - margin) / cell).floor() as i32;
         let y_first = ((origin_y_mm - margin) / cell).floor() as i32;
         let x_last = ((origin_x_mm + width_mm + margin) / cell).floor() as i32;
         let y_last = ((origin_y_mm + height_mm + margin) / cell).floor() as i32;
-        let seed = seed.wrapping_add(self.salt);
+        let mut band = band;
         for cy in y_first..=y_last {
-            if control.cancelled() {
-                return Err(Cancelled);
-            }
             for cx in x_first..=x_last {
                 let mut draw = CellDraw::new(cx as u32, cy as u32, seed);
                 let count = draw.poisson(self.mu);
@@ -344,31 +407,75 @@ impl Process {
                     let sigma = log_lerp(self.sigma_lo, self.sigma_hi, ur);
                     let strength = STRENGTH_LO + (STRENGTH_HI - STRENGTH_LO) * uf;
                     let amplitude = amplitude * strength;
-                    if resolved {
-                        let aspect = log_lerp(1.0, self.aspect_max, ua);
-                        let axis = aspect.sqrt();
-                        let (sin, cos) = (ut * std::f32::consts::TAU).sin_cos();
-                        paint_gaussian(
-                            field,
-                            target,
-                            Gaussian {
-                                x_mm,
-                                y_mm,
-                                sx: sigma / axis,
-                                sy: sigma * axis,
-                                sin,
-                                cos,
-                                amplitude,
-                                layers: self.layers,
-                            },
-                        );
-                    } else {
-                        deposit_mass(field, target, x_mm, y_mm, amplitude, sigma, self.layers);
-                    }
+                    let aspect = log_lerp(1.0, self.aspect_max, ua);
+                    let axis = aspect.sqrt();
+                    let (sin, cos) = (ut * std::f32::consts::TAU).sin_cos();
+                    paint_gaussian(
+                        &mut band,
+                        target,
+                        Gaussian {
+                            x_mm,
+                            y_mm,
+                            sx: sigma / axis,
+                            sy: sigma * axis,
+                            sin,
+                            cos,
+                            amplitude,
+                            layers: self.layers,
+                        },
+                    );
                 }
             }
         }
-        Ok((mean, layer_variance))
+    }
+}
+
+/// Rows `first_row..first_row + rows` of a target's field.
+struct Band<'a> {
+    field: &'a mut [f64],
+    first_row: usize,
+    rows: usize,
+}
+
+impl Band<'_> {
+    /// Rows per band. Each band redraws the clouds in its margin, so a band
+    /// stays several cloud reaches tall.
+    const ROWS: usize = 64;
+
+    /// Run `work` on every band of `field` across the thread pool. Cancel
+    /// is checked between rounds of bands, on this thread, because
+    /// `control` is not shared with the workers.
+    fn split(
+        field: &mut [f64],
+        target: Target,
+        control: &mut dyn DevelopControl,
+        work: impl Fn(Band<'_>) + Sync,
+    ) -> Result<(), Cancelled> {
+        let stride = Self::ROWS * target.width * 3;
+        if stride == 0 {
+            return Ok(());
+        }
+        let round = Self::ROWS * rayon::current_num_threads().max(1) * 2;
+        for (round_index, rows) in field.chunks_mut(round * target.width * 3).enumerate() {
+            if control.cancelled() {
+                return Err(Cancelled);
+            }
+            let first = round_index * round;
+            rows.par_chunks_mut(stride)
+                .enumerate()
+                .for_each(|(index, field)| {
+                    let rows = field.len() / (target.width * 3);
+                    work(Band {
+                        field,
+                        first_row: first + index * Self::ROWS,
+                        rows,
+                    });
+                });
+        }
+        if control.cancelled() {
+            return Err(Cancelled);
+        }
+        Ok(())
     }
 }
 
@@ -379,6 +486,74 @@ struct Splat {
     mean: [f32; 3],
     variance: [f32; 3],
 }
+
+/// One unresolved process, drawn per pixel instead of per cloud.
+///
+/// With a `cdf`, the cloud count is drawn exactly from that table and the
+/// clouds' summed mass is gaussian given the count: a cloud's mass varies
+/// little, so the count carries the skew. Without one, the pixel holds more
+/// than [`AGGREGATE_TABLE_CLOUDS`] clouds on average and the whole sum is
+/// gaussian, `mass_mean` and `mass_spread` being its mean and deviation.
+///
+/// The cost is per pixel, not per cloud, so a preview no longer draws every
+/// cloud in the frame. The draws hash the pixel's full-frame position, so a
+/// crop at the same pitch matches the full frame.
+pub(crate) struct Aggregate {
+    pub cdf: Vec<f32>,
+    pub mass_mean: f32,
+    pub mass_spread: f32,
+}
+
+impl Aggregate {
+    /// This process's sum at full-frame pixel `(x, y)`.
+    fn sample(&self, x: i32, y: i32, seed: u32) -> f32 {
+        let mut draw = CellDraw::new(x as u32, y as u32, seed ^ AGGREGATE_SALT);
+        let pick = draw.unit();
+        // Box-Muller. `1 - unit` is exact and never zero.
+        let radius = (-2.0 * (1.0 - draw.unit()).ln()).sqrt();
+        let normal = radius * (draw.unit() * std::f32::consts::TAU).cos();
+        if self.cdf.is_empty() {
+            return self.mass_mean + self.mass_spread * normal;
+        }
+        let count = self.cdf.iter().take_while(|limit| **limit <= pick).count() as f32;
+        count * self.mass_mean + count.sqrt() * self.mass_spread * normal
+    }
+
+    fn fill(
+        &self,
+        field: &mut [f64],
+        target: Target,
+        seed: u32,
+        layers: u8,
+        control: &mut dyn DevelopControl,
+    ) -> Result<(), Cancelled> {
+        Band::split(field, target, control, |band| {
+            for row in 0..band.rows {
+                let y = target.origin_y + (band.first_row + row) as i32;
+                for column in 0..target.width {
+                    let value = f64::from(self.sample(target.origin_x + column as i32, y, seed));
+                    let index = (row * target.width + column) * 3;
+                    for layer in 0..3 {
+                        if layers & (1 << layer) != 0 {
+                            band.field[index + layer] += value;
+                        }
+                    }
+                }
+            }
+        })
+    }
+}
+
+/// Mixed into an unresolved process's seed, so its per-pixel draws are not
+/// the per-cell draws of the same coordinates.
+pub(crate) const AGGREGATE_SALT: u32 = 0x6A09_E667;
+
+/// Above this mean count per pixel, the count is gaussian too. Poisson skew
+/// is `1 / sqrt(mean)`, 0.125 here.
+const AGGREGATE_TABLE_CLOUDS: f64 = 64.0;
+
+/// Longest count table. At a mean of 64 the CDF reaches 1 in f32 well before.
+pub(crate) const AGGREGATE_TABLE_LEN: usize = 192;
 
 struct ProcessKind {
     cell_over_size: f32,
@@ -456,7 +631,8 @@ const PROCESS_KINDS: [ProcessKind; PROCESS_COUNT] = [
 ];
 
 /// Below this many pixels of sigma, the photosite is the aperture: the whole
-/// cloud is deposited in the pixel that contains its center.
+/// cloud lands in the pixel that contains its center, and the process is
+/// drawn per pixel by [`Aggregate`].
 const RESOLVED_SIGMA_PX: f32 = 0.75;
 
 /// Kernel support, in sigmas. The tail past this is about 0.2% of a gaussian.
@@ -533,13 +709,18 @@ struct Gaussian {
     layers: u8,
 }
 
-fn paint_gaussian(field: &mut [f64], target: Target, cloud: Gaussian) {
+/// Paint `cloud` into the rows of `band`.
+///
+/// Along a row the exponent is quadratic in x, so the gaussian steps by a
+/// ratio that itself steps by a constant factor: two `exp` per row and one
+/// per cloud instead of one per pixel.
+fn paint_gaussian(band: &mut Band<'_>, target: Target, cloud: Gaussian) {
     let Target {
         width,
-        rows,
         origin_x,
         origin_y,
         pitch,
+        ..
     } = target;
     let px = cloud.x_mm / pitch - origin_x as f32;
     let py = cloud.y_mm / pitch - origin_y as f32;
@@ -549,63 +730,51 @@ fn paint_gaussian(field: &mut [f64], target: Target, cloud: Gaussian) {
         return;
     }
     let rad = SUPPORT_SIGMAS * sx.max(sy);
-    let x0 = ((px - rad - 0.5).ceil() as i32).max(0);
-    let y0 = ((py - rad - 0.5).ceil() as i32).max(0);
+    let last_row = band.first_row + band.rows - 1;
+    // The row walk starts at the cloud's own left edge, clipped or not, so a
+    // pixel's weight does not depend on where the frame or a crop begins.
+    let left = (px - rad - 0.5).ceil() as i32;
+    let x0 = left.max(0);
+    let y0 = ((py - rad - 0.5).ceil() as i32).max(band.first_row as i32);
     let x1 = ((px + rad - 0.5).floor() as i32).min(width as i32 - 1);
-    let y1 = ((py + rad - 0.5).floor() as i32).min(rows as i32 - 1);
+    let y1 = ((py + rad - 0.5).floor() as i32).min(last_row as i32);
     if x0 > x1 || y0 > y1 {
         return;
     }
     let inv_sx = 1.0 / sx;
     let inv_sy = 1.0 / sy;
+    // d2(dx) = a dx² + b dx + c along a row, with b and c set by the row.
+    let (sin, cos) = (cloud.sin, cloud.cos);
+    let a = cos * cos * inv_sx * inv_sx + sin * sin * inv_sy * inv_sy;
+    let cross = 2.0 * sin * cos * (inv_sx * inv_sx - inv_sy * inv_sy);
+    let across = sin * sin * inv_sx * inv_sx + cos * cos * inv_sy * inv_sy;
+    let growth = (-a).exp();
+    let start = left as f32 + 0.5 - px;
     for y in y0 as usize..=y1 as usize {
         let dy = y as f32 + 0.5 - py;
-        let row = y * width;
-        for x in x0 as usize..=x1 as usize {
-            let dx = x as f32 + 0.5 - px;
-            let xr = dx * cloud.cos + dy * cloud.sin;
-            let yr = -dx * cloud.sin + dy * cloud.cos;
-            let d2 = xr * inv_sx * xr * inv_sx + yr * inv_sy * yr * inv_sy;
-            if d2 >= SUPPORT_D2 {
-                continue;
-            }
-            let weight = f64::from(cloud.amplitude * (-0.5 * d2).exp());
-            let index = (row + x) * 3;
-            for layer in 0..3 {
-                if cloud.layers & (1 << layer) != 0 {
-                    field[index + layer] += weight;
+        let row = (y - band.first_row) * width;
+        let b = cross * dy;
+        let mut weight =
+            cloud.amplitude * (-0.5 * (a * start * start + b * start + across * dy * dy)).exp();
+        let mut step = (-0.5 * (a * (2.0 * start + 1.0) + b)).exp();
+        for x in left..=x1 {
+            if x >= x0 {
+                let dx = x as f32 + 0.5 - px;
+                let xr = dx * cos + dy * sin;
+                let yr = -dx * sin + dy * cos;
+                let d2 = xr * inv_sx * xr * inv_sx + yr * inv_sy * yr * inv_sy;
+                if d2 < SUPPORT_D2 {
+                    let value = f64::from(weight);
+                    let index = (row + x as usize) * 3;
+                    for layer in 0..3 {
+                        if cloud.layers & (1 << layer) != 0 {
+                            band.field[index + layer] += value;
+                        }
+                    }
                 }
             }
-        }
-    }
-}
-
-/// Photosite integral of a sub-pixel cloud. The whole mass lands in the pixel
-/// that contains the center, which is what a large aperture does.
-fn deposit_mass(
-    field: &mut [f64],
-    target: Target,
-    x_mm: f32,
-    y_mm: f32,
-    amplitude: f32,
-    sigma: f32,
-    layers: u8,
-) {
-    let local_x = x_mm / target.pitch - target.origin_x as f32;
-    let local_y = y_mm / target.pitch - target.origin_y as f32;
-    let x = local_x.floor() as i32;
-    let y = local_y.floor() as i32;
-    if x < 0 || y < 0 || x >= target.width as i32 || y >= target.rows as i32 {
-        return;
-    }
-    let sigma = f64::from(sigma);
-    let pitch = f64::from(target.pitch);
-    let integral = f64::from(amplitude) * 2.0 * std::f64::consts::PI * sigma * sigma;
-    let mass = integral / (pitch * pitch);
-    let index = (y as usize * target.width + x as usize) * 3;
-    for layer in 0..3 {
-        if layers & (1 << layer) != 0 {
-            field[index + layer] += mass;
+            weight *= step;
+            step *= growth;
         }
     }
 }
@@ -681,49 +850,143 @@ impl Scanner {
             return Ok(());
         }
         let kernel = self.kernel();
+        let stride = width * 3;
         let mut temp = vec![0.0_f64; field.len()];
-        for y in 0..rows {
-            if control.cancelled() {
-                return Err(Cancelled);
-            }
-            for x in 0..width {
-                let mut acc = [0.0_f64; 3];
-                for (index, tap) in kernel.iter().enumerate() {
-                    let src_x =
-                        (x as i32 + index as i32 - radius).clamp(0, width as i32 - 1) as usize;
-                    let src = (y * width + src_x) * 3;
-                    let tap = f64::from(*tap);
-                    acc[0] += field[src] * tap;
-                    acc[1] += field[src + 1] * tap;
-                    acc[2] += field[src + 2] * tap;
-                }
-                let dst = (y * width + x) * 3;
-                temp[dst] = acc[0];
-                temp[dst + 1] = acc[1];
-                temp[dst + 2] = acc[2];
-            }
+        if control.cancelled() {
+            return Err(Cancelled);
         }
-        for y in 0..rows {
-            if control.cancelled() {
-                return Err(Cancelled);
-            }
-            for x in 0..width {
-                let mut acc = [0.0_f64; 3];
-                for (index, tap) in kernel.iter().enumerate() {
-                    let src_y =
-                        (y as i32 + index as i32 - radius).clamp(0, rows as i32 - 1) as usize;
-                    let src = (src_y * width + x) * 3;
-                    let tap = f64::from(*tap);
-                    acc[0] += temp[src] * tap;
-                    acc[1] += temp[src + 1] * tap;
-                    acc[2] += temp[src + 2] * tap;
+        temp.par_chunks_mut(stride)
+            .zip(field.par_chunks(stride))
+            .for_each(|(out, row)| {
+                for x in 0..width {
+                    let mut acc = [0.0_f64; 3];
+                    for (index, tap) in kernel.iter().enumerate() {
+                        let src_x =
+                            (x as i32 + index as i32 - radius).clamp(0, width as i32 - 1) as usize;
+                        let tap = f64::from(*tap);
+                        acc[0] += row[src_x * 3] * tap;
+                        acc[1] += row[src_x * 3 + 1] * tap;
+                        acc[2] += row[src_x * 3 + 2] * tap;
+                    }
+                    out[x * 3..x * 3 + 3].copy_from_slice(&acc);
                 }
-                let dst = (y * width + x) * 3;
-                field[dst] = acc[0];
-                field[dst + 1] = acc[1];
-                field[dst + 2] = acc[2];
-            }
+            });
+        if control.cancelled() {
+            return Err(Cancelled);
+        }
+        field
+            .par_chunks_mut(stride)
+            .enumerate()
+            .for_each(|(y, out)| {
+                for x in 0..width {
+                    let mut acc = [0.0_f64; 3];
+                    for (index, tap) in kernel.iter().enumerate() {
+                        let src_y =
+                            (y as i32 + index as i32 - radius).clamp(0, rows as i32 - 1) as usize;
+                        let src = (src_y * width + x) * 3;
+                        let tap = f64::from(*tap);
+                        acc[0] += temp[src] * tap;
+                        acc[1] += temp[src + 1] * tap;
+                        acc[2] += temp[src + 2] * tap;
+                    }
+                    out[x * 3..x * 3 + 3].copy_from_slice(&acc);
+                }
+            });
+        if control.cancelled() {
+            return Err(Cancelled);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::NopControl;
+
+    /// Mean and variance of `count` draws of `aggregate`.
+    fn moments(aggregate: &Aggregate, count: i32) -> (f64, f64) {
+        let mut sum = 0.0_f64;
+        let mut square = 0.0_f64;
+        for index in 0..count {
+            let value = f64::from(aggregate.sample(index % 509, index / 509, 7));
+            sum += value;
+            square += value * value;
+        }
+        let mean = sum / f64::from(count);
+        (mean, square / f64::from(count) - mean * mean)
+    }
+
+    #[test]
+    fn aggregate_matches_the_compound_poisson_moments() {
+        let process = &Process::table([0.010; 3])[0];
+        let samples = 400_000;
+        // A few clouds per pixel draws the count from the table. Hundreds is
+        // gaussian.
+        for (pitch, table) in [(0.012_f32, true), (0.15, false)] {
+            assert!(!process.resolved(pitch));
+            let amplitude = process.constants(pitch, None).amplitude;
+            let aggregate = process.aggregate(amplitude, pitch);
+            assert_eq!(!aggregate.cdf.is_empty(), table, "pitch {pitch}");
+            let clouds = f64::from(process.mu) * f64::from(pitch / process.cell_mm).powi(2);
+            let (strength_mean, strength_second) = strength_moments();
+            let scale = f64::from(amplitude) * std::f64::consts::TAU / f64::from(pitch).powi(2);
+            let expect_mean = clouds
+                * scale
+                * f64::from(strength_mean)
+                * f64::from(log_moment(process.sigma_lo, process.sigma_hi, 2));
+            let expect_variance = clouds
+                * scale
+                * scale
+                * f64::from(strength_second)
+                * f64::from(log_moment(process.sigma_lo, process.sigma_hi, 4));
+            let (mean, variance) = moments(&aggregate, samples);
+            let stderr = (expect_variance / f64::from(samples)).sqrt();
+            assert!(
+                (mean - expect_mean).abs() < 5.0 * stderr,
+                "pitch {pitch}: mean {mean} expected {expect_mean}"
+            );
+            assert!(
+                (variance / expect_variance - 1.0).abs() < 0.02,
+                "pitch {pitch}: variance {variance} expected {expect_variance}"
+            );
+        }
+    }
+
+    #[test]
+    fn unresolved_crop_matches_the_full_frame() {
+        let grain = FilmGrain::new(35.0, 11, [0.018, 0.013, 0.010]);
+        let frame_width = 360;
+        let full = grain
+            .render(
+                Plane {
+                    width: frame_width,
+                    rows: 240,
+                    origin_x: 0,
+                    origin_y: 0,
+                    frame_width,
+                },
+                &mut NopControl,
+            )
+            .unwrap();
+        let (x, y, width, rows) = (97_u32, 61_usize, 40_u32, 30_usize);
+        let crop = grain
+            .render(
+                Plane {
+                    width,
+                    rows,
+                    origin_x: x,
+                    origin_y: y as u32,
+                    frame_width,
+                },
+                &mut NopControl,
+            )
+            .unwrap();
+        for row in 0..rows {
+            let src = ((y + row) * frame_width as usize + x as usize) * 3;
+            let dst = row * width as usize * 3;
+            let count = width as usize * 3;
+            assert_eq!(crop[dst..dst + count], full[src..src + count], "row {row}");
+        }
     }
 }

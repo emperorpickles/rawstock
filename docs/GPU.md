@@ -72,9 +72,13 @@ can be fetched directly and the clouds are the CPU's clouds:
   uploaded.
 
 Only the Gaussian's `exp`, `sin`, and `cos`, the `f32` sum, and its order
-differ. A cloud whose center sits within an ulp of a pixel edge could still
-deposit into the neighbor at a coarse preview, since WGSL division is not
-correctly rounded. That has not shown up on lavapipe.
+differ.
+
+A process whose clouds are smaller than a pixel is not gathered. Each
+sample draws its sum directly, as `Aggregate::sample` does on the CPU: the
+cloud count from the same uploaded CDF table, compared against the same
+24-bit unit, so the counts match, then a Box-Muller normal, whose `log`
+and `cos` are the only difference.
 
 Chunks are whole rows. Each chunk's field is evaluated on a band padded by
 the scanner kernel's reach, so the blur never clamps at a band edge for a

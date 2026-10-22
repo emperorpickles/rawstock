@@ -35,8 +35,8 @@ struct Params {
 // The band's field, interleaved RGB.
 @group(0) @binding(2) var<storage, read_write> field: array<f32>;
 @group(0) @binding(3) var<storage, read_write> scratch: array<f32>;
-// Process records of 12 words from 0, then the scanner taps, then the
-// granularity curves.
+// Process records of 16 words from 0, then the count tables of unresolved
+// processes, then the scanner taps, then the granularity curves.
 @group(0) @binding(4) var<storage, read> tables: array<f32>;
 
 const SUPPORT_D2: f32 = 12.25;
@@ -44,6 +44,8 @@ const STRENGTH_LO: f32 = 0.72;
 const STRENGTH_HI: f32 = 1.0;
 const TAU: f32 = 6.28318530717958648;
 const MAX_POISSON: u32 = 64u;
+// `AGGREGATE_SALT` in `grain.rs`.
+const AGGREGATE_SALT: u32 = 0x6A09E667u;
 
 // `Grain::hash`: PCG, after Jarzynski and Hill.
 fn hash(x: u32, y: u32, layer: u32, seed: u32) -> u32 {
@@ -71,10 +73,16 @@ struct Process {
     seed: u32,
     layers: u32,
     resolved: bool,
+    // `Aggregate`: where the count table starts, its length (0 when the
+    // whole sum is gaussian), and the mass mean and spread.
+    cdf_offset: u32,
+    cdf_len: u32,
+    mass_mean: f32,
+    mass_spread: f32,
 }
 
 fn process(index: u32) -> Process {
-    let base = index * 12u;
+    let base = index * 16u;
     return Process(
         tables[base],
         tables[base + 1u],
@@ -86,7 +94,30 @@ fn process(index: u32) -> Process {
         bitcast<u32>(tables[base + 7u]),
         bitcast<u32>(tables[base + 8u]),
         bitcast<u32>(tables[base + 9u]) != 0u,
+        bitcast<u32>(tables[base + 10u]),
+        bitcast<u32>(tables[base + 11u]),
+        tables[base + 12u],
+        tables[base + 13u],
     );
+}
+
+// `Aggregate::sample`: an unresolved process's sum at band pixel `pixel`,
+// drawn per pixel from its full-frame position.
+fn aggregate(p: Process, pixel: vec2<i32>) -> f32 {
+    let at = params.origin.xy + pixel;
+    let seed = p.seed ^ AGGREGATE_SALT;
+    let pick = unit(at, 1u, seed);
+    let radius = sqrt(-2.0 * log(1.0 - unit(at, 2u, seed)));
+    let normal = radius * cos(unit(at, 3u, seed) * TAU);
+    if p.cdf_len == 0u {
+        return p.mass_mean + p.mass_spread * normal;
+    }
+    var count = 0u;
+    while count < p.cdf_len && tables[p.cdf_offset + count] <= pick {
+        count += 1u;
+    }
+    let n = f32(count);
+    return n * p.mass_mean + sqrt(n) * p.mass_spread * normal;
 }
 
 // `CellDraw::poisson`: x = cloud count, y = draws used. The CPU passes
@@ -115,7 +146,7 @@ fn layer_mask(layers: u32) -> vec3<f32> {
     return vec3<f32>(f32(layers & 1u), f32((layers >> 1u) & 1u), f32((layers >> 2u) & 1u));
 }
 
-// One process's clouds at band pixel `pixel`.
+// One resolved process's clouds at band pixel `pixel`.
 fn gather(p: Process, pixel: vec2<i32>) -> f32 {
     let pitch = params.scalars.x;
     let origin = params.origin.xy;
@@ -126,12 +157,7 @@ fn gather(p: Process, pixel: vec2<i32>) -> f32 {
     // can reach it.
     let lo_mm = vec2<f32>(origin + pixel) * pitch;
     let hi_mm = lo_mm + vec2<f32>(pitch);
-    // A little slack: the exact test below is in pixels, after a division
-    // the CPU rounds differently near a pixel edge.
-    var reach = 0.01 * pitch;
-    if p.resolved {
-        reach = p.reach_mm + 0.5 * pitch;
-    }
+    let reach = p.reach_mm + 0.5 * pitch;
     let first = vec2<i32>(floor((lo_mm - vec2<f32>(reach)) / cell));
     let last = vec2<i32>(floor((hi_mm + vec2<f32>(reach)) / cell));
     var sum = 0.0;
@@ -157,45 +183,36 @@ fn gather(p: Process, pixel: vec2<i32>) -> f32 {
                 let amplitude = p.amplitude * strength;
                 // Cloud center in band pixels, as the CPU computes it.
                 let center = vec2<f32>(x_mm / pitch, y_mm / pitch) - vec2<f32>(origin);
-                if p.resolved {
-                    // `paint_gaussian`.
-                    let aspect = log_lerp(1.0, p.aspect_max, ua);
-                    let axis = sqrt(aspect);
-                    let angle = ut * TAU;
-                    let s = sin(angle);
-                    let c = cos(angle);
-                    let sx = sigma / axis / pitch;
-                    let sy = sigma * axis / pitch;
-                    if sx <= 0.0 || sy <= 0.0 {
-                        continue;
-                    }
-                    let rad = 3.5 * max(sx, sy);
-                    let x0 = max(i32(ceil(center.x - rad - 0.5)), 0);
-                    let y0 = max(i32(ceil(center.y - rad - 0.5)), 0);
-                    let x1 = min(i32(floor(center.x + rad - 0.5)), width - 1);
-                    let y1 = min(i32(floor(center.y + rad - 0.5)), rows - 1);
-                    if pixel.x < x0 || pixel.x > x1 || pixel.y < y0 || pixel.y > y1 {
-                        continue;
-                    }
-                    let dx = f32(pixel.x) + 0.5 - center.x;
-                    let dy = f32(pixel.y) + 0.5 - center.y;
-                    let xr = dx * c + dy * s;
-                    let yr = -dx * s + dy * c;
-                    let inv_sx = 1.0 / sx;
-                    let inv_sy = 1.0 / sy;
-                    let d2 = xr * inv_sx * xr * inv_sx + yr * inv_sy * yr * inv_sy;
-                    if d2 >= SUPPORT_D2 {
-                        continue;
-                    }
-                    sum += amplitude * exp(-0.5 * d2);
-                } else {
-                    // `deposit_mass`: the whole cloud lands in the pixel
-                    // that holds its center.
-                    if i32(floor(center.x)) != pixel.x || i32(floor(center.y)) != pixel.y {
-                        continue;
-                    }
-                    sum += amplitude * TAU * sigma * sigma / (pitch * pitch);
+                // `paint_gaussian`.
+                let aspect = log_lerp(1.0, p.aspect_max, ua);
+                let axis = sqrt(aspect);
+                let angle = ut * TAU;
+                let s = sin(angle);
+                let c = cos(angle);
+                let sx = sigma / axis / pitch;
+                let sy = sigma * axis / pitch;
+                if sx <= 0.0 || sy <= 0.0 {
+                    continue;
                 }
+                let rad = 3.5 * max(sx, sy);
+                let x0 = max(i32(ceil(center.x - rad - 0.5)), 0);
+                let y0 = max(i32(ceil(center.y - rad - 0.5)), 0);
+                let x1 = min(i32(floor(center.x + rad - 0.5)), width - 1);
+                let y1 = min(i32(floor(center.y + rad - 0.5)), rows - 1);
+                if pixel.x < x0 || pixel.x > x1 || pixel.y < y0 || pixel.y > y1 {
+                    continue;
+                }
+                let dx = f32(pixel.x) + 0.5 - center.x;
+                let dy = f32(pixel.y) + 0.5 - center.y;
+                let xr = dx * c + dy * s;
+                let yr = -dx * s + dy * c;
+                let inv_sx = 1.0 / sx;
+                let inv_sy = 1.0 / sy;
+                let d2 = xr * inv_sx * xr * inv_sx + yr * inv_sy * yr * inv_sy;
+                if d2 >= SUPPORT_D2 {
+                    continue;
+                }
+                sum += amplitude * exp(-0.5 * d2);
             }
         }
     }
@@ -212,7 +229,11 @@ fn grain_field(@builtin(global_invocation_id) id: vec3<u32>) {
     var value = vec3<f32>(0.0);
     for (var index = 0u; index < u32(params.origin.z); index++) {
         let p = process(index);
-        value += gather(p, pixel) * layer_mask(p.layers);
+        if p.resolved {
+            value += gather(p, pixel) * layer_mask(p.layers);
+        } else {
+            value += aggregate(p, pixel) * layer_mask(p.layers);
+        }
     }
     let base = (id.y * params.band.x + id.x) * 3u;
     field[base] = value.x;

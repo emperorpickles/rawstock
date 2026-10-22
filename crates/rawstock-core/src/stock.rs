@@ -1102,7 +1102,7 @@ impl Grain {
     /// The field does not depend on the granularity tables. [`Self::mix_field`]
     /// applies RMS. A crop uses the full frame's pitch, so the same film-plane
     /// coordinate gets the same cloud. Clouds smaller than a pixel are
-    /// deposited into that pixel. Resolved clouds are gaussian stamps filtered
+    /// drawn per pixel, as their summed mass. Resolved clouds are gaussian stamps filtered
     /// by the scanner aperture, padded so the crop matches the full frame.
     pub(crate) fn unit_field(
         &self,
