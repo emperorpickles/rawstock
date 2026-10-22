@@ -671,6 +671,8 @@ pub(crate) struct ScanTables<'a> {
     pub dyes: &'a [Vec<f32>; 3],
     pub observer: &'a [Vec<f32>; 3],
     pub balance: [f32; 3],
+    /// 1 for a negative, -1 for a reversal stock, whose scan is negated.
+    pub sign: f32,
 }
 
 #[cfg(feature = "gpu")]
@@ -681,6 +683,10 @@ impl Spectral {
                 dyes,
                 observer: observer.rows(),
                 balance: self.scan_balance,
+                sign: match self.process {
+                    Process::Negative => 1.0,
+                    Process::Reversal => -1.0,
+                },
             }),
             _ => None,
         };
