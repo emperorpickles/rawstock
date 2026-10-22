@@ -3,21 +3,20 @@
   import { onMount } from "svelte";
 
   import Controls from "./lib/Controls.svelte";
-  import { CropRect, ViewTurn } from "./lib/frame";
+  import { CropRect, FrameBitmap, ViewTurn, type DrawnPicture, type HeldPicture } from "./lib/frame";
   import Preview from "./lib/Preview.svelte";
-  import { PreviewLoop } from "./lib/previewLoop";
+  import { PreviewLoop, type PaintedFrame } from "./lib/previewLoop";
   import { CommandError, StockFileName } from "./lib/ranges";
   import { StockList } from "./lib/stockList";
   import SaveDialog from "./lib/SaveDialog.svelte";
   import { TauriHost } from "./lib/tauriHost";
-  import type { ControlEdit, Frame, Progress, SessionState, StockState, StockSummary } from "./lib/types";
+  import type { ControlEdit, Progress, SessionState, StockState, StockSummary } from "./lib/types";
+  import { DevelopPlan, PictureBook, type PictureSide } from "./lib/viewport";
 
   const host = TauriHost.isAvailable() ? new TauriHost() : null;
 
   let stocks = $state<StockSummary[]>([]);
   let session = $state<SessionState | null>(null);
-  let frame = $state<Frame | null>(null);
-  let fidelity = $state("preview");
   let compare = $state(false);
   let mode = $state<"fit" | "pixel">("fit");
   let viewport = $state({ width: 0, height: 0 });
@@ -28,6 +27,29 @@
   let booting = $state(true);
   let saving = $state(false);
   let working = $state("");
+  let scene = $state(0);
+  let edit = $state(0);
+  let paintGen = $state(0);
+  let develops = $state(0);
+
+  const book = new PictureBook<HeldPicture>();
+  const slotTicket = new Map<string, number>();
+
+  function release(image: HeldPicture) {
+    image.bitmap.close();
+  }
+
+  function side(): PictureSide {
+    return compare ? "before" : "after";
+  }
+
+  function retarget() {
+    scene += 1;
+    edit = 0;
+    slotTicket.clear();
+    book.invalidateScene(release);
+    paintGen += 1;
+  }
 
   const loop = host
     ? new PreviewLoop(
@@ -35,28 +57,53 @@
         () => ({
           ready: Boolean(session?.stock) && viewport.width > 0 && (session?.displayWidth ?? 0) > 0,
           compare,
-          mode,
-          displayWidth: session?.displayWidth ?? 0,
-          displayHeight: session?.displayHeight ?? 0,
-          viewportWidth: viewport.width,
-          viewportHeight: viewport.height,
-          panX: pan.x,
-          panY: pan.y,
+          scene,
+          edit,
         }),
-        (next) => {
-          frame = next;
-          fidelity = next.fidelity;
-          progress = null;
-          working = "";
+        (painted) => {
+          void keep(painted);
         },
         (message) => {
           fault = message;
           void pull();
         },
+        () => {
+          develops += 1;
+        },
       )
     : null;
 
-  let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+  function slotKey(painted: PaintedFrame): string {
+    const editKey = painted.compare ? 0 : painted.edit;
+    return `${painted.kind}:${painted.compare ? "before" : "after"}:${painted.scene}:${editKey}`;
+  }
+
+  async function keep(painted: PaintedFrame) {
+    const key = slotKey(painted);
+    slotTicket.set(key, Math.max(slotTicket.get(key) ?? 0, painted.frame.ticket));
+    const held = await FrameBitmap.create(painted.frame, () => slotTicket.get(key) === painted.frame.ticket);
+    if (!held) return;
+    if (slotTicket.get(key) !== painted.frame.ticket || painted.scene !== scene) {
+      held.bitmap.close();
+      return;
+    }
+    if (!painted.compare && painted.edit !== edit) {
+      held.bitmap.close();
+      return;
+    }
+    const target: PictureSide = painted.compare ? "before" : "after";
+    if (painted.kind === "full") book.putFull(target, painted.scene, painted.edit, held, release);
+    else book.putFit(target, painted.scene, painted.edit, held, release);
+    progress = null;
+    working = "";
+    paintGen += 1;
+  }
+
+  function drawn(): DrawnPicture | null {
+    const picked = book.pick(mode, side(), scene, edit);
+    if (!picked) return null;
+    return { bitmap: picked.image.bitmap, full: picked.full };
+  }
 
   function remember(stock: StockState | null) {
     stocks = StockList.include(stocks, stock);
@@ -87,8 +134,8 @@
   }
 
   async function publish(next: SessionState) {
+    retarget();
     session = next;
-    frame = null;
     await retitle();
     if (!next.stock && host) {
       const choice = stocks.find((item) => item.name.includes("Portra")) ?? stocks[0];
@@ -107,17 +154,26 @@
     if (size.width === viewport.width && size.height === viewport.height) {
       return;
     }
+    const first = viewport.width === 0;
     viewport = size;
-    if (resizeTimer) {
-      clearTimeout(resizeTimer);
+    if (session && mode === "pixel") {
+      const crop = CropRect.visible(
+        session.displayWidth,
+        session.displayHeight,
+        size.width,
+        size.height,
+        pan.x,
+        pan.y,
+      );
+      pan = { x: crop.x, y: crop.y };
     }
-    resizeTimer = setTimeout(() => loop?.settle(), 150);
+    paintGen += 1;
+    if (first) loop?.now();
+    else loop?.viewport("resize");
   }
 
-  function reportPan(x: number, y: number, phase: "drag" | "settle") {
-    if (!session) {
-      return;
-    }
+  function reportPan(x: number, y: number) {
+    if (!session) return;
     const crop = CropRect.visible(
       session.displayWidth,
       session.displayHeight,
@@ -127,11 +183,8 @@
       y,
     );
     pan = { x: crop.x, y: crop.y };
-    if (phase === "drag") {
-      loop?.drag();
-    } else {
-      loop?.settle();
-    }
+    loop?.viewport("pan");
+    paintGen += 1;
   }
 
   function setMode(next: "fit" | "pixel") {
@@ -144,18 +197,19 @@
         viewport.height,
       );
     }
-    loop?.now();
+    loop?.viewport("zoom");
+    paintGen += 1;
   }
 
   async function rotate(direction: "clockwise" | "counterClockwise") {
     if (!host || !session) return;
     const previous = session;
     const previousPan = pan;
-    frame = null;
     fault = "";
     notice = "";
     try {
       const next = await host.rotate(direction);
+      retarget();
       session = next;
       if (mode === "pixel") {
         pan = ViewTurn.panAfter(
@@ -195,30 +249,35 @@
 
   function toggleCompare() {
     compare = !compare;
-    loop?.now();
+    const work = DevelopPlan.compare(book.canShow(side(), scene, edit));
+    if (DevelopPlan.runs(work)) loop?.now();
+    paintGen += 1;
   }
 
-  function onEdit(edit: ControlEdit) {
+  function onEdit(control: ControlEdit) {
     if (!session?.stock) {
       return;
     }
     const stock = session.stock;
-    if (edit.control === "exposure") stock.exposureEv = edit.value;
-    if (edit.control === "printExposure") stock.printExposure = edit.value;
-    if (edit.control === "dyeScales") stock.dyeScales = edit.value;
-    if (edit.control === "grainAmount") stock.grainAmount = edit.value;
-    if (edit.control === "halationEnabled") stock.halationEnabled = edit.value;
-    if (edit.control === "halationThreshold") stock.halationThreshold = edit.value;
-    if (edit.control === "halationRadius") stock.halationRadius = edit.value;
-    if (edit.control === "halationRed") {
-      stock.halationWeight = [edit.value, stock.halationWeight[1], stock.halationWeight[2]];
+    if (control.control === "exposure") stock.exposureEv = control.value;
+    if (control.control === "printExposure") stock.printExposure = control.value;
+    if (control.control === "dyeScales") stock.dyeScales = control.value;
+    if (control.control === "grainAmount") stock.grainAmount = control.value;
+    if (control.control === "halationEnabled") stock.halationEnabled = control.value;
+    if (control.control === "halationThreshold") stock.halationThreshold = control.value;
+    if (control.control === "halationRadius") stock.halationRadius = control.value;
+    if (control.control === "halationRed") {
+      stock.halationWeight = [control.value, stock.halationWeight[1], stock.halationWeight[2]];
     }
     if (compare) {
       compare = false;
     }
+    edit += 1;
+    book.invalidateEdit(release);
     fault = "";
     notice = "";
-    loop?.drag(edit);
+    paintGen += 1;
+    loop?.drag(control);
   }
 
   async function openFile() {
@@ -243,9 +302,10 @@
     if (!path) return;
     fault = "";
     try {
-      session = await host.loadStock(path);
+      const next = await host.loadStock(path);
+      retarget();
+      session = next;
       remember(session.stock);
-      frame = null;
       await retitle();
       loop?.now();
     } catch (error) {
@@ -258,9 +318,10 @@
     fault = "";
     notice = "";
     try {
-      session = await host.loadStock(path);
+      const next = await host.loadStock(path);
+      retarget();
+      session = next;
       remember(session.stock);
-      frame = null;
       await retitle();
       loop?.now();
     } catch (error) {
@@ -301,6 +362,7 @@
       remember(stock);
       saving = false;
       notice = `Saved ${stock.name}. Dye scales reset to 1.`;
+      retarget();
       loop?.now();
     } catch (error) {
       fault = CommandError.message(error);
@@ -324,6 +386,16 @@
       ? "Pick a stock to develop this file."
       : "Open a Fuji RAF or an iPhone ProRAW DNG.",
   );
+
+  let fidelity = $derived.by(() => {
+    paintGen;
+    return book.pick(mode, side(), scene, edit)?.image.fidelity ?? "preview";
+  });
+
+  let showing = $derived.by(() => {
+    paintGen;
+    return book.pick(mode, side(), scene, edit) !== null;
+  });
 
   onMount(() => {
     window.addEventListener("keydown", onKey);
@@ -364,7 +436,6 @@
       window.removeEventListener("keydown", onKey);
       for (const stop of stops) stop();
       loop.dispose();
-      if (resizeTimer) clearTimeout(resizeTimer);
     };
   });
 </script>
@@ -408,7 +479,9 @@
     </header>
     <Preview
       {mode}
-      {frame}
+      generation={paintGen}
+      picture={drawn}
+      {showing}
       {fidelity}
       {compare}
       fileName={session?.fileName ?? ""}
@@ -416,6 +489,10 @@
       pending={working}
       panX={pan.x}
       panY={pan.y}
+      viewWidth={viewport.width}
+      viewHeight={viewport.height}
+      displayWidth={session?.displayWidth ?? 0}
+      displayHeight={session?.displayHeight ?? 0}
       onviewport={reportViewport}
       onpan={reportPan}
     />
@@ -430,8 +507,9 @@
     />
     <footer class="status" aria-live="polite">
       <span class:fault>{status}</span>
+      <span class="spacer"></span>
+      <span class="develops" data-develop-count={develops}>{develops} develops</span>
       {#if session}
-        <span class="spacer"></span>
         <span>
           {session.displayWidth}×{session.displayHeight} · {session.orientation}{#if session.quarterTurns > 0}
             · +{session.quarterTurns}×90°{/if}
