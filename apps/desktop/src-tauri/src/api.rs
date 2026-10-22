@@ -78,7 +78,7 @@ pub enum ControlEdit {
     HalationRed(f32),
 }
 
-/// Fit proxy or a 100% display-space crop.
+/// Fit proxy, one exact full frame, or a display-space crop.
 #[derive(Debug, Deserialize)]
 #[serde(
     tag = "kind",
@@ -89,7 +89,13 @@ pub enum RenderView {
     /// Long edge of the oriented proxy. The UI sends 720 while dragging and
     /// 1440 once the pointer has been idle.
     Fit { long_edge: u32 },
+    /// Exact full frame of the current settings, or of the A/B baseline when
+    /// the request's `compare` flag is set. The UI pans this bitmap locally.
+    Full,
     /// `exact` is the settled dye scan. A drag leaves it false.
+    ///
+    /// The tuner no longer sends this while panning. It remains so a caller
+    /// can still ask for one crop.
     Hundred {
         x: u32,
         y: u32,
@@ -159,5 +165,10 @@ mod tests {
                 exact: true,
             }
         ));
+
+        let full = r#"{"ticket":5,"compare":true,"edit":null,"view":{"kind":"full"}}"#;
+        let request: DevelopRequest = serde_json::from_str(full).unwrap();
+        assert!(request.compare);
+        assert!(matches!(request.view, RenderView::Full));
     }
 }

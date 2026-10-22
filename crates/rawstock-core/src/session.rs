@@ -5,7 +5,8 @@
 //! orientation, and any manual quarter-turn, is baked in after demosaic and
 //! before the proxy. A tweak dirties the first stage it affects; earlier
 //! buffers stay. The fit view's dye scan can use a lookup table. Export and
-//! a settled 100% crop use the exact scan.
+//! [`Self::render_full`] use the exact scan. The tuner asks for that full
+//! frame once per settings state and pans the bitmap in the window.
 
 use crate::color::{DevelopError, LinearImage};
 use crate::decode::{FrameOrientation, Orientation};
@@ -660,11 +661,23 @@ impl PreviewSession {
     }
 
     /// Exact full frame, the image export writes. The lookup table is not used.
+    ///
+    /// Nothing from this call is kept on the session. The caller holds the
+    /// encoded frame if it wants to pan it.
     pub fn render_full(
         &mut self,
         control: &mut dyn DevelopControl,
     ) -> Result<SrgbImage, Cancelled> {
         let parameters = self.loaded().parameters.clone();
+        render::Pipeline::new(parameters).develop_controlled(&self.full, control)
+    }
+
+    /// Exact full frame of the A/B baseline. Same path as [`Self::render_full`].
+    pub fn render_baseline_full(
+        &mut self,
+        control: &mut dyn DevelopControl,
+    ) -> Result<SrgbImage, Cancelled> {
+        let parameters = self.baseline().parameters.clone();
         render::Pipeline::new(parameters).develop_controlled(&self.full, control)
     }
 
@@ -1176,6 +1189,7 @@ fn crop_buffer(
 
 #[derive(Clone, PartialEq, Eq)]
 struct DyeKey {
+    process: crate::stock::Process,
     reference: Option<u32>,
     samples: Vec<u32>,
 }
@@ -1191,6 +1205,7 @@ impl DyeKey {
             samples.extend(layer.iter().map(|sample| sample.to_bits()));
         }
         Some(Self {
+            process: model.process(),
             reference: model.reference_log_exposure().map(f32::to_bits),
             samples,
         })

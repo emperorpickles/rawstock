@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Convert a spectral_film_lut negative module into a rawstock spectral stock.
+"""Convert a spectral_film_lut film module into a rawstock spectral stock.
+
+Two modules are known: Kodak Portra 400 (a negative) and Fuji Velvia 50 (a
+reversal film). The reversal path is described under "Reversal" below.
 
 The upstream package is MIT licensed (Copyright 2026 Jan Lohse):
 
@@ -43,6 +46,30 @@ What is derived
     still matches the stock in the tree. ``print_exposure`` is chosen so the
     mean scanned dye density at that log exposure sits on print
     log-exposure 0.2, which was Neutral's 0.18 gray when Portra was built.
+
+Reversal (Fuji Velvia 50)
+    The module is ``reversal_film/fuji_velvia_50.py``. Its sensitometric
+    curves fall as exposure rises, so the stock is written with
+    ``process = "reversal"``. The last few digitized points of each curve
+    rise by up to 0.035 past D-min, which is trace noise around the base
+    density; a running minimum holds those at D-min.
+
+    Its log sensitivity traces stop about 1.4 decades below each peak.
+    Clamping to the lowest traced value, as the Portra path does, would
+    leave a 4 % floor across the whole spectrum. Instead each end segment's
+    slope is extended and the result is floored three decades below that
+    layer's peak.
+
+    The module has per-layer ``spectral_density`` traces. They are
+    resampled directly, held at the end values outside each trace, and
+    peak-normalized. No midscale split is needed.
+
+    ``exposure_ev`` and ``reference_log_exposure`` use the same ISO
+    placement as Portra. The slide is the image, so the print stage views it
+    through a near-identity scan curve (``REVERSAL_SCAN_*`` below), and
+    ``print_exposure`` puts the scanned clear base, D-min, at white. The
+    module's granularity tables are commented as copied from Ektachrome
+    100D, so no grain is written.
 """
 
 from __future__ import annotations
@@ -65,6 +92,14 @@ NEUTRAL_PRINT_LOG = 0.2
 PRINT_LOG_EXPOSURE = [-1.5, -0.5, 0.2, 1.0, 2.0]
 PRINT_DENSITY = [0.04, 0.20, 0.70, 1.50, 2.20]
 SCENE_GRAY = 0.18
+# Reversal sensitivity floor, in decades below each layer's peak.
+SENSITIVITY_FLOOR_DECADES = 3.0
+# Synthetic slide scan for a reversal stock. The print stage reads
+# print_exposure + slide density, so this is identity through the
+# midtones: the slide is viewed as it is. Above density 2.2 a gentle
+# shoulder keeps some separation in D-max instead of crushing it.
+REVERSAL_SCAN_LOG_EXPOSURE = [-1.0, 0.0, 1.0, 2.2, 3.0, 4.0]
+REVERSAL_SCAN_DENSITY = [-1.0, 0.0, 1.0, 2.2, 2.75, 3.15]
 
 
 def main() -> None:
@@ -88,6 +123,8 @@ def load_film_data(path: Path) -> dict:
 
 
 def render_stock(film: dict) -> str:
+    if film.get("name") == "Fuji Velvia 50":
+        return render_reversal_stock(film)
     if film.get("name") != "Kodak Portra 400":
         raise SystemExit(f"this importer currently knows Kodak Portra 400, not {film.get('name')!r}")
     grid = list(range(WAVELENGTH_MIN, WAVELENGTH_MAX + 1, WAVELENGTH_STEP))
@@ -182,6 +219,121 @@ def render_stock(film: dict) -> str:
     lines.append("density = " + format_samples(PRINT_DENSITY))
     lines.append("")
     return "\n".join(lines)
+
+
+def render_reversal_stock(film: dict) -> str:
+    if film.get("film_type") != "positive":
+        raise SystemExit(f"{film.get('name')!r} is not a positive (reversal) film")
+    grid = list(range(WAVELENGTH_MIN, WAVELENGTH_MAX + 1, WAVELENGTH_STEP))
+    sensitivities = []
+    for layer in film["log_sensitivity"]:
+        log_samples = resample_log_tail(layer, grid)
+        linear = [10.0**value for value in log_samples]
+        sensitivities.append(normalize(grid, linear))
+    curves = []
+    for index, layer in enumerate(film["sensiometric_curve"]):
+        points = sorted(layer.items())
+        logs = [point[0] for point in points]
+        if any(right <= left for left, right in zip(logs, logs[1:])):
+            raise SystemExit("characteristic log exposure does not strictly increase")
+        held = []
+        for _, density in points:
+            held.append(density if not held else min(held[-1], density))
+        lifted = sum(1 for (_, raw), kept in zip(points, held) if raw != kept)
+        print(f"curve {index}: {lifted} points held at D-min {held[-1]:.4f}")
+        curves.append(list(zip(logs, held)))
+    dyes = []
+    for layer in film["spectral_density"]:
+        points = sorted(layer.items())
+        samples = [max(0.0, interp(float(wave), points)) for wave in grid]
+        peak = max(samples)
+        dyes.append([value / peak for value in samples])
+    iso = int(film["iso"])
+    log_h_ref = math.log10(12.5 / iso)
+    exposure_ev = math.log2((10.0**log_h_ref) / SCENE_GRAY)
+    ref_density = [interp(log_h_ref, curve) for curve in curves]
+    base_density = [curve[-1][1] for curve in curves]
+    effective_ref = scanned_density(grid, dyes, ref_density)
+    effective_base = scanned_density(grid, dyes, base_density)
+    # The core subtracts each channel's offset from the mean at the
+    # reference, which leaves that mean in place. D-min gets the same balance.
+    balance = [value - sum(effective_ref) / 3.0 for value in effective_ref]
+    base = [value - offset for value, offset in zip(effective_base, balance)]
+    print_exposure = -sum(base) / len(base)
+
+    print(f"log H ref {log_h_ref:.4f}  exposure_ev {exposure_ev:.4f}")
+    print("density at ref", " ".join(f"{value:.3f}" for value in ref_density))
+    print("scanned density at ref", " ".join(f"{value:.3f}" for value in effective_ref))
+    print("scanned D-min", " ".join(f"{value:.3f}" for value in effective_base))
+    print(f"print_exposure {print_exposure:.4f}")
+    for index, layer in enumerate(sensitivities):
+        peak = max(range(len(layer)), key=layer.__getitem__)
+        print(
+            f"sensitivity {index} integral {trapezoid(grid, layer):.6f} "
+            f"peak {grid[peak]} nm {layer[peak]:.5f} min {min(layer):.6f}"
+        )
+
+    lines = [
+        "# Fuji Velvia 50, schema 1 spectral reversal stock.",
+        "# Generated by lab/import_spectral_film_lut.py from the MIT-licensed",
+        "# FUJI_VELVIA_50 module in Jan Lohse, spectral_film_lut",
+        "# (https://github.com/JanLohse/spectral_film_lut). Sensitivities,",
+        "# characteristic curves, and per-layer dye densities are that module's",
+        "# datasheet traces. Grain is omitted: its RMS tables are copied from",
+        "# Ektachrome 100D. The scan curve is synthetic, not a measurement.",
+        "",
+        "schema_version = 1",
+        "revision = 1",
+        'name = "Fuji Velvia 50 (spectral)"',
+        'source = "spectral_film_lut FUJI_VELVIA_50, digitized from the Fujichrome Velvia 50 datasheet."',
+        'license = "MIT"',
+        'model = "spectral"',
+        'process = "reversal"',
+        "",
+        "# Stops that place scene-linear 0.18 on log10(12.5 / ISO).",
+        f"exposure_ev = {exposure_ev:.6f}",
+        "# Puts the scanned clear base (D-min) at white.",
+        f"print_exposure = {print_exposure:.6f}",
+        "# The spectral scan balances this log exposure to neutral.",
+        f"reference_log_exposure = {log_h_ref:.6f}",
+        "",
+        "wavelength_nm = [" + ", ".join(str(wave) for wave in grid) + "]",
+        "",
+        "[sensitivity]",
+        f"red = {format_samples(sensitivities[0])}",
+        f"green = {format_samples(sensitivities[1])}",
+        f"blue = {format_samples(sensitivities[2])}",
+        "",
+        "[dye_density]",
+        f"red = {format_samples(dyes[0])}",
+        f"green = {format_samples(dyes[1])}",
+        f"blue = {format_samples(dyes[2])}",
+        "",
+    ]
+    for name, curve in zip(("red", "green", "blue"), curves):
+        lines.append(f"[{name}]")
+        lines.append("log_exposure = " + format_samples([point[0] for point in curve]))
+        lines.append("density = " + format_samples([point[1] for point in curve]))
+        lines.append("")
+    lines.append("[print]")
+    lines.append("log_exposure = " + format_samples(REVERSAL_SCAN_LOG_EXPOSURE))
+    lines.append("density = " + format_samples(REVERSAL_SCAN_DENSITY))
+    lines.append("")
+    return "\n".join(lines)
+
+
+def resample_log_tail(samples: dict[float, float], grid: list[int]) -> list[float]:
+    """Linear resample of log sensitivity with the end slopes extended.
+
+    Inside the trace this is linear interpolation. Outside it, each end
+    segment's slope continues, so the response keeps falling instead of
+    holding the last traced value. Samples are floored
+    ``SENSITIVITY_FLOOR_DECADES`` below the peak and capped at the peak.
+    """
+    points = sorted(samples.items())
+    ceiling = max(point[1] for point in points)
+    floor = ceiling - SENSITIVITY_FLOOR_DECADES
+    return [min(ceiling, max(floor, extrapolate(points, float(wave)))) for wave in grid]
 
 
 def resample_log(samples: dict[float, float], grid: list[int]) -> list[float]:

@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rawstock_core::color::LinearImage;
 use rawstock_core::render::{Parameters, Pipeline};
-use rawstock_core::stock::{FilmModel, Grain, ModelError, Stock, StockError, StockModel};
+use rawstock_core::stock::{FilmModel, Grain, ModelError, Process, Stock, StockError, StockModel};
 
 fn neutral_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stocks/neutral.stock.toml")
@@ -438,6 +438,110 @@ fn velvia_is_a_parametric_approximation_with_fine_grain() {
     for channel in developed.pixels() {
         assert!(channel.is_finite(), "{channel}");
     }
+}
+
+#[test]
+fn spectral_velvia_is_a_reversal_stock_beside_the_parametric_one() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stocks");
+    let stock = Stock::load(root.join("velvia50-spectral.stock.toml")).unwrap();
+    let parametric = Stock::load(root.join("velvia.stock.toml")).unwrap();
+    assert_ne!(stock.name(), parametric.name());
+    assert_eq!(stock.model(), StockModel::Spectral);
+    assert_eq!(stock.license(), "MIT");
+    assert!(stock.source().contains("spectral_film_lut"));
+    assert!(stock.source().to_ascii_lowercase().contains("approximate"));
+
+    let FilmModel::Spectral(model) = stock.parameters().film() else {
+        panic!("spectral velvia is spectral");
+    };
+    assert_eq!(model.process(), Process::Reversal);
+    assert!(model.curves().iter().all(|curve| curve.falls()));
+    assert!(model.dye_density().is_some());
+    assert!(model.reference_log_exposure().is_some());
+    for layer in model.sensitivities() {
+        let integral = trapezoid(model.wavelengths(), layer);
+        assert!(
+            (integral - 1.0).abs() < 1.0e-3,
+            "sensitivity integral {integral}"
+        );
+    }
+
+    // The grain is the parametric Velvia's table, carried over unchanged.
+    let grain = stock.parameters().grain().expect("spectral velvia grain");
+    let carried = parametric.parameters().grain().unwrap();
+    assert_eq!(grain.size_mm(), carried.size_mm());
+    for (layer, other) in grain.layers().iter().zip(carried.layers()) {
+        assert!(layer.points().eq(other.points()));
+    }
+
+    // A slide is a positive: more light develops brighter, and the
+    // reference gray scans close to neutral.
+    let mut parameters = stock.parameters().clone();
+    parameters.set_grain(None).unwrap();
+    let pipeline = Pipeline::new(parameters);
+    let mut previous = 0.0f32;
+    for level in [0.02, 0.06, 0.18, 0.5, 1.0] {
+        let pixel = pipeline.develop(&gray_image(level)).pixels().to_vec();
+        let mean = pixel.iter().sum::<f32>() / 3.0;
+        assert!(mean > previous, "gray {level} developed to {pixel:?}");
+        previous = mean;
+    }
+    let gray = pipeline.develop(&gray_image(0.18)).pixels().to_vec();
+    let spread = gray[0].max(gray[1]).max(gray[2]) - gray[0].min(gray[1]).min(gray[2]);
+    assert!(spread < 0.01, "reference gray is not neutral: {gray:?}");
+    for &channel in &gray {
+        assert!(
+            (0.35..0.6).contains(&channel),
+            "reference gray left the midtones: {gray:?}"
+        );
+    }
+}
+
+#[test]
+fn process_is_a_spectral_key_that_must_match_the_curves() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stocks");
+    let reversal = std::fs::read_to_string(root.join("velvia50-spectral.stock.toml")).unwrap();
+
+    // Falling curves without the key are read as a negative and rejected.
+    let unmarked = reversal.replace("process = \"reversal\"\n", "");
+    assert!(matches!(
+        load_text(&unmarked).unwrap_err(),
+        StockError::Curve {
+            curve: "red",
+            source: ModelError::DensityOrder
+        }
+    ));
+
+    // A reversal key on rising curves is rejected.
+    let portra = std::fs::read_to_string(root.join("portra400.stock.toml")).unwrap();
+    let marked = portra.replace(
+        "model = \"spectral\"\n",
+        "model = \"spectral\"\nprocess = \"reversal\"\n",
+    );
+    assert!(matches!(
+        load_text(&marked).unwrap_err(),
+        StockError::Curve {
+            curve: "red",
+            source: ModelError::ReversalDensityOrder
+        }
+    ));
+
+    // Parametric stocks are negatives and do not take the key.
+    let parametric = neutral_text().replace(
+        "model = \"parametric\"\n",
+        "model = \"parametric\"\nprocess = \"negative\"\n",
+    );
+    assert!(matches!(
+        load_text(&parametric).unwrap_err(),
+        StockError::NotParametric { field: "process" }
+    ));
+
+    // Unknown processes fail to parse.
+    let unknown = reversal.replace("process = \"reversal\"", "process = \"positive\"");
+    assert!(matches!(
+        load_text(&unknown).unwrap_err(),
+        StockError::Parse { .. }
+    ));
 }
 
 fn gray_image(level: f32) -> LinearImage {

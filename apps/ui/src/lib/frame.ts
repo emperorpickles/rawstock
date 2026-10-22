@@ -49,62 +49,117 @@ export class RgbaPixels {
   static fromRgb(rgb: Uint8Array, width: number, height: number): Uint8ClampedArray<ArrayBuffer> {
     const buffer = new ArrayBuffer(width * height * 4);
     const out = new Uint8ClampedArray(buffer);
-    for (let index = 0, pixel = 0; index < rgb.length; index += 3, pixel += 4) {
-      out[pixel] = rgb[index] ?? 0;
-      out[pixel + 1] = rgb[index + 1] ?? 0;
-      out[pixel + 2] = rgb[index + 2] ?? 0;
-      out[pixel + 3] = 255;
-    }
+    RgbaPixels.fill(rgb, out, 0, width * height);
     return out;
+  }
+
+  static fill(rgb: Uint8Array, out: Uint8ClampedArray, startPixel: number, endPixel: number): void {
+    for (let pixel = startPixel; pixel < endPixel; pixel += 1) {
+      const source = pixel * 3;
+      const dest = pixel * 4;
+      out[dest] = rgb[source] ?? 0;
+      out[dest + 1] = rgb[source + 1] ?? 0;
+      out[dest + 2] = rgb[source + 2] ?? 0;
+      out[dest + 3] = 255;
+    }
   }
 }
 
-export class PreviewCanvas {
-  static async draw(
+/** A decoded preview kept as one bitmap. The RGB bytes are not retained. */
+export interface HeldPicture {
+  bitmap: ImageBitmap;
+  fidelity: Frame["fidelity"];
+}
+
+/**
+ * Turns a worker frame into a bitmap. The copy yields between slices so a
+ * pan already on screen can paint while a full frame arrives.
+ */
+export class FrameBitmap {
+  static async create(frame: Frame, live: () => boolean = () => true): Promise<HeldPicture | null> {
+    const { width, height } = frame;
+    if (width === 0 || height === 0 || !live()) return null;
+    const buffer = new ArrayBuffer(width * height * 4);
+    const out = new Uint8ClampedArray(buffer);
+    const pixels = width * height;
+    const slice = 512 * 1024;
+    for (let start = 0; start < pixels; start += slice) {
+      if (!live()) return null;
+      RgbaPixels.fill(frame.bytes, out, start, Math.min(pixels, start + slice));
+      if (start + slice < pixels) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+    }
+    if (!live()) return null;
+    const bitmap = await createImageBitmap(new ImageData(out, width, height));
+    if (!live()) {
+      bitmap.close();
+      return null;
+    }
+    return { bitmap, fidelity: frame.fidelity };
+  }
+}
+
+/** Bitmap currently on the stage. `full` is the exact frame; otherwise it is a fit proxy. */
+export interface DrawnPicture {
+  bitmap: ImageBitmap;
+  full: boolean;
+}
+
+/**
+ * Paints either the fit proxy or a rectangle of the cached full frame.
+ * The source bitmap is not rebuilt for a pan or a zoom.
+ */
+export class ViewportCanvas {
+  static draw(
     canvas: HTMLCanvasElement,
-    frame: Frame,
+    picture: DrawnPicture,
     mode: "fit" | "pixel",
-    current: () => boolean = () => true,
-  ): Promise<void> {
-    const rgba = RgbaPixels.fromRgb(frame.bytes, frame.width, frame.height);
-    const bitmap = await createImageBitmap(new ImageData(rgba, frame.width, frame.height));
-    if (!current()) {
-      bitmap.close();
-      return;
-    }
+    panX: number,
+    panY: number,
+    viewWidth: number,
+    viewHeight: number,
+    displayWidth: number,
+    displayHeight: number,
+  ): void {
     const ctx = canvas.getContext("2d");
-    if (!ctx) {
-      bitmap.close();
+    if (!ctx || viewWidth < 1 || viewHeight < 1 || displayWidth < 1 || displayHeight < 1) return;
+    canvas.width = viewWidth;
+    canvas.height = viewHeight;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = "#0c0b0a";
+    ctx.fillRect(0, 0, viewWidth, viewHeight);
+    if (mode === "fit") {
+      const scale = Math.min(viewWidth / picture.bitmap.width, viewHeight / picture.bitmap.height);
+      const width = picture.bitmap.width * scale;
+      const height = picture.bitmap.height * scale;
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(
+        picture.bitmap,
+        (viewWidth - width) / 2,
+        (viewHeight - height) / 2,
+        width,
+        height,
+      );
       return;
     }
-    if (mode === "pixel") {
-      canvas.width = frame.width;
-      canvas.height = frame.height;
-      const dpr = window.devicePixelRatio || 1;
-      canvas.style.width = `${frame.width / dpr}px`;
-      canvas.style.height = `${frame.height / dpr}px`;
-      ctx.drawImage(bitmap, 0, 0);
-      bitmap.close();
-      return;
-    }
-    canvas.style.width = "";
-    canvas.style.height = "";
-    const stage = canvas.parentElement;
-    const cssWidth = stage?.clientWidth ?? frame.width;
-    const cssHeight = stage?.clientHeight ?? frame.height;
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = Math.max(1, Math.round(cssWidth * dpr));
-    canvas.height = Math.max(1, Math.round(cssHeight * dpr));
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, cssWidth, cssHeight);
-    const scale = Math.min(cssWidth / frame.width, cssHeight / frame.height);
-    const width = frame.width * scale;
-    const height = frame.height * scale;
-    const x = (cssWidth - width) / 2;
-    const y = (cssHeight - height) / 2;
-    ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(bitmap, x, y, width, height);
-    bitmap.close();
+    const crop = CropRect.visible(displayWidth, displayHeight, viewWidth, viewHeight, panX, panY);
+    const destX = Math.floor((viewWidth - crop.width) / 2);
+    const destY = Math.floor((viewHeight - crop.height) / 2);
+    const scaleX = picture.bitmap.width / displayWidth;
+    const scaleY = picture.bitmap.height / displayHeight;
+    ctx.imageSmoothingEnabled = !picture.full;
+    ctx.drawImage(
+      picture.bitmap,
+      crop.x * scaleX,
+      crop.y * scaleY,
+      crop.width * scaleX,
+      crop.height * scaleY,
+      destX,
+      destY,
+      crop.width,
+      crop.height,
+    );
   }
 }
 

@@ -96,6 +96,15 @@ green = [0.0, 1.0, 0.0]
 blue = [0.0, 1.0, 0.0]
 ```
 
+`process` is an optional spectral key: `negative` (the default) or
+`reversal`. A reversal (slide) stock's `red`, `green`, and `blue` curves
+fall: density must not increase as log exposure rises. It needs
+`[dye_density]`, because the developed dyes are the image. The scan hands
+the print stage the negated slide density, so print log-exposure becomes
+`print_exposure + slide density` and the `[print]` curve is a scan curve
+for viewing the slide (identity shows it as it is). `[print]` itself
+always rises. A parametric stock is always a negative and rejects the key.
+
 `[grain]` and `[halation]` are optional schema 1 tables. Leaving them out
 is the same file older stocks already use, so `schema_version` stays 1.
 `[grain]` holds one RMS-granularity-versus-density table per layer, the
@@ -158,6 +167,28 @@ anti-halation layer.
 Portra is a Kodak trademark. This file is an attributed transcription of
 published curves, not an invented look. Invented looks still need original
 names.
+
+## Fuji Velvia 50 (spectral)
+
+[velvia50-spectral.stock.toml](velvia50-spectral.stock.toml) is a spectral
+reversal stock, kept separate from the parametric Velvia below so the two
+can be compared. Its sensitivities, characteristic curves, and per-layer dye
+densities are the Fujichrome Velvia 50 datasheet traces in the
+`FUJI_VELVIA_50` module of the same MIT-licensed
+[spectral_film_lut](https://github.com/JanLohse/spectral_film_lut),
+written by `lab/import_spectral_film_lut.py`. The importer holds the last
+few trace points at D-min (they rise by up to 0.035, digitizing noise) and
+extends each sensitivity trace's end slope, floored three decades below the
+peak, instead of clamping to the lowest traced value.
+
+The scan curve and grain are an **approximate aesthetic tuning**. The scan
+curve is identity through the midtones with a gentle shoulder past density
+2.2, and `print_exposure` puts the clear base at white. The grain table is
+the parametric Velvia's, carried over unchanged; Fujifilm's quoted RMS
+granularity of 9 agrees with its peak. There is no halation and no
+interlayer coupling: the saturation comes from the datasheet curves and
+dyes alone. Grays are balanced at middle gray; the datasheet curves leave
+deep shadows warm and the brightest highlights slightly cool.
 
 ## Velvia
 

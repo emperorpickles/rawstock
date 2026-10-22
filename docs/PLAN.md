@@ -30,6 +30,7 @@ math agree within a numeric tolerance.
 **Done when:** CPU/GPU parity holds within a documented tolerance on the
 Metal, DX12, and Vulkan backends available in CI or locally; preview and
 export match the CPU grain; the CLI can select the GPU path.
+**Status:** see [GPU path](GPU.md).
 
 ## Phase 5: Desktop (Tauri + Svelte)
 **Goal:** open a RAW, pick a stock, preview, export.
