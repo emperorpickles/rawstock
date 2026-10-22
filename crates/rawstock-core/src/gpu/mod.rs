@@ -8,9 +8,8 @@
 //! Setup and readback are async because WebGPU in a browser cannot block.
 //! Native callers can use the `_blocking` wrappers.
 //!
-//! Exposure, halation, both film models, the exact dye scan, print/scan, and
-//! the sRGB encode run here. A stock with grain is refused with
-//! [`GpuError::Unsupported`] until those stages are ported.
+//! Every stage runs here: exposure, halation, both film models, dye-cloud
+//! grain, the exact dye scan, print/scan, and the sRGB encode.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -21,8 +20,8 @@ use thiserror::Error;
 use wgpu::util::DeviceExt;
 
 use crate::color::LinearImage;
-use crate::render::{Fidelity, Parameters, SrgbImage, Stage};
-use crate::stock::{Curve, FilmModel, Halation};
+use crate::render::{Fidelity, Parameters, SrgbImage};
+use crate::stock::{Curve, FilmModel, Grain, GrainRegion, Halation};
 
 #[cfg(test)]
 mod tests;
@@ -43,12 +42,9 @@ pub enum GpuError {
     /// The adapter refused a device.
     #[error("GPU device request failed: {0}")]
     Device(String),
-    /// The parameters use a stage the GPU path does not run yet.
-    #[error("the GPU path does not run the {} stage yet", .0.name())]
-    Unsupported(Stage),
-    /// Halation needs one storage binding for the whole frame, and this
-    /// frame does not fit.
-    #[error("a {width}×{height} frame is too large for one GPU halation pass")]
+    /// Halation needs one storage binding for the whole frame, or a grain
+    /// band for one row does not fit one binding.
+    #[error("a {width}×{height} frame is too large for the GPU path")]
     FrameTooLarge {
         /// Frame width in pixels.
         width: u32,
@@ -76,6 +72,9 @@ struct Inner {
     halation_layout: wgpu::BindGroupLayout,
     /// `threshold`, `box_horizontal`, `box_vertical`, `add_glow`.
     halation_kernels: [wgpu::ComputePipeline; 4],
+    grain_layout: wgpu::BindGroupLayout,
+    /// `grain_field`, `scan_horizontal`, `scan_vertical`, `grain_mix`.
+    grain_kernels: [wgpu::ComputePipeline; 4],
     adapter: String,
     max_chunk_pixels: u32,
     /// Bytes in the largest storage binding.
@@ -214,6 +213,42 @@ impl Gpu {
                     cache: None,
                 })
             });
+        let grain_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("grain.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("grain.wgsl").into()),
+        });
+        let grain_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("grain"),
+            entries: &[
+                buffer_entry(0, wgpu::BufferBindingType::Uniform),
+                buffer_entry(1, wgpu::BufferBindingType::Storage { read_only: false }),
+                buffer_entry(2, wgpu::BufferBindingType::Storage { read_only: false }),
+                buffer_entry(3, wgpu::BufferBindingType::Storage { read_only: false }),
+                buffer_entry(4, wgpu::BufferBindingType::Storage { read_only: true }),
+            ],
+        });
+        let grain_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("grain"),
+                bind_group_layouts: &[Some(&grain_layout)],
+                immediate_size: 0,
+            });
+        let grain_kernels = [
+            "grain_field",
+            "scan_horizontal",
+            "scan_vertical",
+            "grain_mix",
+        ]
+        .map(|entry_point| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(entry_point),
+                layout: Some(&grain_pipeline_layout),
+                module: &grain_module,
+                entry_point: Some(entry_point),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        });
         let binding = required_limits
             .max_storage_buffer_binding_size
             .min(required_limits.max_buffer_size);
@@ -233,6 +268,8 @@ impl Gpu {
                 kernels,
                 halation_layout,
                 halation_kernels,
+                grain_layout,
+                grain_kernels,
                 adapter: adapter.get_info().name,
                 max_chunk_pixels,
                 max_binding: binding,
@@ -281,6 +318,8 @@ impl Gpu {
                 kernels: inner.kernels.clone(),
                 halation_layout: inner.halation_layout.clone(),
                 halation_kernels: inner.halation_kernels.clone(),
+                grain_layout: inner.grain_layout.clone(),
+                grain_kernels: inner.grain_kernels.clone(),
                 adapter: inner.adapter.clone(),
                 max_chunk_pixels: pixels,
                 max_binding: inner.max_binding,
@@ -331,6 +370,7 @@ pub struct GpuPipeline {
     params: StageParams,
     sequence: Vec<Kernel>,
     halation: Option<Halation>,
+    grain: Option<Grain>,
 }
 
 impl std::fmt::Debug for GpuPipeline {
@@ -343,13 +383,7 @@ impl std::fmt::Debug for GpuPipeline {
 
 impl GpuPipeline {
     /// Upload `parameters` to `gpu`.
-    ///
-    /// Fails with [`GpuError::Unsupported`] when the parameters need a stage
-    /// this slice has not ported.
-    pub fn new(gpu: &Gpu, parameters: &Parameters) -> Result<Self, GpuError> {
-        if parameters.grain().is_some() {
-            return Err(GpuError::Unsupported(Stage::Grain));
-        }
+    pub fn new(gpu: &Gpu, parameters: &Parameters) -> Self {
         let (film_curves, coupling) = match parameters.film() {
             FilmModel::Parametric(film) => (film.curves(), film.coupling()),
             FilmModel::Spectral(film) => (film.curves(), film.coupling()),
@@ -434,7 +468,7 @@ impl GpuPipeline {
                 contents: bytemuck::cast_slice(&knots),
                 usage: wgpu::BufferUsages::STORAGE,
             });
-        Ok(Self {
+        Self {
             gpu: gpu.clone(),
             knots,
             spectral,
@@ -442,26 +476,45 @@ impl GpuPipeline {
             params,
             sequence,
             halation: parameters.halation().cloned(),
-        })
+            grain: parameters.grain().cloned(),
+        }
     }
 
-    /// Exposure, halation, the film model, print/scan, and the sRGB encode.
+    /// Exposure, halation, the film model, grain, print/scan, and the sRGB
+    /// encode.
     ///
     /// The same stages and order as [`Pipeline::develop`](crate::render::Pipeline::develop),
     /// within the documented tolerance. The result is always
     /// [`Fidelity::Exact`].
     pub async fn develop(&self, image: &LinearImage) -> Result<SrgbImage, GpuError> {
-        let pixels = match &self.halation {
-            None => self.run(&self.sequence, image.pixels()).await?,
-            Some(halation) => {
-                let sigma = halation.sigma_px(image.width(), image.height());
-                self.run_with_halation(halation, sigma, image, &self.sequence[1..])
-                    .await?
-            }
+        let (width, height) = (image.width(), image.height());
+        let stages = Stages {
+            pre: &self.sequence[..1],
+            halation: self
+                .halation
+                .as_ref()
+                .map(|halation| (halation, halation.sigma_px(width, height))),
+            mid: &self.sequence[1..2],
+            grain: self.grain.as_ref().map(|grain| {
+                (
+                    grain,
+                    GrainRegion {
+                        width,
+                        height,
+                        origin_x: 0,
+                        origin_y: 0,
+                        frame_width: width,
+                    },
+                )
+            }),
+            post: &self.sequence[2..],
         };
+        let pixels = self
+            .run_frame(image.pixels(), width, height, stages)
+            .await?;
         Ok(SrgbImage::from_encoded(
-            image.width(),
-            image.height(),
+            width,
+            height,
             pixels,
             Fidelity::Exact,
         ))
@@ -480,7 +533,7 @@ impl GpuPipeline {
         samples: &[f32],
     ) -> Result<Vec<f32>, GpuError> {
         let gpu = &self.gpu.inner;
-        let chunks = self.upload(samples);
+        let chunks = self.upload(samples, gpu.max_chunk_pixels as usize);
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -492,101 +545,76 @@ impl GpuPipeline {
         self.finish(encoder, &chunks).await
     }
 
-    /// Exposure, halation over the whole frame at `sigma` pixels, then the
-    /// per-pixel `post` kernels.
-    pub(crate) async fn run_with_halation(
+    /// Run `stages` over a `width` × `height` frame of interleaved RGB.
+    ///
+    /// Chunks are whole rows. Halation reads the whole frame between `pre`
+    /// and `mid`. Grain reads a padded band around each chunk between `mid`
+    /// and `post`.
+    pub(crate) async fn run_frame(
         &self,
-        halation: &Halation,
-        sigma: f32,
-        image: &LinearImage,
-        post: &[Kernel],
+        samples: &[f32],
+        width: u32,
+        height: u32,
+        stages: Stages<'_>,
     ) -> Result<Vec<f32>, GpuError> {
         let gpu = &self.gpu.inner;
-        let (width, height) = (image.width(), image.height());
         let pixels = u64::from(width) * u64::from(height);
-        if pixels * 4 > gpu.max_binding {
+        if width == 0 || height == 0 || samples.len() as u64 != pixels * 3 {
+            return self.run(stages.pre, samples).await;
+        }
+        let grain = stages
+            .grain
+            .filter(|(_, region)| region.frame_width > 0)
+            .map(|(grain, region)| GrainUpload::new(gpu, grain, region));
+        let pad = grain.as_ref().map_or(0, |grain| u64::from(grain.plan.pad));
+        let band_row = (u64::from(width) + 2 * pad) * PIXEL_BYTES;
+        let rows_by_band = (gpu.max_binding / band_row).saturating_sub(2 * pad);
+        let rows_by_data = u64::from(gpu.max_chunk_pixels) / u64::from(width);
+        let rows = rows_by_band.min(rows_by_data).clamp(1, u64::from(height));
+        if stages.halation.is_some() && pixels * 4 > gpu.max_binding
+            || (2 * pad + 1) * band_row > gpu.max_binding
+        {
             return Err(GpuError::FrameTooLarge { width, height });
         }
-        let chunks = self.upload(image.pixels());
-        if chunks.is_empty() {
-            return Ok(Vec::new());
-        }
-        let plane = |label| {
-            gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(label),
-                size: (pixels * 4).max(4),
-                usage: wgpu::BufferUsages::STORAGE,
-                mapped_at_creation: false,
-            })
-        };
-        let excess = plane("halation excess");
-        let scratch = plane("halation scratch");
-        let weight = halation.weight();
-        let glow = |chunk: &Chunk, radius: u32| {
-            let params = HalationParams {
-                dims: [width, height, radius, chunk.offset],
-                scalars: [halation.threshold(), weight[0], weight[1], weight[2]],
-                counts: [chunk.count, 0, 0, 0],
+        let chunks = self.upload(samples, (rows * u64::from(width)) as usize);
+        let halation = stages
+            .halation
+            .map(|(halation, sigma)| HalationUpload::new(gpu, halation, sigma, width, height));
+        let band = grain.as_ref().map(|_| {
+            let size = (rows + 2 * pad) * band_row;
+            let buffer = |label| {
+                gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(label),
+                    size,
+                    usage: wgpu::BufferUsages::STORAGE,
+                    mapped_at_creation: false,
+                })
             };
-            let uniform = gpu
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("halation params"),
-                    contents: bytemuck::bytes_of(&params),
-                    usage: wgpu::BufferUsages::UNIFORM,
-                });
-            gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("halation"),
-                layout: &gpu.halation_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: uniform.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: chunk.data.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: excess.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: scratch.as_entire_binding(),
-                    },
-                ],
-            })
-        };
-        let pre = [Kernel::Exposure];
+            (buffer("grain field"), buffer("grain scratch"))
+        });
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("develop with halation"),
+                label: Some("develop"),
             });
         for chunk in &chunks {
-            self.encode_film(&mut encoder, chunk, &pre);
-            let group = glow(chunk, 0);
-            let (x, y) = dispatch_size(chunk.count);
-            dispatch(&mut encoder, &gpu.halation_kernels[0], &group, (x, y));
-        }
-        // `widen` leaves the excess unblurred below half a pixel.
-        if sigma.is_finite() && sigma >= 0.5 && width > 0 && height > 0 {
-            let tiles = (width.div_ceil(16), height.div_ceil(16));
-            for radius in crate::stock::box_radii(sigma) {
-                if radius == 0 {
-                    continue;
-                }
-                let group = glow(&chunks[0], radius as u32);
-                dispatch(&mut encoder, &gpu.halation_kernels[1], &group, tiles);
-                dispatch(&mut encoder, &gpu.halation_kernels[2], &group, tiles);
+            self.encode_film(&mut encoder, chunk, stages.pre);
+            if let Some(halation) = &halation {
+                halation.threshold(gpu, &mut encoder, chunk);
             }
         }
+        if let Some(halation) = &halation {
+            halation.widen(gpu, &mut encoder, &chunks[0]);
+        }
         for chunk in &chunks {
-            let group = glow(chunk, 0);
-            let (x, y) = dispatch_size(chunk.count);
-            dispatch(&mut encoder, &gpu.halation_kernels[3], &group, (x, y));
-            self.encode_film(&mut encoder, chunk, post);
+            if let Some(halation) = &halation {
+                halation.add(gpu, &mut encoder, chunk);
+            }
+            self.encode_film(&mut encoder, chunk, stages.mid);
+            if let (Some(grain), Some((field, scratch))) = (&grain, &band) {
+                grain.apply(gpu, &mut encoder, chunk, width, field, scratch);
+            }
+            self.encode_film(&mut encoder, chunk, stages.post);
         }
         self.finish(encoder, &chunks).await
     }
@@ -594,10 +622,10 @@ impl GpuPipeline {
     /// Split `samples` into chunks that fit one storage binding and upload
     /// them. Per-pixel stages do not read neighbours, so the split cannot
     /// change their result.
-    fn upload(&self, samples: &[f32]) -> Vec<Chunk> {
+    fn upload(&self, samples: &[f32], chunk_pixels: usize) -> Vec<Chunk> {
         let gpu = &self.gpu.inner;
         let pixel_count = samples.len() / 3;
-        let chunk_pixels = (gpu.max_chunk_pixels as usize).max(1);
+        let chunk_pixels = chunk_pixels.max(1);
         samples[..pixel_count * 3]
             .chunks(chunk_pixels * 3)
             .enumerate()
@@ -700,6 +728,256 @@ struct Chunk {
     count: u32,
     /// The chunk's first pixel in the frame.
     offset: u32,
+}
+
+/// Which stages [`GpuPipeline::run_frame`] runs, in order.
+pub(crate) struct Stages<'a> {
+    pub pre: &'a [Kernel],
+    /// The halation and its sigma in pixels.
+    pub halation: Option<(&'a Halation, f32)>,
+    pub mid: &'a [Kernel],
+    /// The grain and where this frame sits in the full frame.
+    pub grain: Option<(&'a Grain, GrainRegion)>,
+    pub post: &'a [Kernel],
+}
+
+/// Halation's full-frame planes and constants for one run.
+struct HalationUpload {
+    excess: wgpu::Buffer,
+    scratch: wgpu::Buffer,
+    params: HalationParams,
+    sigma: f32,
+}
+
+impl HalationUpload {
+    fn new(gpu: &Inner, halation: &Halation, sigma: f32, width: u32, height: u32) -> Self {
+        let plane = |label| {
+            gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: (u64::from(width) * u64::from(height) * 4).max(4),
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            })
+        };
+        let weight = halation.weight();
+        Self {
+            excess: plane("halation excess"),
+            scratch: plane("halation scratch"),
+            params: HalationParams {
+                dims: [width, height, 0, 0],
+                scalars: [halation.threshold(), weight[0], weight[1], weight[2]],
+                counts: [0; 4],
+            },
+            sigma,
+        }
+    }
+
+    fn group(&self, gpu: &Inner, chunk: &Chunk, radius: u32) -> wgpu::BindGroup {
+        let mut params = self.params;
+        params.dims[2] = radius;
+        params.dims[3] = chunk.offset;
+        params.counts[0] = chunk.count;
+        let uniform = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("halation params"),
+                contents: bytemuck::bytes_of(&params),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        bind(
+            gpu,
+            &gpu.halation_layout,
+            &[&uniform, &chunk.data, &self.excess, &self.scratch],
+        )
+    }
+
+    /// The excess over the threshold, for one chunk.
+    fn threshold(&self, gpu: &Inner, encoder: &mut wgpu::CommandEncoder, chunk: &Chunk) {
+        let group = self.group(gpu, chunk, 0);
+        dispatch(
+            encoder,
+            &gpu.halation_kernels[0],
+            &group,
+            dispatch_size(chunk.count),
+        );
+    }
+
+    /// Kovesi's box passes over the whole excess plane. `widen` leaves the
+    /// excess unblurred below half a pixel.
+    fn widen(&self, gpu: &Inner, encoder: &mut wgpu::CommandEncoder, any: &Chunk) {
+        let [width, height, ..] = self.params.dims;
+        if !self.sigma.is_finite() || self.sigma < 0.5 {
+            return;
+        }
+        let tiles = (width.div_ceil(16), height.div_ceil(16));
+        for radius in crate::stock::box_radii(self.sigma) {
+            if radius == 0 {
+                continue;
+            }
+            let group = self.group(gpu, any, radius as u32);
+            dispatch(encoder, &gpu.halation_kernels[1], &group, tiles);
+            dispatch(encoder, &gpu.halation_kernels[2], &group, tiles);
+        }
+    }
+
+    /// The widened excess, weighted, back onto one chunk.
+    fn add(&self, gpu: &Inner, encoder: &mut wgpu::CommandEncoder, chunk: &Chunk) {
+        let group = self.group(gpu, chunk, 0);
+        dispatch(
+            encoder,
+            &gpu.halation_kernels[3],
+            &group,
+            dispatch_size(chunk.count),
+        );
+    }
+}
+
+/// `Params` in `grain.wgsl`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GrainParams {
+    band: [u32; 4],
+    origin: [i32; 4],
+    scalars: [f32; 4],
+    mean: [f32; 4],
+    spread: [f32; 4],
+    counts: [u32; 4],
+    rms_offset: [u32; 4],
+    rms_len: [u32; 4],
+}
+
+/// The grain plan and its tables for one run.
+struct GrainUpload {
+    plan: crate::grain::GpuPlan,
+    region: GrainRegion,
+    tables: wgpu::Buffer,
+    params: GrainParams,
+}
+
+impl GrainUpload {
+    fn new(gpu: &Inner, grain: &Grain, region: GrainRegion) -> Self {
+        let plan = crate::grain::FilmGrain::new(grain.frame_mm(), grain.seed(), grain.size_mm())
+            .gpu_plan(region.frame_width);
+        let mut tables = Vec::new();
+        for process in &plan.processes {
+            tables.extend([
+                process.cell_mm,
+                process.poisson_limit,
+                process.sigma_lo,
+                process.sigma_hi,
+                process.aspect_max,
+                process.amplitude,
+                process.reach_mm,
+                f32::from_bits(process.seed),
+                f32::from_bits(process.layers),
+                f32::from_bits(u32::from(process.resolved)),
+                0.0,
+                0.0,
+            ]);
+        }
+        let kernel_offset = tables.len() as u32;
+        tables.extend_from_slice(&plan.kernel);
+        let mut rms_offset = [0u32; 4];
+        let mut rms_len = [0u32; 4];
+        for (layer, granularity) in grain.layers().iter().enumerate() {
+            rms_offset[layer] = tables.len() as u32;
+            let points: Vec<(f32, f32)> = granularity.points().collect();
+            tables.extend(points.iter().map(|point| point.0));
+            tables.extend(points.iter().map(|point| point.1));
+            rms_len[layer] = points.len() as u32;
+        }
+        let pad = plan.pad;
+        let params = GrainParams {
+            band: [0, 0, pad, region.width],
+            origin: [0, 0, plan.processes.len() as i32, i32::from(plan.blur)],
+            scalars: [
+                plan.pitch,
+                grain.cell_px(region.frame_width).min(1.0).sqrt() / 1000.0,
+                0.0,
+                0.0,
+            ],
+            mean: [plan.mean[0], plan.mean[1], plan.mean[2], 0.0],
+            spread: [plan.spread[0], plan.spread[1], plan.spread[2], 0.0],
+            counts: [0, kernel_offset, 0, 0],
+            rms_offset,
+            rms_len,
+        };
+        let tables = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("grain tables"),
+                contents: bytemuck::cast_slice(&tables),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+        Self {
+            plan,
+            region,
+            tables,
+            params,
+        }
+    }
+
+    /// Field, scanner blur, and mix for one chunk of whole rows.
+    fn apply(
+        &self,
+        gpu: &Inner,
+        encoder: &mut wgpu::CommandEncoder,
+        chunk: &Chunk,
+        width: u32,
+        field: &wgpu::Buffer,
+        scratch: &wgpu::Buffer,
+    ) {
+        let pad = self.plan.pad;
+        let rows = chunk.count / width;
+        let first_row = chunk.offset / width;
+        let mut params = self.params;
+        params.band[0] = width + 2 * pad;
+        params.band[1] = rows + 2 * pad;
+        params.origin[0] = self.region.origin_x as i32 - pad as i32;
+        params.origin[1] = (self.region.origin_y + first_row) as i32 - pad as i32;
+        params.counts[0] = chunk.count;
+        let uniform = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("grain params"),
+                contents: bytemuck::bytes_of(&params),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let group = bind(
+            gpu,
+            &gpu.grain_layout,
+            &[&uniform, &chunk.data, field, scratch, &self.tables],
+        );
+        let tiles = (params.band[0].div_ceil(16), params.band[1].div_ceil(16));
+        dispatch(encoder, &gpu.grain_kernels[0], &group, tiles);
+        if self.plan.blur {
+            dispatch(encoder, &gpu.grain_kernels[1], &group, tiles);
+            dispatch(encoder, &gpu.grain_kernels[2], &group, tiles);
+        }
+        dispatch(
+            encoder,
+            &gpu.grain_kernels[3],
+            &group,
+            dispatch_size(chunk.count),
+        );
+    }
+}
+
+/// A bind group of whole buffers at bindings 0, 1, 2, and so on.
+fn bind(gpu: &Inner, layout: &wgpu::BindGroupLayout, buffers: &[&wgpu::Buffer]) -> wgpu::BindGroup {
+    let entries: Vec<wgpu::BindGroupEntry<'_>> = buffers
+        .iter()
+        .enumerate()
+        .map(|(binding, buffer)| wgpu::BindGroupEntry {
+            binding: binding as u32,
+            resource: buffer.as_entire_binding(),
+        })
+        .collect();
+    gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout,
+        entries: &entries,
+    })
 }
 
 /// `Params` in `halation.wgsl`.
