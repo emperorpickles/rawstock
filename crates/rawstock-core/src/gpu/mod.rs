@@ -8,13 +8,13 @@
 //! Setup and readback are async because WebGPU in a browser cannot block.
 //! Native callers can use the `_blocking` wrappers.
 //!
-//! This slice runs exposure, the parametric film model, print/scan, and the
-//! sRGB encode. A stock with halation, grain, or a spectral model is refused
-//! with [`GpuError::Unsupported`] until those stages are ported.
+//! Exposure, both film models, the exact dye scan, print/scan, and the sRGB
+//! encode run here. A stock with halation or grain is refused with
+//! [`GpuError::Unsupported`] until those stages are ported.
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll, Waker};
 
 use thiserror::Error;
@@ -66,6 +66,10 @@ struct Inner {
     kernels: [wgpu::ComputePipeline; KERNEL_COUNT],
     adapter: String,
     max_chunk_pixels: u32,
+    /// The Jakob-Hanika table, uploaded on the first spectral stock.
+    rgb2spec: OnceLock<wgpu::Buffer>,
+    /// Bound in place of a table a stage does not read.
+    empty: wgpu::Buffer,
 }
 
 /// One entry point in `pixel.wgsl`, in pipeline order.
@@ -73,16 +77,20 @@ struct Inner {
 pub(crate) enum Kernel {
     Exposure,
     DensityParametric,
+    DensitySpectral,
+    DyeScan,
     Print,
     Encode,
 }
 
-const KERNEL_COUNT: usize = 4;
+const KERNEL_COUNT: usize = 6;
 
 impl Kernel {
     const ALL: [Self; KERNEL_COUNT] = [
         Self::Exposure,
         Self::DensityParametric,
+        Self::DensitySpectral,
+        Self::DyeScan,
         Self::Print,
         Self::Encode,
     ];
@@ -91,6 +99,8 @@ impl Kernel {
         match self {
             Self::Exposure => "exposure",
             Self::DensityParametric => "density_parametric",
+            Self::DensitySpectral => "density_spectral",
+            Self::DyeScan => "dye_scan",
             Self::Print => "print_scan",
             Self::Encode => "encode",
         }
@@ -141,6 +151,8 @@ impl Gpu {
                 buffer_entry(0, wgpu::BufferBindingType::Uniform),
                 buffer_entry(1, wgpu::BufferBindingType::Storage { read_only: true }),
                 buffer_entry(2, wgpu::BufferBindingType::Storage { read_only: false }),
+                buffer_entry(3, wgpu::BufferBindingType::Storage { read_only: true }),
+                buffer_entry(4, wgpu::BufferBindingType::Storage { read_only: true }),
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -164,6 +176,11 @@ impl Gpu {
         // Two dispatch dimensions of 65535 workgroups cover far more than a
         // binding holds, so the binding size is the only chunk limit.
         let max_chunk_pixels = (binding / PIXEL_BYTES).min(u64::from(u32::MAX)) as u32;
+        let empty = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("unused table"),
+            contents: bytemuck::bytes_of(&0.0f32),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
         Ok(Self {
             inner: Arc::new(Inner {
                 device,
@@ -172,6 +189,8 @@ impl Gpu {
                 kernels,
                 adapter: adapter.get_info().name,
                 max_chunk_pixels,
+                rgb2spec: OnceLock::new(),
+                empty,
             }),
         })
     }
@@ -187,6 +206,23 @@ impl Gpu {
         &self.inner.adapter
     }
 
+    /// The rgb2spec z scale, then its coefficient cube.
+    fn rgb2spec(&self) -> &wgpu::Buffer {
+        self.inner.rgb2spec.get_or_init(|| {
+            let (_, scale, data, _) = crate::spectrum::gpu_upsample();
+            let mut table = Vec::with_capacity(scale.len() + data.len());
+            table.extend_from_slice(scale);
+            table.extend_from_slice(data);
+            self.inner
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("rgb2spec"),
+                    contents: bytemuck::cast_slice(&table),
+                    usage: wgpu::BufferUsages::STORAGE,
+                })
+        })
+    }
+
     #[cfg(test)]
     fn with_chunk_limit(&self, pixels: u32) -> Self {
         let inner = &self.inner;
@@ -198,6 +234,8 @@ impl Gpu {
                 kernels: inner.kernels.clone(),
                 adapter: inner.adapter.clone(),
                 max_chunk_pixels: pixels,
+                rgb2spec: inner.rgb2spec.clone(),
+                empty: inner.empty.clone(),
             }),
         }
     }
@@ -227,13 +265,21 @@ struct StageParams {
     srgb: [[f32; 4]; 3],
     curve_offset: [u32; 4],
     curve_len: [u32; 4],
+    spectral: [u32; 4],
+    scan_balance: [f32; 4],
+    ap1_to_ap0: [[f32; 4]; 3],
 }
 
 /// The film pipeline on a [`Gpu`], for one set of [`Parameters`].
 pub struct GpuPipeline {
     gpu: Gpu,
     knots: wgpu::Buffer,
+    /// Spectral stock tables, or the empty buffer.
+    spectral: wgpu::Buffer,
+    /// The rgb2spec table, or the empty buffer.
+    rgb2spec: wgpu::Buffer,
     params: StageParams,
+    sequence: Vec<Kernel>,
 }
 
 impl std::fmt::Debug for GpuPipeline {
@@ -256,10 +302,10 @@ impl GpuPipeline {
         if parameters.grain().is_some() {
             return Err(GpuError::Unsupported(Stage::Grain));
         }
-        let FilmModel::Parametric(film) = parameters.film() else {
-            return Err(GpuError::Unsupported(Stage::Density));
+        let (film_curves, coupling) = match parameters.film() {
+            FilmModel::Parametric(film) => (film.curves(), film.coupling()),
+            FilmModel::Spectral(film) => (film.curves(), film.coupling()),
         };
-        let film_curves = film.curves();
         let curves = [
             &film_curves[0],
             &film_curves[1],
@@ -273,10 +319,9 @@ impl GpuPipeline {
             curve_offset[index] = knots.len() as u32;
             curve_len[index] = append_curve(&mut knots, curve);
         }
-        let coupling = film.coupling();
         let matrix = coupling.unwrap_or([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
         let srgb = crate::matrices::acescg_to_linear_srgb();
-        let params = StageParams {
+        let mut params = StageParams {
             counts: [0, u32::from(coupling.is_some()), 0, 0],
             scalars: [
                 2.0f32.powf(parameters.exposure_ev()),
@@ -288,7 +333,51 @@ impl GpuPipeline {
             srgb: srgb.map(|row| [row[0] as f32, row[1] as f32, row[2] as f32, 0.0]),
             curve_offset,
             curve_len,
+            spectral: [0; 4],
+            scan_balance: [0.0; 4],
+            ap1_to_ap0: [[0.0; 4]; 3],
         };
+        let device = &gpu.inner.device;
+        let mut sequence = vec![Kernel::Exposure];
+        let (spectral, rgb2spec) = match parameters.film() {
+            FilmModel::Parametric(_) => {
+                sequence.push(Kernel::DensityParametric);
+                (gpu.inner.empty.clone(), gpu.inner.empty.clone())
+            }
+            FilmModel::Spectral(film) => {
+                let tables = film.gpu_tables();
+                let count = tables.wavelengths.len();
+                let mut values = Vec::with_capacity(count * 10);
+                values.extend_from_slice(tables.wavelengths);
+                for layer in tables.weighted_sensitivity {
+                    values.extend_from_slice(layer);
+                }
+                match tables.scan {
+                    Some(scan) => {
+                        for layer in scan.dyes.iter().chain(scan.observer) {
+                            values.extend_from_slice(layer);
+                        }
+                        let balance = scan.balance;
+                        params.scan_balance = [balance[0], balance[1], balance[2], 0.0];
+                    }
+                    None => values.resize(count * 10, 0.0),
+                }
+                let (res, _, _, ap0) = crate::spectrum::gpu_upsample();
+                params.spectral = [count as u32, u32::from(tables.scan.is_some()), res, 0];
+                params.ap1_to_ap0 = ap0.map(|row| [row[0], row[1], row[2], 0.0]);
+                sequence.push(Kernel::DensitySpectral);
+                if tables.scan.is_some() {
+                    sequence.push(Kernel::DyeScan);
+                }
+                let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("spectral tables"),
+                    contents: bytemuck::cast_slice(&values),
+                    usage: wgpu::BufferUsages::STORAGE,
+                });
+                (buffer, gpu.rgb2spec().clone())
+            }
+        };
+        sequence.extend([Kernel::Print, Kernel::Encode]);
         let knots = gpu
             .inner
             .device
@@ -300,7 +389,10 @@ impl GpuPipeline {
         Ok(Self {
             gpu: gpu.clone(),
             knots,
+            spectral,
+            rgb2spec,
             params,
+            sequence,
         })
     }
 
@@ -310,7 +402,7 @@ impl GpuPipeline {
     /// within the documented tolerance. The result is always
     /// [`Fidelity::Exact`].
     pub async fn develop(&self, image: &LinearImage) -> Result<SrgbImage, GpuError> {
-        let pixels = self.run(&Kernel::ALL, image.pixels()).await?;
+        let pixels = self.run(&self.sequence, image.pixels()).await?;
         Ok(SrgbImage::from_encoded(
             image.width(),
             image.height(),
@@ -388,6 +480,14 @@ impl GpuPipeline {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: data.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.spectral.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.rgb2spec.as_entire_binding(),
                 },
             ],
         });

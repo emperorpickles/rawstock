@@ -12,21 +12,27 @@ Phase 4 in [PLAN](PLAN.md). The film pipeline also runs on wgpu, in
 | Exposure | yes | 1 |
 | Halation | not yet | 3 |
 | Parametric density (curves, coupling) | yes | 1 |
-| Spectral density | not yet | 2 |
+| Spectral density | yes | 2 |
 | Grain | not yet | 4 |
-| Dye scan | not yet | 2 |
+| Dye scan | yes, always exact | 2 |
 | Print/scan | yes | 1 |
 | sRGB encode | yes | 1 |
 
 `GpuPipeline::new` refuses parameters that need a stage marked "not yet",
 with `GpuError::Unsupported`. Callers fall back to the CPU.
 
+The GPU dye scan is always the exact integral, 41 wavelengths per pixel,
+so its output is `Fidelity::Exact`. The preview session's dye lookup table
+exists only because that integral is slow on the CPU.
+
 ## Layout
 
 - `crates/rawstock-core/src/gpu/mod.rs`: device setup, uploads, dispatch,
   readback.
 - `crates/rawstock-core/src/gpu/pixel.wgsl`: one entry point per per-pixel
-  stage. Each names the CPU function it mirrors.
+  stage. Each names the CPU function it mirrors. Spectral stocks upload
+  their wavelength tables. The 9.4 MB Jakob-Hanika coefficient table is
+  uploaded once per device, on the first spectral stock.
 - `crates/rawstock-core/src/gpu/tests.rs`: the parity tests.
 
 Buffers use the CPU layout: interleaved RGB, one `f32` per sample. A frame
@@ -45,16 +51,23 @@ part of a curve.
 | Stage | Tolerance | Measured on lavapipe |
 | --- | --- | --- |
 | Exposure | bit for bit | 0 |
-| Density | 2e-5 density | 5e-7 |
+| Density, parametric and spectral | 2e-5 density | 5e-7 |
+| Dye scan | 5e-5 density, relative above 1 | 8.4e-5 at density 4.6 |
 | Print/scan | 1e-4 relative transmission | 2e-7 |
 | Encode | 2e-5, encoded `0..=1` | 1.3e-6 |
-| Full develop | 8-bit codes: none off by more than 1, at most 0.1% off by 1 | 3 to 4 of 393,216 off by 1 |
+| Full develop | 8-bit codes: none off by more than 1, at most 0.1% off by 1 | Velvia 3, Neutral 4, Portra 7, of 393,216 off by 1 |
 
 Exposure matches bit for bit because the CPU computes `2^ev` once and the
 shader multiplies by that same `f32`. WGSL requires multiplication to be
 correctly rounded. Other stages use `log2`, `exp2`, and `pow`, which WGSL
 allows a few ulps of error. The CPU encode matrix is `f64`. The GPU's is
 `f32`.
+
+The dye scan has the loosest bound. A dense patch transmits very little.
+The observer rows have negative lobes, so the 41-term sum cancels, and the
+log10 of a small cancelled sum amplifies ulp differences. The error is still
+invisible after the print curve: Portra's full develop stays within the 8-bit
+bound.
 
 Non-finite inputs follow the CPU rules: NaN exposure floors to the toe, a
 non-finite curve input reads as the first knot, and a non-finite encode
