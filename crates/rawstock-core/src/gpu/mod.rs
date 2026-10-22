@@ -83,6 +83,81 @@ struct Inner {
     rgb2spec: OnceLock<wgpu::Buffer>,
     /// Bound in place of a table a stage does not read.
     empty: wgpu::Buffer,
+    /// Recent grain fields, newest first. The field depends only on the
+    /// grain's geometry and the frame, not on RMS or the picture, so a
+    /// preview edit reuses it, as the CPU session's `CloudField` does.
+    grain_fields: Mutex<Vec<CachedField>>,
+}
+
+/// Grain field buffers for one `run_frame`.
+struct Band {
+    /// One per chunk, or one shared by every chunk when not cached.
+    fields: Vec<wgpu::Buffer>,
+    scratch: wgpu::Buffer,
+    /// Set when the fields should be cached after this frame.
+    key: Option<FieldKey>,
+    /// The fields already hold this frame's grain.
+    cached: bool,
+}
+
+impl Inner {
+    /// The cached field for `key`, moved to the front.
+    fn cached_field(&self, key: FieldKey) -> Option<Vec<wgpu::Buffer>> {
+        let mut fields = self.grain_fields.lock().ok()?;
+        let index = fields.iter().position(|field| field.key == key)?;
+        let field = fields.remove(index);
+        let buffers = field.fields.clone();
+        fields.insert(0, field);
+        Some(buffers)
+    }
+
+    fn store_field(&self, field: CachedField) {
+        if let Ok(mut fields) = self.grain_fields.lock() {
+            fields.retain(|cached| cached.key != field.key);
+            fields.insert(0, field);
+            fields.truncate(CACHED_FIELDS);
+        }
+    }
+}
+
+/// Grain fields kept per device.
+const CACHED_FIELDS: usize = 2;
+/// Frames larger than this are not cached, so an export does not pin a
+/// full-frame field.
+const CACHED_FIELD_PIXELS: u64 = 8_000_000;
+
+/// The blurred grain field of one frame, one buffer per chunk.
+struct CachedField {
+    key: FieldKey,
+    fields: Vec<wgpu::Buffer>,
+}
+
+/// Everything a grain field depends on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FieldKey {
+    frame_mm: u32,
+    seed: u32,
+    size_mm: [u32; 3],
+    region: [u32; 5],
+    rows: u64,
+}
+
+impl FieldKey {
+    fn new(grain: &Grain, region: GrainRegion, rows: u64) -> Self {
+        Self {
+            frame_mm: grain.frame_mm().to_bits(),
+            seed: grain.seed(),
+            size_mm: grain.size_mm().map(f32::to_bits),
+            region: [
+                region.width,
+                region.height,
+                region.origin_x,
+                region.origin_y,
+                region.frame_width,
+            ],
+            rows,
+        }
+    }
 }
 
 /// One entry point in `pixel.wgsl`, in pipeline order.
@@ -275,6 +350,7 @@ impl Gpu {
                 max_binding: binding,
                 rgb2spec: OnceLock::new(),
                 empty,
+                grain_fields: Mutex::new(Vec::new()),
             }),
         })
     }
@@ -325,6 +401,7 @@ impl Gpu {
                 max_binding: inner.max_binding,
                 rgb2spec: inner.rgb2spec.clone(),
                 empty: inner.empty.clone(),
+                grain_fields: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -488,29 +565,15 @@ impl GpuPipeline {
     /// [`Fidelity::Exact`].
     pub async fn develop(&self, image: &LinearImage) -> Result<SrgbImage, GpuError> {
         let (width, height) = (image.width(), image.height());
-        let stages = Stages {
-            pre: &self.sequence[..1],
-            halation: self
-                .halation
-                .as_ref()
-                .map(|halation| (halation, halation.sigma_px(width, height))),
-            mid: &self.sequence[1..2],
-            grain: self.grain.as_ref().map(|grain| {
-                (
-                    grain,
-                    GrainRegion {
-                        width,
-                        height,
-                        origin_x: 0,
-                        origin_y: 0,
-                        frame_width: width,
-                    },
-                )
-            }),
-            post: &self.sequence[2..],
+        let region = GrainRegion {
+            width,
+            height,
+            origin_x: 0,
+            origin_y: 0,
+            frame_width: width,
         };
         let pixels = self
-            .run_frame(image.pixels(), width, height, stages)
+            .develop_frame(image.pixels(), width, height, None, region)
             .await?;
         Ok(SrgbImage::from_encoded(
             width,
@@ -518,6 +581,34 @@ impl GpuPipeline {
             pixels,
             Fidelity::Exact,
         ))
+    }
+
+    /// Every stage over a `width` × `height` frame that may be a crop.
+    ///
+    /// `sigma` overrides the halation sigma, as a crop passes the full
+    /// frame's. `region` places this frame in the full frame for grain, and
+    /// must match `width` and `height`.
+    pub(crate) async fn develop_frame(
+        &self,
+        samples: &[f32],
+        width: u32,
+        height: u32,
+        sigma: Option<f32>,
+        region: GrainRegion,
+    ) -> Result<Vec<f32>, GpuError> {
+        let stages = Stages {
+            pre: &self.sequence[..1],
+            halation: self.halation.as_ref().map(|halation| {
+                (
+                    halation,
+                    sigma.unwrap_or_else(|| halation.sigma_px(width, height)),
+                )
+            }),
+            mid: &self.sequence[1..2],
+            grain: self.grain.as_ref().map(|grain| (grain, region)),
+            post: &self.sequence[2..],
+        };
+        self.run_frame(samples, width, height, stages).await
     }
 
     /// [`Self::develop`], blocking the calling thread.
@@ -580,18 +671,37 @@ impl GpuPipeline {
         let halation = stages
             .halation
             .map(|(halation, sigma)| HalationUpload::new(gpu, halation, sigma, width, height));
-        let band = grain.as_ref().map(|_| {
-            let size = (rows + 2 * pad) * band_row;
-            let buffer = |label| {
-                gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some(label),
-                    size,
-                    usage: wgpu::BufferUsages::STORAGE,
-                    mapped_at_creation: false,
-                })
-            };
-            (buffer("grain field"), buffer("grain scratch"))
-        });
+        let band = stages
+            .grain
+            .filter(|_| grain.is_some())
+            .map(|(grain, region)| {
+                let key = FieldKey::new(grain, region, rows);
+                if let Some(fields) = gpu.cached_field(key) {
+                    return Band {
+                        fields,
+                        scratch: gpu.empty.clone(),
+                        key: None,
+                        cached: true,
+                    };
+                }
+                let size = (rows + 2 * pad) * band_row;
+                let buffer = |label| {
+                    gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some(label),
+                        size,
+                        usage: wgpu::BufferUsages::STORAGE,
+                        mapped_at_creation: false,
+                    })
+                };
+                let cache = pixels <= CACHED_FIELD_PIXELS;
+                let count = if cache { chunks.len() } else { 1 };
+                Band {
+                    fields: (0..count).map(|_| buffer("grain field")).collect(),
+                    scratch: buffer("grain scratch"),
+                    key: cache.then_some(key),
+                    cached: false,
+                }
+            });
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -606,15 +716,24 @@ impl GpuPipeline {
         if let Some(halation) = &halation {
             halation.widen(gpu, &mut encoder, &chunks[0]);
         }
-        for chunk in &chunks {
+        for (index, chunk) in chunks.iter().enumerate() {
             if let Some(halation) = &halation {
                 halation.add(gpu, &mut encoder, chunk);
             }
             self.encode_film(&mut encoder, chunk, stages.mid);
-            if let (Some(grain), Some((field, scratch))) = (&grain, &band) {
-                grain.apply(gpu, &mut encoder, chunk, width, field, scratch);
+            if let (Some(grain), Some(band)) = (&grain, &band) {
+                let field = &band.fields[index.min(band.fields.len() - 1)];
+                grain.apply(gpu, &mut encoder, chunk, width, field, band);
             }
             self.encode_film(&mut encoder, chunk, stages.post);
+        }
+        if let Some(Band {
+            fields,
+            key: Some(key),
+            ..
+        }) = band
+        {
+            gpu.store_field(CachedField { key, fields });
         }
         self.finish(encoder, &chunks).await
     }
@@ -917,7 +1036,8 @@ impl GrainUpload {
         }
     }
 
-    /// Field, scanner blur, and mix for one chunk of whole rows.
+    /// Field and scanner blur, unless `band` holds a cached field, then the
+    /// mix, for one chunk of whole rows.
     fn apply(
         &self,
         gpu: &Inner,
@@ -925,8 +1045,9 @@ impl GrainUpload {
         chunk: &Chunk,
         width: u32,
         field: &wgpu::Buffer,
-        scratch: &wgpu::Buffer,
+        band: &Band,
     ) {
+        let scratch = &band.scratch;
         let pad = self.plan.pad;
         let rows = chunk.count / width;
         let first_row = chunk.offset / width;
@@ -949,10 +1070,12 @@ impl GrainUpload {
             &[&uniform, &chunk.data, field, scratch, &self.tables],
         );
         let tiles = (params.band[0].div_ceil(16), params.band[1].div_ceil(16));
-        dispatch(encoder, &gpu.grain_kernels[0], &group, tiles);
-        if self.plan.blur {
-            dispatch(encoder, &gpu.grain_kernels[1], &group, tiles);
-            dispatch(encoder, &gpu.grain_kernels[2], &group, tiles);
+        if !band.cached {
+            dispatch(encoder, &gpu.grain_kernels[0], &group, tiles);
+            if self.plan.blur {
+                dispatch(encoder, &gpu.grain_kernels[1], &group, tiles);
+                dispatch(encoder, &gpu.grain_kernels[2], &group, tiles);
+            }
         }
         dispatch(
             encoder,

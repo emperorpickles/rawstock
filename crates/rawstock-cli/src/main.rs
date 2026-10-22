@@ -4,7 +4,8 @@ use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use rawstock_core::color::LinearImage;
 use rawstock_core::decode::{Orientation, RawImage};
-use rawstock_core::render::{Pipeline, SrgbImage};
+use rawstock_core::gpu::{Gpu, GpuPipeline};
+use rawstock_core::render::{Parameters, Pipeline, SrgbImage};
 use rawstock_core::stock::Stock;
 
 /// Rawstock: develop RAW files with film stocks.
@@ -27,6 +28,9 @@ enum Command {
         /// Output image path (`.jpg`, `.jpeg`, `.tif`, or `.tiff`).
         #[arg(long = "out", short = 'o')]
         output: PathBuf,
+        /// Develop on the GPU. Fails if no adapter is found.
+        #[arg(long)]
+        gpu: bool,
     },
     /// Print decode metadata for a RAW file.
     Inspect {
@@ -59,6 +63,9 @@ enum Command {
         /// Output image path (`.jpg`, `.jpeg`, `.tif`, or `.tiff`).
         #[arg(long = "out", short = 'o')]
         output: PathBuf,
+        /// Develop on the GPU. Fails if no adapter is found.
+        #[arg(long)]
+        gpu: bool,
     },
 }
 
@@ -72,7 +79,8 @@ fn run(cli: Cli) -> Result<()> {
             input,
             stock,
             output,
-        } => develop(&input, &stock, &output),
+            gpu,
+        } => develop(&input, &stock, &output, gpu),
         Command::Inspect { file } => {
             let image = RawImage::open(&file)?;
             println!("{image}");
@@ -98,11 +106,12 @@ fn run(cli: Cli) -> Result<()> {
             input,
             stock,
             output,
-        } => develop_linear(&input, &stock, &output),
+            gpu,
+        } => develop_linear(&input, &stock, &output, gpu),
     }
 }
 
-fn develop_linear(input: &Path, stock: &Path, output: &Path) -> Result<()> {
+fn develop_linear(input: &Path, stock: &Path, output: &Path, gpu: bool) -> Result<()> {
     if !is_exr(input) {
         bail!("input must be an .exr file");
     }
@@ -111,21 +120,31 @@ fn develop_linear(input: &Path, stock: &Path, output: &Path) -> Result<()> {
     }
     let parameters = Stock::load(stock)?.into_parameters();
     let linear = LinearImage::read_exr(input)?;
-    let developed = Pipeline::new(parameters).develop(&linear);
+    let developed = render(parameters, &linear, gpu)?;
     developed.write(output, Orientation::Normal)?;
     Ok(())
 }
 
-fn develop(input: &Path, stock: &Path, output: &Path) -> Result<()> {
+fn develop(input: &Path, stock: &Path, output: &Path, gpu: bool) -> Result<()> {
     if !SrgbImage::is_supported_output(output) {
         bail!("output must be a .jpg, .jpeg, .tif, or .tiff file");
     }
     let parameters = Stock::load(stock)?.into_parameters();
     let raw = RawImage::open(input)?;
     let linear = raw.develop_linear()?;
-    let developed = Pipeline::new(parameters).develop(&linear);
+    let developed = render(parameters, &linear, gpu)?;
     developed.write(output, raw.orientation())?;
     Ok(())
+}
+
+/// The film pipeline on the CPU, or on the GPU when asked.
+fn render(parameters: Parameters, linear: &LinearImage, gpu: bool) -> Result<SrgbImage> {
+    if !gpu {
+        return Ok(Pipeline::new(parameters).develop(linear));
+    }
+    let device = Gpu::new_blocking()?;
+    eprintln!("developing on {}", device.adapter_name());
+    Ok(GpuPipeline::new(&device, &parameters).develop_blocking(linear)?)
 }
 
 fn is_exr(path: &Path) -> bool {
@@ -200,6 +219,22 @@ mod tests {
         .unwrap();
         let err = run(cli).unwrap_err();
         assert!(err.to_string().contains("failed to decode"));
+    }
+
+    #[test]
+    fn develop_accepts_gpu() {
+        let cli = Cli::try_parse_from([
+            "rawstock",
+            "develop",
+            "IMG.RAF",
+            "--stock",
+            "neutral.stock.toml",
+            "--out",
+            "out.jpg",
+            "--gpu",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Command::Develop { gpu: true, .. }));
     }
 
     #[test]
