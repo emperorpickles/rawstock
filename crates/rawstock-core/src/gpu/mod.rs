@@ -517,7 +517,7 @@ impl GpuPipeline {
                             values.extend_from_slice(layer);
                         }
                         let balance = scan.balance;
-                        params.scan_balance = [balance[0], balance[1], balance[2], 0.0];
+                        params.scan_balance = [balance[0], balance[1], balance[2], scan.sign];
                     }
                     None => values.resize(count * 10, 0.0),
                 }
