@@ -104,6 +104,86 @@ impl FilmGrain {
     }
 }
 
+/// What the GPU needs to evaluate [`FilmGrain::render`] for one frame width.
+#[cfg(feature = "gpu")]
+pub(crate) struct GpuPlan {
+    pub pitch: f32,
+    /// Whether the scanner aperture blurs the field. Implies every process
+    /// is resolved.
+    pub blur: bool,
+    /// Rows and columns of field computed past each crop edge for the blur.
+    pub pad: u32,
+    /// Normalized scanner taps, `2 * pad + 1` of them, when `blur`.
+    pub kernel: Vec<f32>,
+    pub processes: Vec<GpuProcess>,
+    /// Subtracted from the summed field, then divided by `spread`.
+    pub mean: [f32; 3],
+    pub spread: [f32; 3],
+}
+
+/// One active Poisson process, with its constants already evaluated.
+#[cfg(feature = "gpu")]
+pub(crate) struct GpuProcess {
+    pub cell_mm: f32,
+    /// `exp(-mu)`, so Knuth's generator compares against the CPU's bits.
+    pub poisson_limit: f32,
+    pub sigma_lo: f32,
+    pub sigma_hi: f32,
+    pub aspect_max: f32,
+    pub amplitude: f32,
+    pub reach_mm: f32,
+    /// The frame seed plus this process's salt.
+    pub seed: u32,
+    pub layers: u32,
+    pub resolved: bool,
+}
+
+#[cfg(feature = "gpu")]
+impl FilmGrain {
+    pub(crate) fn gpu_plan(&self, frame_width: u32) -> GpuPlan {
+        let pitch = self.frame_mm / frame_width as f32;
+        let processes = Process::table(self.size_mm);
+        let scanner = Scanner::at_pitch(pitch);
+        let blur = scanner.active() && processes.iter().all(|process| process.resolved(pitch));
+        let mut mean = [0.0_f32; 3];
+        let mut variance = [0.0_f32; 3];
+        let mut active = Vec::new();
+        for process in processes.iter().filter(|process| process.active()) {
+            let splat = process.constants(pitch, blur.then_some(scanner));
+            for layer in 0..3 {
+                mean[layer] += splat.mean[layer];
+                variance[layer] += splat.variance[layer];
+            }
+            active.push(GpuProcess {
+                cell_mm: process.cell_mm,
+                poisson_limit: (-process.mu).exp(),
+                sigma_lo: process.sigma_lo,
+                sigma_hi: process.sigma_hi,
+                aspect_max: process.aspect_max,
+                amplitude: splat.amplitude,
+                reach_mm: process.reach_mm(),
+                seed: self.seed.wrapping_add(process.salt),
+                layers: u32::from(process.layers),
+                resolved: splat.resolved,
+            });
+        }
+        let (pad, kernel) = if blur {
+            (scanner.pad() as u32, scanner.kernel())
+        } else {
+            (0, Vec::new())
+        };
+        GpuPlan {
+            pitch,
+            blur,
+            pad,
+            kernel,
+            processes: active,
+            mean,
+            spread: variance.map(f32::sqrt),
+        }
+    }
+}
+
 /// Where the field is evaluated. Origins are full-frame pixels.
 pub(crate) struct Plane {
     pub width: u32,
@@ -163,18 +243,19 @@ impl Process {
         self.sigma_lo / pitch >= RESOLVED_SIGMA_PX
     }
 
-    fn splat(
-        &self,
-        field: &mut [f64],
-        target: Target,
-        seed: u32,
-        scanner: Option<Scanner>,
-        control: &mut dyn DevelopControl,
-    ) -> Result<([f32; 3], [f32; 3]), Cancelled> {
-        if self.variance <= 0.0 || self.layers == 0 {
-            return Ok(([0.0; 3], [0.0; 3]));
-        }
-        let pitch = target.pitch;
+    /// `false` when this process adds nothing to any layer.
+    fn active(&self) -> bool {
+        self.variance > 0.0 && self.layers != 0
+    }
+
+    /// How far a cloud's kernel reaches from its center, in millimetres.
+    fn reach_mm(&self) -> f32 {
+        SUPPORT_SIGMAS * self.sigma_hi * self.aspect_max.sqrt()
+    }
+
+    /// Per-cloud amplitude and the field's analytic mean and variance at
+    /// `pitch`. Shared by the CPU splat and the GPU upload.
+    fn constants(&self, pitch: f32, scanner: Option<Scanner>) -> Splat {
         let resolved = self.resolved(pitch);
         let sigma2 = log_moment(self.sigma_lo, self.sigma_hi, 2);
         let sigma4 = log_moment(self.sigma_lo, self.sigma_hi, 4);
@@ -206,8 +287,34 @@ impl Process {
                 layer_variance[layer] = variance;
             }
         }
+        Splat {
+            resolved,
+            amplitude,
+            mean,
+            variance: layer_variance,
+        }
+    }
 
-        let margin = SUPPORT_SIGMAS * self.sigma_hi * self.aspect_max.sqrt() + self.cell_mm;
+    fn splat(
+        &self,
+        field: &mut [f64],
+        target: Target,
+        seed: u32,
+        scanner: Option<Scanner>,
+        control: &mut dyn DevelopControl,
+    ) -> Result<([f32; 3], [f32; 3]), Cancelled> {
+        if !self.active() {
+            return Ok(([0.0; 3], [0.0; 3]));
+        }
+        let pitch = target.pitch;
+        let Splat {
+            resolved,
+            amplitude,
+            mean,
+            variance: layer_variance,
+        } = self.constants(pitch, scanner);
+
+        let margin = self.reach_mm() + self.cell_mm;
         let origin_x_mm = target.origin_x as f32 * pitch;
         let origin_y_mm = target.origin_y as f32 * pitch;
         let width_mm = target.width as f32 * pitch;
@@ -263,6 +370,14 @@ impl Process {
         }
         Ok((mean, layer_variance))
     }
+}
+
+/// What one process contributes at a given pitch.
+struct Splat {
+    resolved: bool,
+    amplitude: f32,
+    mean: [f32; 3],
+    variance: [f32; 3],
 }
 
 struct ProcessKind {
@@ -537,17 +652,9 @@ impl Scanner {
         sigma2_mm / (sigma2_mm + scanner2)
     }
 
-    fn blur(
-        self,
-        field: &mut [f64],
-        width: usize,
-        rows: usize,
-        control: &mut dyn DevelopControl,
-    ) -> Result<(), Cancelled> {
+    /// Normalized Gaussian taps, `2 * pad + 1` of them.
+    fn kernel(self) -> Vec<f32> {
         let radius = self.pad();
-        if radius <= 0 || width == 0 || rows == 0 {
-            return Ok(());
-        }
         let sigma = self.sigma_px;
         let mut kernel = Vec::with_capacity(radius as usize * 2 + 1);
         let mut weight = 0.0_f32;
@@ -559,6 +666,21 @@ impl Scanner {
         for tap in &mut kernel {
             *tap /= weight;
         }
+        kernel
+    }
+
+    fn blur(
+        self,
+        field: &mut [f64],
+        width: usize,
+        rows: usize,
+        control: &mut dyn DevelopControl,
+    ) -> Result<(), Cancelled> {
+        let radius = self.pad();
+        if radius <= 0 || width == 0 || rows == 0 {
+            return Ok(());
+        }
+        let kernel = self.kernel();
         let mut temp = vec![0.0_f64; field.len()];
         for y in 0..rows {
             if control.cancelled() {
