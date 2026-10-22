@@ -12,6 +12,9 @@
   import { FrameBuffer } from "./lib/frame";
   import type { PackedFrame } from "./lib/frame";
   import { Host } from "./lib/host";
+  import Preferences from "./lib/preferences/Preferences.svelte";
+  import { Preferences as Prefs } from "./lib/preferences/settings";
+  import type { AppSettings } from "./lib/preferences/settings";
   import { Shortcuts } from "./lib/shortcuts";
   import SidePanel from "./lib/SidePanel.svelte";
   import Viewer from "./lib/Viewer.svelte";
@@ -35,6 +38,8 @@
   let exportOpen = $state(false);
   let aboutOpen = $state(false);
   let licensesOpen = $state(false);
+  let preferencesOpen = $state(false);
+  let appSettings = $state<AppSettings>(Prefs.defaults());
   let quality = $state(90);
   let frame = $state<PackedFrame | null>(null);
   let frameMode = $state<"texture" | "region" | "empty">("empty");
@@ -46,6 +51,10 @@
   let exportDialog = $state<HTMLDialogElement | null>(null);
   let aboutDialog = $state<HTMLDialogElement | null>(null);
   let licensesDialog = $state<HTMLDialogElement | null>(null);
+
+  $effect(() => {
+    Prefs.applyAppearance(appSettings);
+  });
 
   const selectedImage = $derived(images.find((image) => image.imageId === selected) ?? null);
 
@@ -108,6 +117,9 @@
     void (async () => {
       const unlisten = await Promise.all([
         host.onMenu((action) => void perform(action)),
+        host.onSettingsChanged((next) => {
+          appSettings = next;
+        }),
         host.onOpen((paths) => void ingest(paths)),
         host.onProgress((event) => {
           if (jobs.current(event.imageId, event.kind, event.jobId)) {
@@ -158,7 +170,16 @@
       ]);
       cleanups.push(...unlisten);
       try {
+        appSettings = await host.getAppSettings();
+      } catch (error) {
+        errors = [appError(error).message];
+      }
+      try {
         stocks = await host.listStocks();
+        const starting = Prefs.startingStock(appSettings, stocks);
+        if (starting && !settings.stock.id) {
+          settings = { ...settings, stock: { id: starting.id, revision: starting.revision } };
+        }
       } catch (error) {
         errors = [appError(error).message];
       }
@@ -283,6 +304,9 @@
       case "clipping":
         clipping = !clipping;
         break;
+      case "preferences":
+        preferencesOpen = true;
+        break;
       case "about":
         aboutOpen = true;
         break;
@@ -322,6 +346,31 @@
       stock: { id: stock.id, revision: stock.revision },
     };
     notice = `${stock.name}, revision ${stock.revision}`;
+  }
+
+  async function changeAppSettings(next: AppSettings) {
+    if (!host) {
+      appSettings = next;
+      return;
+    }
+    try {
+      appSettings = await host.setAppSettings(next);
+    } catch (error) {
+      errors = [appError(error).message];
+    }
+  }
+
+  async function resetAppSettings(clearRecent: boolean) {
+    if (!host) {
+      appSettings = Prefs.defaults();
+      return;
+    }
+    try {
+      appSettings = await host.resetAppSettings(clearRecent);
+      notice = clearRecent ? "Settings and recent files were reset." : "Settings were reset.";
+    } catch (error) {
+      errors = [appError(error).message];
+    }
   }
 
   async function developFull() {
@@ -446,6 +495,16 @@
     <button type="button" onclick={() => (exportOpen = false)}>Close</button>
   </div>
 </dialog>
+
+<Preferences
+  open={preferencesOpen}
+  settings={appSettings}
+  {stocks}
+  title={platform === "mac" ? "Settings" : "Preferences"}
+  onchange={(next) => void changeAppSettings(next)}
+  onreset={(clearRecent) => void resetAppSettings(clearRecent)}
+  onclose={() => (preferencesOpen = false)}
+/>
 
 <dialog bind:this={aboutDialog} aria-labelledby="about-title" onclose={() => (aboutOpen = false)}>
   <h2 id="about-title">About rawstock</h2>

@@ -63,6 +63,9 @@ export class Shortcuts {
     if (mod && !event.shiftKey && key === "2") {
       return "zoom-200";
     }
+    if (mod && !event.shiftKey && key === ",") {
+      return "preferences";
+    }
     if (platform === "windows" && event.ctrlKey && !event.shiftKey && key === "y") {
       return "redo";
     }
