@@ -4,13 +4,14 @@
 use std::sync::atomic::Ordering;
 
 use tauri::ipc::Response;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::contract::{
     AppError, EditSettings, ExportOptions, JobStarted, OpenOutcome, SaveResult, StockSummary,
 };
 use crate::files::classify_inputs;
 use crate::menu::{self, on_menu_event};
+use crate::settings::{AppSettings, SettingsChanged};
 use crate::shell;
 use crate::state::{self, AppState, lock};
 use crate::stocks;
@@ -187,6 +188,60 @@ fn clear_recent(app: AppHandle) -> Result<(), AppError> {
 }
 
 #[tauri::command]
+fn get_app_settings(state: State<'_, AppState>) -> AppSettings {
+    lock(&state.settings).get().clone()
+}
+
+#[tauri::command]
+fn set_app_settings(app: AppHandle, settings: AppSettings) -> Result<AppSettings, AppError> {
+    let saved = {
+        let state = app.state::<AppState>();
+        let mut store = lock(&state.settings);
+        store.set(settings).inspect_err(|error| {
+            state::log_detail(&state.log_dir, &format!("set_app_settings {error}"));
+        })?;
+        store.get().clone()
+    };
+    apply_settings(&app, &saved, false);
+    Ok(saved)
+}
+
+/// Restore every default. Photos, sidecars, and exports are never touched.
+/// Recent files are cleared only when the user asked for that too.
+#[tauri::command]
+fn reset_app_settings(app: AppHandle, clear_recent: bool) -> Result<AppSettings, AppError> {
+    let saved = {
+        let state = app.state::<AppState>();
+        let mut store = lock(&state.settings);
+        store.reset().inspect_err(|error| {
+            state::log_detail(&state.log_dir, &format!("reset_app_settings {error}"));
+        })?;
+        store.get().clone()
+    };
+    apply_settings(&app, &saved, clear_recent);
+    Ok(saved)
+}
+
+fn apply_settings(app: &AppHandle, settings: &AppSettings, clear_recent: bool) {
+    {
+        let state = app.state::<AppState>();
+        let mut recent = lock(&state.recent);
+        recent.set_limit(settings.recent.limit);
+        if clear_recent {
+            recent.clear();
+        }
+        let _ = recent.save();
+    }
+    let _ = menu::refresh_recent_menu(app);
+    let _ = app.emit(
+        "settings:changed",
+        SettingsChanged {
+            settings: settings.clone(),
+        },
+    );
+}
+
+#[tauri::command]
 fn app_info(state: State<'_, AppState>) -> crate::help::AppInfo {
     crate::help::AppInfo::current(&state.log_dir)
 }
@@ -252,6 +307,9 @@ pub fn handlers() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sy
         save_sidecar,
         recent_files,
         clear_recent,
+        get_app_settings,
+        set_app_settings,
+        reset_app_settings,
         app_info,
         dispatch_menu_action,
         set_shortcuts_suspended,

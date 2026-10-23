@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import { appError } from "./contract";
+import type { AppSettings, SettingsChanged } from "./preferences/settings";
 import type { AppInfo } from "./help/report";
 import type {
   CacheEvictedEvent,
@@ -103,6 +104,18 @@ export class Host {
     await this.invoke("clear_recent");
   }
 
+  async getAppSettings(): Promise<AppSettings> {
+    return this.invoke("get_app_settings");
+  }
+
+  async setAppSettings(settings: AppSettings): Promise<AppSettings> {
+    return this.invoke("set_app_settings", { settings });
+  }
+
+  async resetAppSettings(clearRecent: boolean): Promise<AppSettings> {
+    return this.invoke("reset_app_settings", { clearRecent });
+  }
+
   async appInfo(): Promise<AppInfo> {
     return this.invoke("app_info");
   }
@@ -133,6 +146,10 @@ export class Host {
 
   onOpen(handler: (paths: string[]) => void): Promise<UnlistenFn> {
     return this.on<OpenRequested>("open:requested", (payload) => handler(payload.paths));
+  }
+
+  onSettingsChanged(handler: (settings: AppSettings) => void): Promise<UnlistenFn> {
+    return this.on<SettingsChanged>("settings:changed", (payload) => handler(payload.settings));
   }
 
   onProgress(handler: (event: ProgressEvent) => void): Promise<UnlistenFn> {

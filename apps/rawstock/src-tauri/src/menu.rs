@@ -35,6 +35,7 @@ pub fn menu_hit(id: &str) -> MenuHit {
         "about" => MenuHit::Action("about"),
         "licenses" => MenuHit::Action("licenses"),
         "report-issue" => MenuHit::Action("report-issue"),
+        "preferences" => MenuHit::Action("preferences"),
         "show-log" => MenuHit::Action("show-log"),
         "recent-empty" => MenuHit::Ignore,
         other => {
@@ -119,6 +120,12 @@ fn install_menu(app: &AppHandle, paths: &[String]) -> tauri::Result<()> {
 
     let undo = item(app, "undo", "Undo", Some("CmdOrCtrl+Z"))?;
     let redo = item(app, "redo", "Redo", Some("CmdOrCtrl+Shift+Z"))?;
+    // macOS names it Settings in the app menu; Windows and Linux put
+    // Preferences under Edit.
+    #[cfg(target_os = "macos")]
+    let preferences = item(app, "preferences", "Settings…", Some("CmdOrCtrl+,"))?;
+    #[cfg(not(target_os = "macos"))]
+    let preferences = item(app, "preferences", "Preferences…", Some("CmdOrCtrl+,"))?;
     let fit = item(app, "fit", "Fit", Some("CmdOrCtrl+0"))?;
     let zoom_100 = item(app, "zoom-100", "100%", Some("CmdOrCtrl+1"))?;
     let zoom_200 = item(app, "zoom-200", "200%", Some("CmdOrCtrl+2"))?;
@@ -170,7 +177,13 @@ fn install_menu(app: &AppHandle, paths: &[String]) -> tauri::Result<()> {
             )?
         }
     };
+    #[cfg(target_os = "macos")]
     let edit = Submenu::with_items(app, "Edit", true, &[&undo, &redo])?;
+    #[cfg(not(target_os = "macos"))]
+    let edit = {
+        let sep_edit = PredefinedMenuItem::separator(app)?;
+        Submenu::with_items(app, "Edit", true, &[&undo, &redo, &sep_edit, &preferences])?
+    };
     let view = Submenu::with_items(
         app,
         "View",
@@ -196,11 +209,19 @@ fn install_menu(app: &AppHandle, paths: &[String]) -> tauri::Result<()> {
         let hide = PredefinedMenuItem::hide(app, None::<&str>)?;
         let hide_others = PredefinedMenuItem::hide_others(app, None::<&str>)?;
         let sep_app = PredefinedMenuItem::separator(app)?;
+        let sep_settings = PredefinedMenuItem::separator(app)?;
         let app_menu = Submenu::with_items(
             app,
             "rawstock",
             true,
-            &[&hide, &hide_others, &sep_app, &quit],
+            &[
+                &preferences,
+                &sep_settings,
+                &hide,
+                &hide_others,
+                &sep_app,
+                &quit,
+            ],
         )?;
         Menu::with_items(app, &[&app_menu, &file, &edit, &view, &help])?
     };
@@ -282,6 +303,7 @@ mod tests {
         assert_eq!(menu_hit("open"), MenuHit::Action("open"));
         assert_eq!(menu_hit("redo-y"), MenuHit::Action("redo"));
         assert_eq!(menu_hit("zoom-100"), MenuHit::Action("zoom-100"));
+        assert_eq!(menu_hit("preferences"), MenuHit::Action("preferences"));
         assert_eq!(menu_hit("show-log"), MenuHit::Action("show-log"));
         assert_eq!(menu_hit("recent-2"), MenuHit::Recent(2));
         assert_eq!(menu_hit("recent-empty"), MenuHit::Ignore);

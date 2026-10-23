@@ -11,6 +11,7 @@ mod help;
 mod jobs;
 mod menu;
 mod recent;
+mod settings;
 mod shell;
 mod state;
 mod stocks;
@@ -46,10 +47,21 @@ pub fn run() {
             );
             let config_dir = app.path().app_config_dir()?;
             std::fs::create_dir_all(&config_dir)?;
+            let (settings, note) = settings::SettingsStore::load(config_dir.join("settings.json"));
+            if let settings::LoadNote::Corrupt { reason, backup } = &note {
+                state::log_detail(
+                    &log_dir,
+                    &format!(
+                        "settings.json could not be read ({reason}); moved to {} and started on defaults",
+                        backup.display()
+                    ),
+                );
+            }
             let mut recent = recent::RecentFiles::load(config_dir.join("recent.json"));
+            recent.set_limit(settings.get().recent.limit);
             recent.prune_missing();
             let _ = recent.save();
-            app.manage(AppState::new(recent, log_dir));
+            app.manage(AppState::new(recent, settings, log_dir));
             let state = app.state::<AppState>();
             {
                 let mut pending = lock(&state.pending_opens);
