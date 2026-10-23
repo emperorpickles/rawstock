@@ -1,6 +1,6 @@
 //! Tauri commands. Develop commands return a job id and emit the contract
-//! events. Only stock thumbnails run the film pipeline so far
-//! ([`crate::thumbnails`]); the other develops are still the stub.
+//! events. Previews and full frames run in [`crate::develop`], stock
+//! thumbnails in [`crate::thumbnails`]. Export is still the stub.
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -9,8 +9,10 @@ use tauri::ipc::Response;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::contract::{
-    AppError, EditSettings, ExportOptions, JobStarted, OpenOutcome, SaveResult, StockSummary,
+    AppError, EditSettings, ExportOptions, JobKind, JobStarted, OpenOutcome, SaveResult,
+    StockSummary,
 };
+use crate::develop::DevelopRequest;
 use crate::files::classify_inputs;
 use crate::menu::{self, on_menu_event};
 use crate::settings::{AppSettings, SettingsChanged};
@@ -83,6 +85,14 @@ fn develop_preview(
         stub.develop_preview(&image_id, &settings, long_edge, compare)
     })?;
     log_develop(&app, "develop_preview", started.job_id, &image_id);
+    submit_develop(
+        &app,
+        &image_id,
+        started.job_id,
+        JobKind::Preview,
+        settings,
+        long_edge,
+    );
     Ok(started)
 }
 
@@ -94,7 +104,32 @@ fn develop_full(
 ) -> Result<JobStarted, AppError> {
     let started = dispatch(&app, |stub| stub.develop_full(&image_id, &settings))?;
     log_develop(&app, "develop_full", started.job_id, &image_id);
+    submit_develop(&app, &image_id, started.job_id, JobKind::Full, settings, 0);
     Ok(started)
+}
+
+/// Hand an accepted job to the real develop thread.
+fn submit_develop(
+    app: &AppHandle,
+    image_id: &str,
+    job_id: u64,
+    kind: JobKind,
+    settings: EditSettings,
+    long_edge: u32,
+) {
+    let state = app.state::<AppState>();
+    let Some(path) = lock(&state.stub).image_path(image_id) else {
+        return;
+    };
+    if let Some(developer) = lock(&state.developer).as_ref() {
+        developer.submit(DevelopRequest {
+            job_id,
+            kind,
+            path: PathBuf::from(path),
+            settings,
+            long_edge,
+        });
+    }
 }
 
 /// One log line per develop job, so a pan can be checked for zero develops.

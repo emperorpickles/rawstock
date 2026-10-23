@@ -5,6 +5,7 @@
 
 mod commands;
 mod contract;
+mod develop;
 mod files;
 mod frame;
 mod help;
@@ -75,6 +76,7 @@ pub fn run() {
             menu::refresh_recent_menu(app.handle())?;
             worker::spawn(app.handle().clone());
             let thumbnailer = thumbnails::Thumbnailer::spawn(app.handle().clone());
+            *lock(&state.developer) = Some(develop::Developer::spawn(app.handle().clone()));
             *lock(&state.thumbnailer) = Some(thumbnailer);
             Ok(())
         })
