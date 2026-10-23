@@ -45,7 +45,10 @@ Implemented order:
    not a trait object, unless there is a stated reason.
 5. **Grain** in density, when the stock sets it.
 6. **Print/scan.** A spectral stock with dye curves converts to printing
-   density first. Otherwise characteristic density is printed.
+   density first, read by the eye observer or by `[scan_response]`
+   (Status M for a negative). Otherwise characteristic density is printed.
+   The print curve gives print density; with `[print_dye_density]` the
+   paper's own dyes are viewed under D65, otherwise ideal ACEScg dyes.
 7. **Output.** ACEScg to encoded sRGB. The code clips out-of-gamut
    channels. There is no separate gamut-compression stage.
 

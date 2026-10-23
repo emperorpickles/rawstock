@@ -506,7 +506,7 @@ impl GpuPipeline {
             FilmModel::Spectral(film) => {
                 let tables = film.gpu_tables();
                 let count = tables.wavelengths.len();
-                let mut values = Vec::with_capacity(count * 10);
+                let mut values = Vec::with_capacity(count * 16);
                 values.extend_from_slice(tables.wavelengths);
                 for layer in tables.weighted_sensitivity {
                     values.extend_from_slice(layer);
@@ -521,8 +521,18 @@ impl GpuPipeline {
                     }
                     None => values.resize(count * 10, 0.0),
                 }
+                if let Some(print) = tables.print {
+                    for layer in print.dyes.iter().chain(print.observer) {
+                        values.extend_from_slice(layer);
+                    }
+                }
                 let (res, _, _, ap0) = crate::spectrum::gpu_upsample();
-                params.spectral = [count as u32, u32::from(tables.scan.is_some()), res, 0];
+                params.spectral = [
+                    count as u32,
+                    u32::from(tables.scan.is_some()),
+                    res,
+                    u32::from(tables.print.is_some()),
+                ];
                 params.ap1_to_ap0 = ap0.map(|row| [row[0], row[1], row[2], 0.0]);
                 sequence.push(Kernel::DensitySpectral);
                 if tables.scan.is_some() {
@@ -966,6 +976,9 @@ struct GrainParams {
 }
 
 /// The grain plan and its tables for one run.
+/// Words in one process record of the grain tables.
+const PROCESS_WORDS: usize = 16;
+
 struct GrainUpload {
     plan: crate::grain::GpuPlan,
     region: GrainRegion,
@@ -977,8 +990,21 @@ impl GrainUpload {
     fn new(gpu: &Inner, grain: &Grain, region: GrainRegion) -> Self {
         let plan = crate::grain::FilmGrain::new(grain.frame_mm(), grain.seed(), grain.size_mm())
             .gpu_plan(region.frame_width);
+        // Process records first, then each unresolved process's count table.
         let mut tables = Vec::new();
+        let mut cdf_offset = (plan.processes.len() * PROCESS_WORDS) as u32;
         for process in &plan.processes {
+            let (cdf_len, mass_mean, mass_spread) =
+                process
+                    .aggregate
+                    .as_ref()
+                    .map_or((0, 0.0, 0.0), |aggregate| {
+                        (
+                            aggregate.cdf.len() as u32,
+                            aggregate.mass_mean,
+                            aggregate.mass_spread,
+                        )
+                    });
             tables.extend([
                 process.cell_mm,
                 process.poisson_limit,
@@ -990,9 +1016,17 @@ impl GrainUpload {
                 f32::from_bits(process.seed),
                 f32::from_bits(process.layers),
                 f32::from_bits(u32::from(process.resolved)),
+                f32::from_bits(cdf_offset),
+                f32::from_bits(cdf_len),
+                mass_mean,
+                mass_spread,
                 0.0,
                 0.0,
             ]);
+            cdf_offset += cdf_len;
+        }
+        for aggregate in plan.processes.iter().filter_map(|p| p.aggregate.as_ref()) {
+            tables.extend_from_slice(&aggregate.cdf);
         }
         let kernel_offset = tables.len() as u32;
         tables.extend_from_slice(&plan.kernel);
@@ -1071,7 +1105,9 @@ impl GrainUpload {
         );
         let tiles = (params.band[0].div_ceil(16), params.band[1].div_ceil(16));
         if !band.cached {
-            dispatch(encoder, &gpu.grain_kernels[0], &group, tiles);
+            // `grain_field` tiles are 8 by 8.
+            let field_tiles = (params.band[0].div_ceil(8), params.band[1].div_ceil(8));
+            dispatch(encoder, &gpu.grain_kernels[0], &group, field_tiles);
             if self.plan.blur {
                 dispatch(encoder, &gpu.grain_kernels[1], &group, tiles);
                 dispatch(encoder, &gpu.grain_kernels[2], &group, tiles);

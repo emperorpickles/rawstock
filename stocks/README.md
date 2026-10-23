@@ -96,6 +96,30 @@ green = [0.0, 1.0, 0.0]
 blue = [0.0, 1.0, 0.0]
 ```
 
+Two more optional spectral tables change how a negative is read and
+printed. `[scan_response]` holds red, green, and blue densitometer
+responses on the same grid (Status M for a published negative). With it,
+the dye scan reads the negative through those responses instead of the
+eye, so each channel sees mostly its own dye, as a printer does. It needs
+`[dye_density]`. `[print_dye_density]` holds the print's own three dye
+spectra. With it, the `[print]` curve gives each channel's paper density,
+and the print is the transmittance of those three dyes together viewed
+under D65 / CIE 1931, instead of three ideal ACEScg dyes. Zero print
+density is the paper white, ACEScg `(1, 1, 1)`. Parametric stocks reject
+both tables.
+
+```toml
+[scan_response]               # optional; needs [dye_density]
+red = [0.0, 0.2, 1.0]
+green = [0.0, 1.0, 0.2]
+blue = [1.0, 0.2, 0.0]
+
+[print_dye_density]           # optional; omitted keeps ideal ACEScg dyes
+red = [0.1, 0.3, 1.0]
+green = [0.2, 1.0, 0.3]
+blue = [1.0, 0.4, 0.1]
+```
+
 `process` is an optional spectral key: `negative` (the default) or
 `reversal`. A reversal (slide) stock's `red`, `green`, and `blue` curves
 fall: density must not increase as log exposure rises. It needs
@@ -140,29 +164,46 @@ They are not a measurement of any manufactured film.
 
 ## Kodak Portra 400
 
-[portra400.stock.toml](portra400.stock.toml) is a spectral stock. The
-sensitivities and D-logH curves were digitized from Kodak publication E-4050
-by Jan Lohse in
-[spectral_film_lut](https://github.com/JanLohse/spectral_film_lut), which is
-MIT-licensed, copyright 2026 Jan Lohse:
+[portra400.stock.toml](portra400.stock.toml) is a spectral negative printed
+the way a lab prints it. Its sensitivities, D-logH curves, and dye shapes
+come from Kodak publication E-4050, and its print curve and paper dyes from
+the KODAK PROFESSIONAL PORTRA ENDURA paper datasheet, both digitized by Jan
+Lohse in [spectral_film_lut](https://github.com/JanLohse/spectral_film_lut),
+which is MIT-licensed, copyright 2026 Jan Lohse:
 
 <https://github.com/JanLohse/spectral_film_lut/blob/main/LICENSE>
 
-`lab/import_spectral_film_lut.py` reads that package's Portra 400 module and
-writes a stock. It does not vendor the package. The committed
-`portra400.stock.toml` keeps that importer's sensitivities and D-logH
-curves. Re-running the importer overwrites the file and drops the tuning
-below. `agx-emulsion` data is not used.
+`lab/import_spectral_film_lut.py` reads the Portra 400 and Portra Endura
+modules and that package's Status M table, and writes every measured array
+in the file. It does not vendor the package. `agx-emulsion` data is not
+used.
 
-The dye scales, print curve, interlayer coupling, grain, and halation are an
-**approximate aesthetic tuning**, shaped by eye. They are not densitometer
-readings, a paper curve, or a published granularity table. Comments in the
-TOML mark each of those values the same way. The dye wavelengths still come
-from the importer's split of midscale-minus-D-min. Grain uses a
-Vision3-style RMS-versus-density shape (rises, then falls; blue grainiest)
-and per-layer `size_mm` dye-cloud sizes, chosen by eye for a fine ISO 400
-color negative. Halation is a faint red fringe, because this film has an
-anti-halation layer.
+- **Negative.** Sensitivities extend each traced end slope, floored three
+  decades below the peak, as for Velvia. Dye shapes are the split of
+  midscale-minus-D-min, each scaled to read density 1 through its own
+  Status M channel.
+- **Curves.** The datasheet curves are Status M readings of the whole dye
+  stack. The stock stores dye amounts: readings above D-min (the orange
+  mask), unmixed by the inverse of the dyes' Status M readings, so a Status
+  M scan gives the datasheet curves back.
+- **Scan.** `[scan_response]` is Status M. `reference_log_exposure` is the
+  ISO middle gray, which the scan balances to neutral, the job of a
+  printer's color trims.
+- **Print.** `[print]` is the paper's green-layer curve from its white.
+  `print_exposure` prints middle gray at an 18 % reflector's density, the
+  paper's laboratory aim. `[print_dye_density]` is the paper's dyes, scaled
+  so equal print densities at that aim view as neutral under D65.
+
+There is no interlayer coupling. Grain and halation are an **approximate
+aesthetic tuning**, marked in the TOML. Grain follows the shape of the
+Vision3 250D tables spectral_film_lut carries for this film (blue grainiest,
+cyan clouds coarsest). The paper multiplies negative grain by its contrast,
+about 2.5, so the table sits near 5207's values, and a developed middle
+gray shows about twice Velvia's luma noise. Halation is a faint red fringe,
+because this film has an anti-halation layer.
+
+Re-running the importer drops the header notes, grain, and halation; see
+[lab/README.md](../lab/README.md).
 
 Portra is a Kodak trademark. This file is an attributed transcription of
 published curves, not an invented look. Invented looks still need original

@@ -7,10 +7,12 @@ use std::sync::mpsc;
 
 use crate::jobs::ContractStub;
 use crate::recent::RecentFiles;
+use crate::settings::SettingsStore;
 
 pub struct AppState {
     pub stub: Mutex<ContractStub>,
     pub recent: Mutex<RecentFiles>,
+    pub settings: Mutex<SettingsStore>,
     /// Paths that arrived before the webview was listening.
     pub pending_opens: Mutex<Vec<String>>,
     pub ui_ready: AtomicBool,
@@ -24,10 +26,11 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(recent: RecentFiles, log_dir: PathBuf) -> Self {
+    pub fn new(recent: RecentFiles, settings: SettingsStore, log_dir: PathBuf) -> Self {
         Self {
             stub: Mutex::new(ContractStub::default()),
             recent: Mutex::new(recent),
+            settings: Mutex::new(settings),
             pending_opens: Mutex::new(Vec::new()),
             ui_ready: AtomicBool::new(false),
             shortcuts_suspended: AtomicBool::new(false),

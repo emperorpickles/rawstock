@@ -160,8 +160,8 @@
 
 <style>
   .surround {
-    background: #7a7a7a;
-    color: #141414;
+    background: var(--surround, #2e2e2e);
+    color: var(--surround-ink, #f2f2f2);
     min-width: 0;
     min-height: 0;
     position: relative;
