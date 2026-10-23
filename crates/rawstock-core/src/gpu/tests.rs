@@ -324,13 +324,31 @@ fn grain_matches() {
             },
         ),
     ];
-    // HP5 Plus is silver grain: every cloud in all three channels.
-    for name in ["portra400", "ilford-hp5-plus"] {
-        let grain = stock(name).grain().unwrap().clone();
+    // Portra and HP5 Plus are white grain, HP5 with soft clumps in all
+    // three channels. Dye clouds and silver clumps keep their own cases.
+    let portra = stock("portra400").grain().unwrap().clone();
+    let silver = stock("ilford-hp5-plus").grain().unwrap().clone();
+    let dye = Grain::new(portra.frame_mm(), portra.seed(), portra.layers().clone())
+        .unwrap()
+        .with_size_mm([0.014, 0.011, 0.009])
+        .unwrap();
+    let clumps = Grain::monochrome(
+        silver.frame_mm(),
+        silver.seed(),
+        silver.layers()[0].clone(),
+        0.006,
+    )
+    .unwrap();
+    for (name, grain) in [
+        ("portra400", &portra),
+        ("ilford-hp5-plus", &silver),
+        ("dye clouds", &dye),
+        ("silver clumps", &clumps),
+    ] {
         for (label, region) in cases {
             assert_grain(
                 &format!("{name} {label}"),
-                grain_case(gpu, &grain, region, 0.0),
+                grain_case(gpu, grain, region, 0.0),
             );
         }
     }

@@ -17,12 +17,20 @@
 //! than the datasheet RMS, a small preview less, the way averaging an export
 //! down to that size does.
 //!
+//! A white texture replaces the clouds with grain finer than the scanner
+//! can resolve: white noise on the film, read through the scanner spot.
+//! Scans of real Portra 400 look like that once the scanner's own blur is
+//! divided out, and its layers are nearly independent. It is drawn the way
+//! sub-pixel clouds are, per pixel and then spread by the pixel aperture,
+//! so it shares their calibration, crop padding, and GPU path.
+//!
 //! The implementation is original. It does not copy darktable, spektrafilm,
 //! or the Newson reference renderer.
 
 use rayon::prelude::*;
 
 use crate::render::{Cancelled, DevelopControl};
+use crate::stock::{Grain, GrainTexture};
 use crate::workers::Workers;
 
 /// Grain field for one frame.
@@ -35,20 +43,57 @@ use crate::workers::Workers;
 /// A monochrome emulsion has one silver layer. It draws silver clumps from
 /// [`SILVER_KINDS`], and every process lands in all three channels, so the
 /// field is the same in each and the grain has no chroma.
+///
+/// [`GrainTexture::White`]: one shared white process carries `correlation`
+/// of each layer's white variance and a private one per layer the rest.
+/// With `clumping`, that share of the variance is soft shared clumps of
+/// the layers' `size_mm` instead; otherwise `size_mm` is unused.
 pub(crate) struct FilmGrain {
     frame_mm: f32,
     seed: u32,
     size_mm: [f32; 3],
     monochrome: bool,
+    texture: GrainTexture,
+    correlation: f32,
+    clumping: f32,
 }
 
 impl FilmGrain {
-    pub(crate) fn new(frame_mm: f32, seed: u32, size_mm: [f32; 3], monochrome: bool) -> Self {
+    pub(crate) fn of(grain: &Grain) -> Self {
+        Self {
+            frame_mm: grain.frame_mm(),
+            seed: grain.seed(),
+            size_mm: grain.size_mm(),
+            monochrome: grain.is_monochrome(),
+            texture: grain.texture(),
+            correlation: grain.correlation(),
+            clumping: grain.clumping(),
+        }
+    }
+
+    /// Cloud grain without a [`Grain`], for unit tests.
+    #[cfg(test)]
+    fn clouds(frame_mm: f32, seed: u32, size_mm: [f32; 3], monochrome: bool) -> Self {
         Self {
             frame_mm,
             seed,
             size_mm,
             monochrome,
+            texture: GrainTexture::Clouds,
+            correlation: 0.0,
+            clumping: 0.0,
+        }
+    }
+
+    fn processes(&self) -> Vec<Process> {
+        match self.texture {
+            GrainTexture::Clouds => Process::table(self.size_mm, self.monochrome),
+            GrainTexture::White => Process::white(
+                self.correlation,
+                self.clumping,
+                self.size_mm,
+                self.monochrome,
+            ),
         }
     }
 
@@ -65,7 +110,7 @@ impl FilmGrain {
         control: &mut dyn DevelopControl,
     ) -> Result<Vec<f32>, Cancelled> {
         let pitch = self.frame_mm / plane.frame_width as f32;
-        let processes = Process::table(self.size_mm, self.monochrome);
+        let processes = self.processes();
         let aperture = Aperture::for_frame(&processes, pitch);
         let pad = aperture.map_or(0, Aperture::pad);
         let origin_x = plane.origin_x as i32 - pad;
@@ -124,7 +169,7 @@ impl FilmGrain {
             return [0.0; 3];
         }
         let pitch = self.frame_mm / frame_width as f32;
-        let processes = Process::table(self.size_mm, self.monochrome);
+        let processes = self.processes();
         let aperture = Aperture::for_frame(&processes, pitch);
         let mut variance = [0.0_f32; 3];
         let mut reference = [0.0_f32; 3];
@@ -187,7 +232,7 @@ pub(crate) struct GpuProcess {
 impl FilmGrain {
     pub(crate) fn gpu_plan(&self, frame_width: u32) -> GpuPlan {
         let pitch = self.frame_mm / frame_width as f32;
-        let processes = Process::table(self.size_mm, self.monochrome);
+        let processes = self.processes();
         let aperture = Aperture::for_frame(&processes, pitch);
         let mut mean = [0.0_f32; 3];
         let mut reference = [0.0_f32; 3];
@@ -364,6 +409,57 @@ impl Process {
                 }
             })
             .collect()
+    }
+
+    /// [`GrainTexture::White`]: one shared process with `correlation` of
+    /// each layer's white variance and a private one per layer with the
+    /// rest, or a single shared process for monochrome. `clumping` of the
+    /// variance moves into shared gaussian clumps of the mean `size_mm`.
+    ///
+    /// The white processes are dense fields of [`WHITE_SIGMA_MM`] clouds, so
+    /// every pixel holds hundreds and draws the gaussian [`Aggregate`].
+    /// Variance per pixel then follows the box and scanner exactly as
+    /// sub-pixel dye clouds do, which is Selwyn's law for white grain.
+    fn white(correlation: f32, clumping: f32, size_mm: [f32; 3], monochrome: bool) -> Vec<Self> {
+        let white = 1.0 - clumping;
+        let process = |salt: u32, variance: f32, layers: u8| Self {
+            cell_mm: WHITE_SIGMA_MM,
+            mu: 1.0,
+            salt,
+            sigma_lo: WHITE_SIGMA_MM,
+            sigma_hi: WHITE_SIGMA_MM,
+            aspect_max: 1.0,
+            variance,
+            layers,
+            kernel: Kernel::Dye,
+        };
+        let mut table = if monochrome {
+            vec![process(0x3417_0301, white, SHARED_LAYERS)]
+        } else {
+            let private = white * (1.0 - correlation);
+            vec![
+                process(0x3417_0300, white * correlation, SHARED_LAYERS),
+                process(0x3417_0311, private, 0b001),
+                process(0x3417_0322, private, 0b010),
+                process(0x3417_0333, private, 0b100),
+            ]
+        };
+        if clumping > 0.0 {
+            let size = (size_mm[0] * size_mm[1] * size_mm[2]).cbrt();
+            let clump = &CLUMP_KIND;
+            table.push(Self {
+                cell_mm: clump.cell_over_size * size,
+                mu: clump.mu,
+                salt: clump.salt,
+                sigma_lo: clump.sigma_scale[0] * size,
+                sigma_hi: clump.sigma_scale[1] * size,
+                aspect_max: clump.aspect_max,
+                variance: clumping,
+                layers: SHARED_LAYERS,
+                kernel: clump.kernel,
+            });
+        }
+        table
     }
 
     fn resolved(&self, pitch: f32) -> bool {
@@ -838,6 +934,25 @@ const SILVER_KINDS: [ProcessKind; 3] = [
     },
 ];
 
+/// Soft clumps of [`GrainTexture::White`] with clumping: the fine shared
+/// dye process's shape, so a point sees several and the field stays near
+/// gaussian, as HP5 scans are. `variance` is set by the stock.
+const CLUMP_KIND: ProcessKind = ProcessKind {
+    cell_over_size: 0.95,
+    mu: 1.23,
+    salt: 0xC1A3_0302,
+    variance: 0.0,
+    sigma_scale: [0.85, 1.15],
+    aspect_max: 1.5,
+    layers: SHARED_LAYERS,
+    kernel: Kernel::Dye,
+};
+
+/// Cloud sigma and cell of [`GrainTexture::White`], in millimetres. Small
+/// enough that a pixel of a 15000 px frame still holds over 64 clouds, so
+/// the count is always gaussian and the field is white at any pitch.
+const WHITE_SIGMA_MM: f32 = 0.0001;
+
 /// Below this many pixels of sigma, the photosite is the aperture: the whole
 /// cloud lands in the pixel that contains its center, and the process is
 /// drawn per pixel by [`Aggregate`].
@@ -1289,7 +1404,7 @@ mod tests {
     #[test]
     fn unresolved_crop_matches_the_full_frame() {
         for monochrome in [false, true] {
-            let grain = FilmGrain::new(35.0, 11, [0.018, 0.013, 0.010], monochrome);
+            let grain = FilmGrain::clouds(35.0, 11, [0.018, 0.013, 0.010], monochrome);
             let frame_width = 360;
             let full = grain
                 .render(
@@ -1380,7 +1495,7 @@ mod tests {
 
     #[test]
     fn a_pixel_sees_more_grain_than_the_aperture_and_a_preview_less() {
-        let grain = FilmGrain::new(35.0, 3, [0.014, 0.011, 0.009], false);
+        let grain = FilmGrain::clouds(35.0, 3, [0.014, 0.011, 0.009], false);
         // 5.7 µm pixels: finer than the clouds' reach through 48 µm.
         let fine = grain.pixel_ratio(6160);
         // 49 µm pixels: about the aperture itself.
@@ -1396,8 +1511,8 @@ mod tests {
             assert!(coarse[layer] < 0.2, "coarse {coarse:?}");
         }
         // Smaller clouds read stronger at a fine pitch for the same RMS.
-        let small = FilmGrain::new(35.0, 3, [0.006; 3], true).pixel_ratio(6160);
-        let large = FilmGrain::new(35.0, 3, [0.012; 3], true).pixel_ratio(6160);
+        let small = FilmGrain::clouds(35.0, 3, [0.006; 3], true).pixel_ratio(6160);
+        let large = FilmGrain::clouds(35.0, 3, [0.012; 3], true).pixel_ratio(6160);
         assert!(small[0] > large[0] * 1.2, "small {small:?} large {large:?}");
     }
 }

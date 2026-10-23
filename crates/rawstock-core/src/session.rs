@@ -147,6 +147,9 @@ struct CloudField {
     seed: u32,
     size_mm: [u32; 3],
     monochrome: bool,
+    texture: crate::stock::GrainTexture,
+    correlation: u32,
+    clumping: u32,
     origin_x: u32,
     origin_y: u32,
     width: u32,
@@ -161,6 +164,9 @@ impl CloudField {
             && self.seed == grain.seed()
             && self.size_mm == grain.size_mm().map(f32::to_bits)
             && self.monochrome == grain.is_monochrome()
+            && self.texture == grain.texture()
+            && self.correlation == grain.correlation().to_bits()
+            && self.clumping == grain.clumping().to_bits()
             && self.origin_x == region.origin_x
             && self.origin_y == region.origin_y
             && self.width == region.width
@@ -179,6 +185,9 @@ impl CloudField {
             seed: grain.seed(),
             size_mm: grain.size_mm().map(f32::to_bits),
             monochrome: grain.is_monochrome(),
+            texture: grain.texture(),
+            correlation: grain.correlation().to_bits(),
+            clumping: grain.clumping().to_bits(),
             origin_x: region.origin_x,
             origin_y: region.origin_y,
             width: region.width,
@@ -1311,6 +1320,9 @@ fn grain_eq(left: Option<&Grain>, right: Option<&Grain>) -> bool {
                 && left.seed() == right.seed()
                 && left.size_mm() == right.size_mm()
                 && left.is_monochrome() == right.is_monochrome()
+                && left.texture() == right.texture()
+                && left.correlation() == right.correlation()
+                && left.clumping() == right.clumping()
                 && left
                     .layers()
                     .iter()

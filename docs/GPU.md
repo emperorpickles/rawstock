@@ -37,8 +37,9 @@ exists only because that integral is slow on the CPU.
   uploaded once per device, on the first spectral stock.
 - `crates/rawstock-core/src/gpu/halation.wgsl`: threshold, the three Kovesi
   box passes, and the add-back.
-- `crates/rawstock-core/src/gpu/grain.wgsl`: the dye-cloud and silver
-  field, the aperture blur, and the RMS mix.
+- `crates/rawstock-core/src/gpu/grain.wgsl`: the dye-cloud, silver, and
+  white field, the aperture blur, and the RMS mix. White grain is a process
+  table of unresolved clouds, so it needs no shader of its own.
 - `crates/rawstock-core/src/gpu/tests.rs`: the parity tests.
 
 Buffers use the CPU layout: interleaved RGB, one `f32` per sample. A frame

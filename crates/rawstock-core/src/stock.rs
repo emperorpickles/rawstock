@@ -127,6 +127,30 @@ pub enum Emulsion {
     Monochrome,
 }
 
+/// How a [`Grain`] field is built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GrainTexture {
+    /// Poisson dye clouds of the layers' `size_mm`, or silver clumps for a
+    /// monochrome stock.
+    #[default]
+    Clouds,
+    /// Grain finer than the scanner can resolve: white noise on the film,
+    /// read through the scanner spot. Scans of real Portra 400 show this
+    /// shape once the scanner's own blur is divided out. The layers share
+    /// [`Grain::correlation`] of their variance.
+    White,
+}
+
+impl fmt::Display for GrainTexture {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Clouds => "clouds",
+            Self::White => "white",
+        })
+    }
+}
+
 impl fmt::Display for Emulsion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -208,6 +232,14 @@ pub enum ModelError {
     /// A dye-cloud size was missing, zero, or not finite.
     #[error("grain size must be a positive finite number of millimetres")]
     GrainSize,
+
+    /// A grain layer correlation was outside `0..=1`.
+    #[error("grain correlation must be between 0 and 1")]
+    GrainCorrelation,
+
+    /// A grain clumping share was outside `0..1`.
+    #[error("grain clumping must be at least 0 and below 1")]
+    GrainClumping,
 
     /// The shared wavelength grid was too short, non-finite, or not increasing.
     #[error("wavelength samples must be finite and strictly increasing, with at least two samples")]
@@ -1163,6 +1195,10 @@ impl GrainRegion {
 /// [`Self::monochrome`] is silver grain: one image layer, so the three
 /// channels carry the same table, the same size, and the same clouds, which
 /// are hard-edged silver clumps rather than soft dye clouds.
+///
+/// [`Self::with_white_texture`] replaces the clouds with
+/// [`GrainTexture::White`]: grain too fine for the scanner, so `size_mm`
+/// no longer matters and the scanner spot sets the texture.
 #[derive(Debug, Clone)]
 pub struct Grain {
     frame_mm: f32,
@@ -1170,6 +1206,9 @@ pub struct Grain {
     layers: [Granularity; 3],
     size_mm: [f32; 3],
     monochrome: bool,
+    texture: GrainTexture,
+    correlation: f32,
+    clumping: f32,
 }
 
 /// Highlight halation on scene-linear exposure.
@@ -1266,6 +1305,11 @@ impl Grain {
     /// and sparse, and at 16 µm they read as mottle on a full frame.
     pub const MONOCHROME_SIZE_MM: f32 = 0.006;
 
+    /// Layer correlation for [`GrainTexture::White`] when a stock does not
+    /// set one. Scans of Portra 400 measure 0 to 0.2 between neighboring
+    /// layers, and the scanner's color matrix pulls that down a little.
+    pub const WHITE_CORRELATION: f32 = 0.2;
+
     /// `layers` are red, green, and blue, in that order.
     ///
     /// Cloud sizes start at [`Self::DEFAULT_SIZE_MM`].
@@ -1279,6 +1323,9 @@ impl Grain {
             layers,
             size_mm: Self::DEFAULT_SIZE_MM,
             monochrome: false,
+            texture: GrainTexture::Clouds,
+            correlation: 0.0,
+            clumping: 0.0,
         })
     }
 
@@ -1297,6 +1344,31 @@ impl Grain {
             .with_size_mm([size_mm; 3])?;
         grain.monochrome = true;
         Ok(grain)
+    }
+
+    /// Use [`GrainTexture::White`]. `correlation` is the share of each
+    /// layer's variance that all three layers have in common, from 0
+    /// (independent layers, the most chroma) to 1 (the same grain in every
+    /// layer). A monochrome stock is always 1.
+    pub fn with_white_texture(mut self, correlation: f32) -> Result<Self, ModelError> {
+        if !(0.0..=1.0).contains(&correlation) {
+            return Err(ModelError::GrainCorrelation);
+        }
+        self.texture = GrainTexture::White;
+        self.correlation = if self.monochrome { 1.0 } else { correlation };
+        Ok(self)
+    }
+
+    /// Give [`GrainTexture::White`] grain a soft clump component: `share`
+    /// of each layer's 48 µm variance moves into shared gaussian clumps of
+    /// the layers' `size_mm`, the rest stays white. Scans of HP5 Plus show
+    /// such clumps, about 11 µm across, over a white floor.
+    pub fn with_clumping(mut self, share: f32) -> Result<Self, ModelError> {
+        if !(0.0..1.0).contains(&share) {
+            return Err(ModelError::GrainClumping);
+        }
+        self.clumping = share;
+        Ok(self)
     }
 
     /// Replace the per-layer dye-cloud sizes, in millimetres.
@@ -1357,6 +1429,22 @@ impl Grain {
         self.monochrome
     }
 
+    /// How the field is built.
+    pub fn texture(&self) -> GrainTexture {
+        self.texture
+    }
+
+    /// Share of each layer's variance common to all three, for
+    /// [`GrainTexture::White`]. Clouds set their own and report 0.
+    pub fn correlation(&self) -> f32 {
+        self.correlation
+    }
+
+    /// Share of a [`GrainTexture::White`] field's variance in soft clumps.
+    pub fn clumping(&self) -> f32 {
+        self.clumping
+    }
+
     /// Multiply every layer's RMS by `amount`.
     ///
     /// Frame width, seed, and dye-cloud size stay. `amount` follows
@@ -1368,6 +1456,9 @@ impl Grain {
             seed: self.seed,
             size_mm: self.size_mm,
             monochrome: self.monochrome,
+            texture: self.texture,
+            correlation: self.correlation,
+            clumping: self.clumping,
             layers: [
                 self.layers[0].scaled(amount)?,
                 self.layers[1].scaled(amount)?,
@@ -1382,8 +1473,7 @@ impl Grain {
     /// Density deviation per pixel is `rms / 1000` times this. It depends
     /// on the cloud sizes, the scanner, and the pitch, not on the tables.
     pub fn pixel_ratio(&self, width: u32) -> [f32; 3] {
-        crate::grain::FilmGrain::new(self.frame_mm, self.seed, self.size_mm, self.monochrome)
-            .pixel_ratio(width)
+        crate::grain::FilmGrain::of(self).pixel_ratio(width)
     }
 
     /// Add per-layer grain to interleaved density.
@@ -1448,18 +1538,16 @@ impl Grain {
         control: &mut dyn crate::render::DevelopControl,
     ) -> Result<Vec<f32>, crate::render::Cancelled> {
         crate::render::begin(crate::render::Stage::Grain, rows as u32, control)?;
-        let out =
-            crate::grain::FilmGrain::new(self.frame_mm, self.seed, self.size_mm, self.monochrome)
-                .render(
-                crate::grain::Plane {
-                    width: region.width,
-                    rows,
-                    origin_x: region.origin_x,
-                    origin_y: region.origin_y,
-                    frame_width: region.frame_width,
-                },
-                control,
-            )?;
+        let out = crate::grain::FilmGrain::of(self).render(
+            crate::grain::Plane {
+                width: region.width,
+                rows,
+                origin_x: region.origin_x,
+                origin_y: region.origin_y,
+                frame_width: region.frame_width,
+            },
+            control,
+        )?;
         control.on_progress(crate::render::Stage::Grain, rows as u32, rows as u32);
         if control.cancelled() {
             return Err(crate::render::Cancelled);
@@ -1816,6 +1904,15 @@ pub enum StockError {
         field: &'static str,
     },
 
+    /// `[grain] correlation` without `texture = "white"`, or on a
+    /// monochrome stock, which has one layer.
+    #[error("grain correlation needs texture = \"white\" on a color stock")]
+    GrainCorrelation,
+
+    /// `[grain] clumping` without `texture = "white"`.
+    #[error("grain clumping needs texture = \"white\"")]
+    GrainClumping,
+
     /// A layer table the emulsion needs was missing.
     #[error("{emulsion} stock is missing {field}")]
     MissingLayer {
@@ -1980,6 +2077,15 @@ struct GrainSamples {
     blue: Option<RmsSamples>,
     #[serde(default)]
     silver: Option<RmsSamples>,
+    /// `clouds` (the default) or `white`.
+    #[serde(default)]
+    texture: GrainTexture,
+    /// Layer correlation for `texture = "white"` on a color stock.
+    #[serde(default, deserialize_with = "de_opt_f32")]
+    correlation: Option<f32>,
+    /// Clump share of the variance for `texture = "white"`.
+    #[serde(default, deserialize_with = "de_opt_f32")]
+    clumping: Option<f32>,
 }
 
 fn default_frame_mm() -> f32 {
@@ -2277,6 +2383,28 @@ fn curve_from_samples(
 }
 
 fn grain_from_samples(samples: GrainSamples, emulsion: Emulsion) -> Result<Grain, StockError> {
+    if samples.correlation.is_some()
+        && (samples.texture != GrainTexture::White || emulsion == Emulsion::Monochrome)
+    {
+        return Err(StockError::GrainCorrelation);
+    }
+    if samples.clumping.is_some() && samples.texture != GrainTexture::White {
+        return Err(StockError::GrainClumping);
+    }
+    let texture = samples.texture;
+    let correlation = samples.correlation.unwrap_or(Grain::WHITE_CORRELATION);
+    let clumping = samples.clumping.unwrap_or(0.0);
+    let grain = grain_layers(samples, emulsion)?;
+    match texture {
+        GrainTexture::Clouds => Ok(grain),
+        GrainTexture::White => grain
+            .with_white_texture(correlation)
+            .and_then(|grain| grain.with_clumping(clumping))
+            .map_err(StockError::Model),
+    }
+}
+
+fn grain_layers(samples: GrainSamples, emulsion: Emulsion) -> Result<Grain, StockError> {
     if emulsion == Emulsion::Monochrome {
         for (field, present) in [
             ("grain.red", samples.red.is_some()),
@@ -2844,6 +2972,15 @@ impl StockText {
             text.table("grain");
             text.key_float("frame_mm", grain.frame_mm());
             text.key_int("seed", grain.seed());
+            if grain.texture() == GrainTexture::White {
+                text.key_str("texture", "white");
+                if !grain.is_monochrome() {
+                    text.key_float("correlation", grain.correlation());
+                }
+                if grain.clumping() > 0.0 {
+                    text.key_float("clumping", grain.clumping());
+                }
+            }
             let names: &[&str] = if grain.is_monochrome() {
                 &["silver"]
             } else {

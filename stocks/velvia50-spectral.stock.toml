@@ -13,7 +13,7 @@
 # Velvia is a Fujifilm trademark.
 
 schema_version = 1
-revision = 3
+revision = 4
 name = "Fuji Velvia 50 (spectral)"
 source = "spectral_film_lut FUJI_VELVIA_50, digitized from the Fujifilm Fujichrome Velvia 50 datasheet. Exposure placement, neutral scan balance, coupling, scan curve, and grain are an approximate tuning on top of those curves."
 license = "MIT"
@@ -74,29 +74,27 @@ density = [3.7111, 3.6954, 3.6737, 3.5997, 3.5327, 3.4675, 3.3457, 3.1908, 2.980
 log_exposure = [-1, 0, 1, 2.2, 3, 4]
 density = [-1, 0, 1, 2.2, 2.75, 3.15]
 
-# Carried over from velvia.stock.toml (#20): an approximate aesthetic tuning,
-# not a published granularity table. Velvia 50 is a very fine-grained slide
-# film, about a third of Portra 400's rms, with 6–10 µm dye clouds. Fujifilm
-# quotes RMS granularity 9 for Velvia 50; with these small clouds that reads
-# too coarse at 100%, so the peak here sits lower. Density above 2.6 (deep
-# shadows on a slide) holds the last rms. rms is 1000 times the density
-# standard deviation through a 48 µm aperture.
-# Since #79 the grain field is calibrated through that aperture, so a
-# pixel reads more than rms when the clouds are finer than its reach. These
-# values are the earlier per-pixel tuning divided by that ratio at a 6160 px
-# frame, so a 100% export keeps its look and a preview matches it.
+# Carried over from velvia.stock.toml: an approximate aesthetic tuning,
+# not a published granularity table and not a measurement. Velvia 50 is a very fine-grained slide film. Grain is
+# white on the film, read through the scanner spot, as measured on
+# Portra 400 scans; with no Velvia scan, the per-pixel strength at 100%
+# is kept where the earlier dye-cloud tuning had it, and the layers share
+# the same 0.2 correlation. Fujifilm quotes RMS granularity 9 for Velvia
+# 50, which reads too coarse at 100% here, so the peak sits lower. Same
+# Vision3-style shape (rises through the midtones, then falls) with blue
+# the grainiest. rms is 1000 times the density standard deviation through
+# a 48 µm aperture; a 6000 px frame reads about 1.9 times that per pixel.
 [grain]
 frame_mm = 35
 seed = 50
+texture = "white"
+correlation = 0.2
 [grain.red]
 density = [0.15, 0.40, 0.80, 1.20, 1.70, 2.20, 2.60]
-rms = [2.8, 3.5, 4.8, 5.5, 4.8, 4.2, 3.5]
-size_mm = 0.010
+rms = [2.1, 2.6, 3.6, 4.1, 3.6, 3.2, 2.6]
 [grain.green]
 density = [0.15, 0.40, 0.80, 1.20, 1.70, 2.20, 2.60]
-rms = [2.8, 4.1, 5.5, 6.2, 5.5, 4.8, 3.4]
-size_mm = 0.0075
+rms = [2.1, 3.1, 4.1, 4.7, 4.1, 3.6, 2.6]
 [grain.blue]
 density = [0.15, 0.40, 0.80, 1.20, 1.70, 2.20, 2.60]
-rms = [3.4, 4.8, 6.2, 6.9, 6.2, 5.5, 4.1]
-size_mm = 0.006
+rms = [2.6, 3.6, 4.7, 5.2, 4.7, 4.1, 3.1]

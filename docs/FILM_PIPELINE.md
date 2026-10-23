@@ -399,8 +399,9 @@ that aperture, and its variance at a pixel follows from the cloud size,
 the scanner, and the pitch: a cloud's mass, blurred by the scanner, then
 averaged over the pixel's box, against the same cloud averaged over the
 aperture. `Grain::pixel_ratio` is the resulting deviation per pixel over
-the 48 µm one. At 35 mm across 6160 px it is about 1.28 for Portra, 1.45
-for Velvia, and 1.52 for HP5 Plus; at a 48 µm pixel it is about 1, and far
+the 48 µm one. At 35 mm across 6160 px it was about 1.28 for Portra's dye
+clouds, 1.45 for Velvia's, and 1.52 for silver clumps; for white grain it
+is about 1.93 (1.54 for HP5 Plus's mix); at a 48 µm pixel it is about 1, and far
 coarser it falls as the pixel side, as Selwyn's law says. So a preview
 shows what the export shows shrunk to the same size, within a few percent,
 and finer clouds read stronger per pixel at the same RMS. Before #79 every
@@ -428,6 +429,29 @@ dye processes', so a point sees two or three clumps instead of seven or
 eight. The field is then skewed toward dense specks, about +0.6 per pixel
 against +0.2 for dye clouds of the same size, and reads crisp rather than
 soft.
+
+**White grain (#81).** `texture = "white"` in `[grain]` replaces the
+resolved clouds with film-plane noise that is white down to the scanner.
+Two of Caleb's Portra 400 negatives scanned on an Epson V550 (3200 ppi,
+gamma 2.2) showed why: with the scanner's MTF (about a 8.5 µm gaussian)
+divided out, the grain spectrum is flat to at least 30 cycles/mm, and the
+layers correlate only 0 to 0.2. Resolved dye clouds of 10–18 µm put their
+power at low frequency and read as soft blotches next to the scan. The
+white texture is a dense process of 0.1 µm clouds, so it never resolves:
+every pixel takes the gaussian aggregate draw, spread by the 6 µm scanner,
+and the 48 µm calibration, `pixel_ratio`, the crop padding, and the GPU path
+are the dye-cloud ones unchanged. `correlation` (color only, default 0.2)
+is the variance share of one process drawn in all three layers; each layer
+also has a private one. Monochrome stocks share one process. `clumping`
+(0 up to 1) moves that share of the variance into a shared resolved
+process of soft clumps of `size_mm`. Two V550 scans of HP5 Plus showed a
+white floor plus clumps of about 11 µm sigma carrying about 70% of the
+variance, so HP5 uses `clumping = 0.7`. White grain is also faster: a full
+6000×4000 Portra frame takes 5.4 s on 4 threads against 41.6 s for the
+clouds. The scans' per-pixel skew (bright specks) did not survive the
+fits at real amplitude, so the white texture is gaussian. Portra, both
+Velvias, and HP5 Plus use it; the cloud and silver textures remain the
+default for stocks that do not set it.
 
 `Grain::hash` is unchanged: the PCG hash of Jarzynski and Hill, integer
 only, so a later WGSL port can match the draws. Mean density is unchanged
@@ -603,7 +627,10 @@ parametric stock already uses, so the version stays 1:
   `density` / `rms`, and optional per-layer `size_mm`. Omitted sizes use
   0.018, 0.013, and 0.010 mm (red, green, blue), the primary dye-cloud
   sigma. Density must strictly increase; rms may rise and fall. The 48 µm
-  aperture is not a file field.
+  aperture is not a file field. `texture` is `"clouds"` (default) or
+  `"white"`. White grain takes `correlation` (color stocks, 0 to 1,
+  default 0.2) and `clumping` (0 up to 1, default 0); either key without
+  `texture = "white"` is an error.
 - `[halation]` with `threshold`, `radius`, and `weight` of length 3.
 
 `model = "spectral"` adds:

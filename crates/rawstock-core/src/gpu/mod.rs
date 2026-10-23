@@ -139,6 +139,9 @@ struct FieldKey {
     seed: u32,
     size_mm: [u32; 3],
     monochrome: bool,
+    texture: crate::stock::GrainTexture,
+    correlation: u32,
+    clumping: u32,
     region: [u32; 5],
     rows: u64,
 }
@@ -150,6 +153,9 @@ impl FieldKey {
             seed: grain.seed(),
             size_mm: grain.size_mm().map(f32::to_bits),
             monochrome: grain.is_monochrome(),
+            texture: grain.texture(),
+            correlation: grain.correlation().to_bits(),
+            clumping: grain.clumping().to_bits(),
             region: [
                 region.width,
                 region.height,
@@ -1002,13 +1008,7 @@ struct GrainUpload {
 
 impl GrainUpload {
     fn new(gpu: &Inner, grain: &Grain, region: GrainRegion) -> Self {
-        let plan = crate::grain::FilmGrain::new(
-            grain.frame_mm(),
-            grain.seed(),
-            grain.size_mm(),
-            grain.is_monochrome(),
-        )
-        .gpu_plan(region.frame_width);
+        let plan = crate::grain::FilmGrain::of(grain).gpu_plan(region.frame_width);
         // Process records first, then each unresolved process's count table.
         let mut tables = Vec::new();
         let mut cdf_offset = (plan.processes.len() * PROCESS_WORDS) as u32;
