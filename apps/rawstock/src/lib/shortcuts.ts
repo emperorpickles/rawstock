@@ -52,12 +52,16 @@ export const SHORTCUTS: readonly ShortcutSpec[] = [
   { action: "clipping", label: "Clipping overlay", key: "j", mod: false },
   { action: "filmstrip-prev", label: "Previous photo", key: "ArrowLeft", mod: false },
   { action: "filmstrip-next", label: "Next photo", key: "ArrowRight", mod: false },
+  { action: "filmstrip-first", label: "First photo", key: "Home", mod: false },
+  { action: "filmstrip-last", label: "Last photo", key: "End", mod: false },
   { action: "cheat-sheet", label: "Keyboard shortcuts", key: "?", mod: false },
 ];
 
 const KEY_NAMES: Record<string, string> = {
   ArrowLeft: "Left Arrow",
   ArrowRight: "Right Arrow",
+  Home: "Home",
+  End: "End",
   ",": ",",
 };
 

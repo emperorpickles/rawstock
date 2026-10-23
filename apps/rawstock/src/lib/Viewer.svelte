@@ -7,6 +7,7 @@
     mode = "empty",
     zoom = "fit",
     fileName = "",
+    problem = "",
     dropActive = false,
     imageWidth = 0,
     imageHeight = 0,
@@ -17,6 +18,7 @@
     mode?: "texture" | "region" | "empty";
     zoom?: "fit" | 1 | 2;
     fileName?: string;
+    problem?: string;
     dropActive?: boolean;
     imageWidth?: number;
     imageHeight?: number;
@@ -140,7 +142,12 @@
   bind:clientWidth={viewWidth}
   bind:clientHeight={viewHeight}
 >
-  {#if mode === "empty"}
+  {#if problem}
+    <div class="empty">
+      <p class="empty-title">{fileName}</p>
+      <p>{problem}</p>
+    </div>
+  {:else if mode === "empty"}
     <div class="empty">
       <p class="empty-title">{fileName || "No photo open"}</p>
       <p>Drop a Fuji RAF or an iPhone ProRAW DNG here, or open one.</p>

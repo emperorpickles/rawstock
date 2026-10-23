@@ -29,6 +29,8 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
 - Chromatic aberration correction for X-Trans and Bayer: red/blue
   registration (#62) and a blue/purple defringe, behind one switch in
   core, the CLI (`--no-ca-correction`) and the tuner (#71).
+- 1.0 app open, filmstrip, and `.rawstock.toml` sidecars (#37): files and
+  folders, capture order, per-image undo, and autosave beside the RAW.
 
 ## In flight
 

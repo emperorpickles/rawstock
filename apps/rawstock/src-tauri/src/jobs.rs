@@ -14,8 +14,7 @@ use rawstock_core::render::Stage;
 use crate::contract::{
     AppError, CacheEvictedEvent, CacheReadyEvent, CacheReason, CancelReason, CancelledEvent,
     ContractEvent, DoneEvent, EditSettings, ExportOptions, FailedEvent, ImageInfo, JobKind,
-    JobStarted, ProgressEvent, SaveResult, ThumbnailReadyEvent, settings_hash, sidecar_path,
-    utc_now,
+    JobStarted, ProgressEvent, SaveResult, ThumbnailReadyEvent, settings_hash,
 };
 use crate::frame::{self, placeholder, stub_size};
 
@@ -290,23 +289,58 @@ impl ContractStub {
         Ok(events)
     }
 
-    /// Path and timestamp only. The atomic write belongs to #37.
+    /// Atomic write of `<file>.rawstock.toml`. The RAW is not opened for
+    /// writing. An unreadable sidecar is refused so it cannot be replaced.
     pub fn save_sidecar(
-        &self,
+        &mut self,
         image_id: &str,
         settings: &EditSettings,
-    ) -> Result<SaveResult, AppError> {
-        settings.validate()?;
+    ) -> Result<SaveResult, crate::sidecar::Failure> {
         let info = self
             .images
             .get(image_id)
-            .ok_or_else(|| AppError::internal("Open a photo before saving its edit."))?;
-        Ok(SaveResult {
-            path: sidecar_path(std::path::Path::new(&info.path))
-                .display()
-                .to_string(),
-            saved_at: utc_now(),
-        })
+            .ok_or_else(|| crate::sidecar::Failure {
+                error: AppError::internal("Open a photo before saving its edit."),
+                detail: format!("save_sidecar unknown image {image_id}"),
+            })?;
+        if info.error.is_some() {
+            return Err(crate::sidecar::Failure {
+                error: AppError::internal(
+                    "That photo could not be opened, so its edit was not saved. The photo was not changed.",
+                ),
+                detail: format!("save_sidecar skipped {}", info.path),
+            });
+        }
+        let raw = std::path::PathBuf::from(&info.path);
+        let saved = crate::sidecar::write(&raw, settings)?;
+        let revisions = crate::sidecar::revision_map();
+        if let Some(image) = self.images.get_mut(image_id) {
+            image.sidecar = crate::sidecar::describe(settings, &revisions);
+        }
+        Ok(saved)
+    }
+
+    /// Move a bad sidecar to `.bak`. The image then opens at defaults.
+    pub fn reset_sidecar(
+        &mut self,
+        image_id: &str,
+    ) -> Result<crate::contract::ImageInfo, crate::sidecar::Failure> {
+        let info = self
+            .images
+            .get(image_id)
+            .cloned()
+            .ok_or_else(|| crate::sidecar::Failure {
+                error: AppError::internal("Open a photo before resetting its edit."),
+                detail: format!("reset_sidecar unknown image {image_id}"),
+            })?;
+        let raw = std::path::PathBuf::from(&info.path);
+        let _bak = crate::sidecar::reset(&raw)?;
+        let image = self
+            .images
+            .get_mut(image_id)
+            .expect("image stays in the session");
+        image.sidecar = crate::contract::SidecarInfo::none();
+        Ok(image.clone())
     }
 
     fn start(&mut self, args: StartArgs<'_>) -> Result<(JobStarted, Vec<ContractEvent>), AppError> {
@@ -319,8 +353,11 @@ impl ContractStub {
             stock_ids,
             output_path,
         } = args;
-        if !self.images.contains_key(image_id) {
+        let Some(info) = self.images.get(image_id) else {
             return Err(AppError::internal("Open a photo before developing it."));
+        };
+        if let Some(error) = info.error.clone() {
+            return Err(error);
         }
         settings.validate()?;
         let mut events = Vec::new();
@@ -653,6 +690,7 @@ mod tests {
             width: 0,
             height: 0,
             sidecar: crate::contract::SidecarInfo::none(),
+            error: None,
         }
     }
 
@@ -893,11 +931,44 @@ mod tests {
     }
 
     #[test]
-    fn save_sidecar_names_the_file_and_does_not_create_it() {
+    fn save_sidecar_writes_beside_the_raw_and_a_bad_file_is_not_developed() {
+        let dir = std::env::temp_dir().join(format!("rawstock-job-sidecar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("frame.RAF");
+        let raw_bytes = b"RAWSTOCK-FIXTURE\nsupport: decodes\nmake: Fujifilm\nmodel: X-T2\n";
+        std::fs::write(&raw, raw_bytes).unwrap();
+        let before = std::fs::read(&raw).unwrap();
+
+        let mut info = photo("frame");
+        info.path = raw.display().to_string();
         let mut stub = ContractStub::default();
-        stub.insert_image(photo("a"));
-        let saved = stub.save_sidecar("a", &settings(2)).unwrap();
-        assert!(saved.path.ends_with("a.RAF.rawstock.toml"));
-        assert!(!std::path::Path::new(&saved.path).exists());
+        stub.insert_image(info);
+        let saved = stub.save_sidecar("frame", &settings(2)).unwrap();
+        assert!(std::path::Path::new(&saved.path).is_file());
+        assert!(saved.path.ends_with("frame.RAF.rawstock.toml"));
+        assert_eq!(std::fs::read(&raw).unwrap(), before);
+        let stored = stub.select_image("frame").unwrap().0;
+        let expected = crate::sidecar::describe(&settings(2), &crate::sidecar::revision_map());
+        assert_eq!(stored.sidecar.status, expected.status);
+        assert_eq!(
+            stored
+                .sidecar
+                .settings
+                .as_ref()
+                .map(|edit| edit.stock.revision),
+            Some(2)
+        );
+
+        let mut broken = photo("bad");
+        broken.error = Some(AppError::corrupt_file(std::path::Path::new("bad.RAF")));
+        stub.insert_image(broken);
+        let develop = stub
+            .develop_preview("bad", &settings(2), 16, false)
+            .unwrap_err();
+        assert_eq!(develop.code, ErrorCode::CorruptFile);
+        assert!(stub.select_image("bad").is_ok());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

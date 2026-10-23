@@ -35,6 +35,10 @@ pub struct ImageInfo {
     pub width: u32,
     pub height: u32,
     pub sidecar: SidecarInfo,
+    /// Set when the file stays in the filmstrip but cannot be developed
+    /// (unsupported camera or corrupt). The message is the one the UI shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<AppError>,
 }
 
 /// Make and model shown in an unsupported-camera message.
@@ -75,8 +79,8 @@ pub struct ExifInfo {
     pub orientation: Option<String>,
 }
 
-/// Sidecar next to an opened file. Reading and writing the file is #37;
-/// this is the status the open command will report.
+/// Sidecar next to an opened file. `invalid` means the file was left
+/// untouched. `settings` is present when the file parsed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SidecarInfo {
@@ -327,12 +331,8 @@ impl EditSettings {
 }
 
 /// Sidecar document: the edit, the app version, and when it was saved.
-///
-/// The open and save flows that use this type belong to #37. The tests
-/// parse it so the wire format stays fixed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
-#[allow(dead_code)]
 pub struct SidecarDocument {
     pub rawstock_version: String,
     pub saved_at: String,
@@ -351,7 +351,6 @@ impl Default for SidecarDocument {
 }
 
 /// Parse a sidecar. The TOML error stays out of [`AppError::message`].
-#[allow(dead_code)]
 pub fn parse_sidecar(text: &str) -> Result<SidecarDocument, AppError> {
     let document: SidecarDocument = toml::from_str(text).map_err(|_| {
         AppError::sidecar_invalid(
@@ -365,8 +364,7 @@ pub fn parse_sidecar(text: &str) -> Result<SidecarDocument, AppError> {
 /// Compare a saved stock revision with the one that is installed.
 ///
 /// An unknown stock stays `loaded` here. `stockMissing` is an [`AppError`]
-/// the open flow raises once it has looked the stock up (#37).
-#[allow(dead_code)]
+/// the open flow logs `stockMissing` and still returns the edit.
 pub fn sidecar_status(settings: &EditSettings, installed_revision: Option<u32>) -> SidecarStatus {
     if settings.stock.id.is_empty() {
         return SidecarStatus::Invalid;

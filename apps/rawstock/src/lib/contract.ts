@@ -120,6 +120,8 @@ export interface ImageInfo {
   width: number;
   height: number;
   sidecar: SidecarInfo;
+  /** Set when the file stays in the strip but cannot be developed. */
+  error?: AppError;
 }
 
 export interface RejectedPath {
