@@ -18,6 +18,7 @@ use rayon::prelude::*;
 use thiserror::Error;
 
 use crate::decode::{CfaKind, RawImage};
+use crate::defringe::Defringe;
 use crate::lateral_ca::LateralCa;
 use crate::matrices;
 use crate::workers::Workers;
@@ -264,9 +265,12 @@ impl RawImage {
     ///
     /// Black/white normalization and demosaic are `rawler`'s rescale and
     /// demosaic steps (Bayer via PPG, X-Trans via Markesteijn, linear DNG
-    /// unchanged). Mosaic files then get lateral chromatic aberration
-    /// correction ([`LateralCa`]): red and blue are measured against green
-    /// and resampled onto it, as the camera does for its own JPEGs. Rescale
+    /// unchanged). Mosaic files then get chromatic aberration correction,
+    /// unless [`Self::set_chromatic_aberration_correction`] turned it off:
+    /// red and blue are measured against green and resampled onto it
+    /// ([`LateralCa`]), as the camera does for its own JPEGs, and after the
+    /// ACEScg conversion the blue/purple glow beside bright edges is
+    /// desaturated ([`Defringe`]). Rescale
     /// does not clip above the white level, so highlights
     /// are cut to that level in camera RGB, white-balanced with green at 1,
     /// then cut again at the smallest multiplier. That second cut is what
@@ -303,13 +307,17 @@ impl RawImage {
         };
 
         // ProRAW arrives already corrected by the phone.
-        if self.cfa() != CfaKind::LinearDng {
-            let (columns, rows) = (width as usize, height as usize);
+        let correct = self.corrects_chromatic_aberration() && self.cfa() != CfaKind::LinearDng;
+        let (columns, rows) = (width as usize, height as usize);
+        if correct {
             let lateral_ca = LateralCa::estimate(columns, rows, &samples);
             lateral_ca.apply(columns, rows, &mut samples);
         }
-
-        self.finish_linear(width, height, samples)
+        let mut linear = self.finish_linear(width, height, samples)?;
+        if correct {
+            Defringe::apply(columns, rows, &mut linear.pixels);
+        }
+        Ok(linear)
     }
 
     /// [`Self::develop_linear`] on a pool of its own, `threads` wide.
@@ -329,8 +337,8 @@ impl RawImage {
     /// takes seconds. A preview downsampled from it is within about 0.5% of
     /// one downsampled from Markesteijn. The
     /// frame is the one [`Self::develop_linear`] returns, a third the size.
-    /// Lateral chromatic aberration is not corrected: at a third the size
-    /// it is a fraction of a pixel. `None` for a sensor that is not X-Trans.
+    /// Chromatic aberration is not corrected: at a third the size it is a
+    /// fraction of a pixel. `None` for a sensor that is not X-Trans.
     pub fn develop_quick_linear(&self) -> Result<Option<QuickDevelop>, DevelopError> {
         if self.cfa() != CfaKind::XTrans {
             return Ok(None);

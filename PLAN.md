@@ -26,12 +26,12 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   (#49), the Help menu with About, generated Licenses, Report an issue and
   a rotating log (#50), and the first-launch welcome with a shortcut cheat
   sheet (#51).
+- Chromatic aberration correction for X-Trans and Bayer: red/blue
+  registration (#62) and a blue/purple defringe, behind one switch in
+  core, the CLI (`--no-ca-correction`) and the tuner (#71).
 
 ## In flight
 
-- **#62** — Lateral chromatic aberration correction for X-Trans and Bayer
-  (`agent: claude`, `stage: ready`). Fixes pink/blue edge fringes that
-  Velvia amplified.
 - **#17** — Provia simulation fit (`agent: grok`, `stage: holding`).
   Waiting on more Provia RAF+JPEG pairs from Caleb. Pairs already in hand
   are held out. Do not commit them.

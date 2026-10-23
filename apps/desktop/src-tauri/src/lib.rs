@@ -36,6 +36,7 @@ pub fn run() {
             load_stock,
             render_frame,
             rotate_image,
+            set_ca_correction,
             export_jpeg,
             save_stock,
         ])
@@ -78,6 +79,14 @@ async fn rotate_image(
     direction: TurnDirection,
 ) -> Result<SessionState, String> {
     worker.rotate(direction).await
+}
+
+#[tauri::command]
+async fn set_ca_correction(
+    worker: State<'_, WorkerHandle>,
+    enabled: bool,
+) -> Result<SessionState, String> {
+    worker.set_ca_correction(enabled).await
 }
 
 #[tauri::command]

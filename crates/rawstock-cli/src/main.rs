@@ -31,6 +31,10 @@ enum Command {
         /// Develop on the GPU. Fails if no adapter is found.
         #[arg(long)]
         gpu: bool,
+        /// Skip chromatic aberration correction (red/blue registration and
+        /// the blue/purple defringe). It is on by default.
+        #[arg(long)]
+        no_ca_correction: bool,
     },
     /// Print decode metadata for a RAW file.
     Inspect {
@@ -48,6 +52,10 @@ enum Command {
         /// The dump stays in sensor orientation. The film stock is not applied.
         #[arg(long)]
         long_edge: Option<u32>,
+        /// Skip chromatic aberration correction (red/blue registration and
+        /// the blue/purple defringe). It is on by default.
+        #[arg(long)]
+        no_ca_correction: bool,
     },
     /// Develop a scene-linear ACEScg OpenEXR through a stock.
     ///
@@ -80,7 +88,8 @@ fn run(cli: Cli) -> Result<()> {
             stock,
             output,
             gpu,
-        } => develop(&input, &stock, &output, gpu),
+            no_ca_correction,
+        } => develop(&input, &stock, &output, gpu, !no_ca_correction),
         Command::Inspect { file } => {
             let image = RawImage::open(&file)?;
             println!("{image}");
@@ -90,11 +99,13 @@ fn run(cli: Cli) -> Result<()> {
             input,
             output,
             long_edge,
+            no_ca_correction,
         } => {
             if !is_exr(&output) {
                 bail!("output must be an .exr file");
             }
-            let image = RawImage::open(&input)?;
+            let mut image = RawImage::open(&input)?;
+            image.set_chromatic_aberration_correction(!no_ca_correction);
             let mut linear = image.develop_linear()?;
             if let Some(long_edge) = long_edge {
                 linear = linear.area_downsample(long_edge)?;
@@ -125,12 +136,19 @@ fn develop_linear(input: &Path, stock: &Path, output: &Path, gpu: bool) -> Resul
     Ok(())
 }
 
-fn develop(input: &Path, stock: &Path, output: &Path, gpu: bool) -> Result<()> {
+fn develop(
+    input: &Path,
+    stock: &Path,
+    output: &Path,
+    gpu: bool,
+    correct_chromatic_aberration: bool,
+) -> Result<()> {
     if !SrgbImage::is_supported_output(output) {
         bail!("output must be a .jpg, .jpeg, .tif, or .tiff file");
     }
     let parameters = Stock::load(stock)?.into_parameters();
-    let raw = RawImage::open(input)?;
+    let mut raw = RawImage::open(input)?;
+    raw.set_chromatic_aberration_correction(correct_chromatic_aberration);
     let linear = raw.develop_linear()?;
     let developed = render(parameters, &linear, gpu)?;
     developed.write(output, raw.orientation())?;
@@ -235,6 +253,50 @@ mod tests {
         ])
         .unwrap();
         assert!(matches!(cli.command, Command::Develop { gpu: true, .. }));
+    }
+
+    #[test]
+    fn ca_correction_is_on_unless_turned_off() {
+        let base = [
+            "rawstock",
+            "develop",
+            "IMG.RAF",
+            "--stock",
+            "neutral.stock.toml",
+            "--out",
+            "out.jpg",
+        ];
+        let cli = Cli::try_parse_from(base).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Develop {
+                no_ca_correction: false,
+                ..
+            }
+        ));
+        let cli = Cli::try_parse_from(base.into_iter().chain(["--no-ca-correction"])).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Develop {
+                no_ca_correction: true,
+                ..
+            }
+        ));
+        let cli = Cli::try_parse_from([
+            "rawstock",
+            "dump-linear",
+            "IMG.RAF",
+            "out.exr",
+            "--no-ca-correction",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::DumpLinear {
+                no_ca_correction: true,
+                ..
+            }
+        ));
     }
 
     #[test]

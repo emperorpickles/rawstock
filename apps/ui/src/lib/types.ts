@@ -41,6 +41,8 @@ export interface SessionState {
   orientation: string;
   /** Clockwise quarter-turns added on top of the camera tag, in `0..4`. */
   quarterTurns: number;
+  /** Chromatic aberration correction (red/blue registration and defringe) is on. */
+  caCorrection: boolean;
   stock: StockState | null;
 }
 
@@ -102,6 +104,7 @@ export interface Host {
   openRaw(path: string): Promise<SessionState>;
   loadStock(path: string): Promise<SessionState>;
   rotate(direction: "clockwise" | "counterClockwise"): Promise<SessionState>;
+  setCaCorrection(enabled: boolean): Promise<SessionState>;
   render(request: RenderRequest): Promise<Frame>;
   exportJpeg(path: string): Promise<void>;
   saveStock(draft: SaveDraft): Promise<StockState>;
