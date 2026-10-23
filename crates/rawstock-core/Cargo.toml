@@ -9,6 +9,7 @@ license.workspace = true
 exr = "1.73"
 image = { version = "0.25", default-features = false, features = ["jpeg", "tiff"] }
 rawler = "0.8"
+rayon = "1.12"
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2"
 toml = "1.1.8"

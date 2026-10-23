@@ -369,7 +369,15 @@ rather than a blotch. Aspect runs from 1 to about 1.6.
 is `[0.018, 0.013, 0.010]`: cyan dye coarsest, yellow dye finest, inside
 the 10–25 µm dye-cloud range reported for this family of films. Below
 about 0.75 px of sigma the photosite is the aperture and the cloud's whole
-mass is deposited in the pixel that contains its center. Above that, the
+mass lands in the pixel that contains its center. Where a cloud sits inside
+that pixel no longer matters, so the pixel's sum is drawn directly: a
+Poisson count of clouds from a table, then their summed mass, gaussian
+given the count. Above 64 clouds per pixel the count is gaussian too. The
+draws hash the pixel's full-frame position, so a crop at the same pitch
+matches the frame. This keeps a preview's cost per pixel. Drawing every
+cloud took 5 to 6 s at the 1440 px proxy, because the frame holds about
+100 million of them. The proxy's grain has the export's statistics but not
+its individual clouds, which at that scale are smaller than a pixel. Above that, the
 gaussian is evaluated and a 6 µm scanner aperture blurs the field. The crop
 is padded by that kernel, so a 100% view matches the full frame.
 

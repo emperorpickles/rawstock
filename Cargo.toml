@@ -12,13 +12,19 @@ version = "0.0.1"
 edition = "2024"
 license = "GPL-3.0-or-later"
 
+# rawler decodes and demosaics every file the tuner opens. Unoptimized, its
+# X-Trans Markesteijn takes about 66 s on a 26 MP frame under `tauri dev`,
+# against under 5 s optimized, so it is optimized in every profile.
+#
 # rawler's X-Trans Markesteijn demosaic indexes the CFA with negative tile
 # offsets cast to usize. The wrapping add is correct, but debug builds panic
 # on it, so overflow checks stay off for that crate.
 [profile.dev.package.rawler]
 overflow-checks = false
+opt-level = 3
 [profile.test.package.rawler]
 overflow-checks = false
+opt-level = 3
 
 # Develop tests spend their time in these crates. Optimize the crates only.
 # Debug assertions and overflow checks stay on the profile defaults.

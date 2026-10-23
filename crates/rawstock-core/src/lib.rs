@@ -5,7 +5,8 @@
 //! print/scan, the sRGB output transform, and export. [`stock::Stock::load`]
 //! reads a versioned stock file into [`render::Parameters`].
 //! [`session::PreviewSession`] caches those stages for a live preview. It does
-//! not open files or start threads. With the `gpu` feature, `gpu` runs the
+//! not open files. Parallel stages run on the capped [`workers::Workers`]
+//! pool. With the `gpu` feature, `gpu` runs the
 //! same stages on wgpu.
 
 #![forbid(unsafe_code)]
@@ -22,3 +23,4 @@ pub mod render;
 pub mod session;
 mod spectrum;
 pub mod stock;
+pub mod workers;
