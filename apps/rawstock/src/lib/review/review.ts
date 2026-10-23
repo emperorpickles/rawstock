@@ -351,9 +351,9 @@ export class ReviewController {
   }
 
   /**
-   * Settings settled. Older jobs for the after side are superseded.
-   * A matching key still pumps: a drag may already have stored it, and the
-   * zoomed view still needs its one full develop.
+   * Settings settled. Older full develops for the after side are superseded.
+   * A drag does not write this key; pumping when it already matches is a
+   * no-op while that full frame is current.
    */
   update(settings: EditSettings): void {
     if (!this.after) {
@@ -393,14 +393,15 @@ export class ReviewController {
   /**
    * Reserve the preview slot for an adjust develop whose id is not known yet,
    * so a before-side preview does not take the slot out from under it.
+   * The drag key stays on that job. `after.key` is the settled edit, and a
+   * full develop is stale only against that, so a finished drag preview does
+   * not develop the intermediate value.
    */
   holdPreview(settings: EditSettings, edge: number): void {
     if (!this.after) {
       return;
     }
     const key = ReviewController.key(settings);
-    this.after.settings = ReviewController.clone(settings);
-    this.after.key = key;
     const previous = this.pending.preview;
     if (previous?.side === "after" && previous.id != null) {
       this.known.delete(previous.id);

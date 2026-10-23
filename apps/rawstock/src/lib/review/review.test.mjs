@@ -351,6 +351,46 @@ test("a memory eviction drops the texture and develops for region delivery", asy
   assert.equal(host.count("develop_full"), 2);
 });
 
+test("zoomed drag previews develop the full frame once, on release", async () => {
+  for (const zoom of [1, 2]) {
+    const { host, review } = harness();
+    review.adjustOwnsAfterPreview();
+    review.open("img", settings(0), { width: 800, height: 600 });
+    review.setZoom(zoom);
+    await flush();
+    const full = host.last("develop_full");
+    done(review, full);
+    ready(review, full);
+    await flush();
+    const during = host.count("develop_full");
+    assert.equal(during, 1);
+
+    let jobId = 20;
+    for (const exposure of [0.1, 0.2, 0.3]) {
+      review.holdPreview(settings(exposure), 720);
+      host.jobs.set(jobId, { kind: "preview", settings: settings(exposure) });
+      review.claimPreview(jobId);
+      review.done({
+        jobId,
+        imageId: "img",
+        kind: "preview",
+        settingsHash: `hash-${exposure}`,
+        width: 24,
+        height: 16,
+        exact: false,
+      });
+      await flush();
+      assert.equal(host.count("develop_full"), during, `zoom ${zoom} exposure ${exposure}`);
+      jobId += 1;
+    }
+
+    review.update(settings(0.3));
+    await flush();
+    assert.equal(host.count("develop_full"), during + 1, `zoom ${zoom}`);
+    assert.equal(host.last("develop_full").settings.exposureEv, 0.3);
+  }
+});
+
 test("settling a drag still develops the full frame once", async () => {
   const { host, review } = harness();
   review.adjustOwnsAfterPreview();
