@@ -369,7 +369,15 @@ rather than a blotch. Aspect runs from 1 to about 1.6.
 is `[0.018, 0.013, 0.010]`: cyan dye coarsest, yellow dye finest, inside
 the 10–25 µm dye-cloud range reported for this family of films. Below
 about 0.75 px of sigma the photosite is the aperture and the cloud's whole
-mass is deposited in the pixel that contains its center. Above that, the
+mass lands in the pixel that contains its center. Where a cloud sits inside
+that pixel no longer matters, so the pixel's sum is drawn directly: a
+Poisson count of clouds from a table, then their summed mass, gaussian
+given the count. Above 64 clouds per pixel the count is gaussian too. The
+draws hash the pixel's full-frame position, so a crop at the same pitch
+matches the frame. This keeps a preview's cost per pixel. Drawing every
+cloud took 5 to 6 s at the 1440 px proxy, because the frame holds about
+100 million of them. The proxy's grain has the export's statistics but not
+its individual clouds, which at that scale are smaller than a pixel. Above that, the
 gaussian is evaluated and a 6 µm scanner aperture blurs the field. The crop
 is padded by that kernel, so a 100% view matches the full frame.
 
@@ -430,6 +438,17 @@ CIE 1931 2° observer under D65, then the existing D65 → ACEScg matrix
 clear film (transmittance 1) is ACEScg `(1, 1, 1)`. Each ACEScg channel
 becomes a density again with `−log10`. That density is what `print_scan`
 sees.
+
+The eye is the right reader for a slide, which is viewed. A negative is
+read by a printer, whose red, green, and blue responses each sit on one
+dye. A stock with `[scan_response]` (Portra 400 uses ISO 5-3 Status M)
+scans with those responses instead (`Observer::from_responses`), each
+normalized so clear film reads 1. With `[print_dye_density]` the print
+stage then forms each channel's print density from that paper dye's
+spectrum and views the sum under the same D65 observer
+(`Spectral::print_pixel`), instead of taking `10^(−print density)` per
+ACEScg channel. The paper dyes' side absorptions are what keep a
+negative-print look from the oversaturation of ideal dyes.
 
 `reference_log_exposure` is the datasheet printer balance. At load time
 the curves are evaluated at that log exposure, the result is scanned

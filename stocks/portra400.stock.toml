@@ -1,92 +1,102 @@
 # Kodak Portra 400, schema 1 spectral stock.
-# Sensitivities and D-logH curves are the E-4050 traces from the MIT-licensed
-# KODAK_PORTRA_400 module in Jan Lohse, spectral_film_lut
-# (https://github.com/JanLohse/spectral_film_lut), written by
-# lab/import_spectral_film_lut.py. Those arrays are measured data.
+# Sensitivities, D-logH curves, dye shapes, the Status M scan, the print
+# curve, and the paper dyes were written by lab/import_spectral_film_lut.py
+# from the MIT-licensed KODAK_PORTRA_400 and KODAK_PORTRA_ENDURA modules and
+# the Status M table in Jan Lohse, spectral_film_lut
+# (https://github.com/JanLohse/spectral_film_lut). The film curves were
+# digitized from Kodak publication E-4050. Those arrays are measured data.
 #
-# Everything else marked "approximate aesthetic tuning" was shaped by eye for
-# a Portra-like print. It is not a densitometer reading, a paper curve, or a
-# published RMS table.
+# The negative is printed the way a lab prints it: read through Status M,
+# balanced at middle gray, exposed onto Portra Endura paper, and viewed
+# through that paper's dyes. Grain and halation, at the end of the file, are
+# an approximate aesthetic tuning added by hand.
 
 schema_version = 1
-revision = 2
+revision = 3
 name = "Kodak Portra 400"
-source = "spectral_film_lut, digitized from Kodak publication E-4050 (KODAK PROFESSIONAL PORTRA 400 Film). Dye scale, print curve, coupling, grain, and halation are an approximate aesthetic tuning on top of those curves."
+source = "spectral_film_lut, digitized from Kodak publication E-4050 (KODAK PROFESSIONAL PORTRA 400 Film) and the KODAK PROFESSIONAL PORTRA ENDURA paper datasheet. Grain and halation are an approximate aesthetic tuning on top of those curves."
 license = "MIT"
 model = "spectral"
 
-# Datasheet placement: stops that put scene-linear 0.18 on log10(12.5 / ISO),
-# the middle-gray log exposure spectral_film_lut uses for this ISO.
+# Stops that place scene-linear 0.18 on log10(12.5 / ISO), the
+# middle-gray log exposure spectral_film_lut uses for this ISO.
 exposure_ev = -2.526069
-# Approximate aesthetic tuning. Puts that middle gray on the open part of the
-# hand-shaped print curve below, not on a measured paper exposure.
-print_exposure = 1.28
-# Datasheet printer balance. The spectral print neutralizes this log exposure.
-# It is not a chart-scan white balance.
+# Prints that middle gray at the paper's 18 % gray density.
+print_exposure = -0.861619
+# The Status M scan balances this log exposure to neutral, the job of
+# a printer's color trims.
 reference_log_exposure = -1.505150
 
 wavelength_nm = [380, 390, 400, 410, 420, 430, 440, 450, 460, 470, 480, 490, 500, 510, 520, 530, 540, 550, 560, 570, 580, 590, 600, 610, 620, 630, 640, 650, 660, 670, 680, 690, 700, 710, 720, 730, 740, 750, 760, 770, 780]
 
-# Approximate aesthetic tuning. Mild interlayer mixing. Each row sums to 1, so
-# a neutral log exposure is unchanged. A green-heavy exposure picks up a little
-# red-layer and blue-layer exposure, which pulls greens toward yellow-olive and
-# takes a little edge off saturated blues.
-[coupling]
-matrix = [[0.90, 0.08, 0.02], [0.04, 0.90, 0.06], [0.02, 0.06, 0.92]]
-
 [sensitivity]
-red = [0.000125, 0.000125, 0.000125, 0.000125, 0.000125, 0.000125, 0.000125, 0.000125, 0.000125, 0.000125, 0.000125, 0.000125, 0.000161, 0.000222, 0.000281, 0.000305, 0.000291, 0.000309, 0.000502, 0.000944, 0.002358, 0.004806, 0.006907, 0.009191, 0.011122, 0.01192, 0.01292, 0.018221, 0.014226, 0.002463, 0.000232, 0.000125, 0.000125, 0.000125, 0.000125, 0.000125, 0.000125, 0.000125, 0.000125, 0.000125, 0.000125]
-green = [0.000363, 0.000748, 0.00137, 0.00143, 0.001212, 0.001039, 0.000926, 0.000894, 0.000929, 0.001068, 0.001816, 0.003182, 0.00457, 0.005597, 0.006871, 0.008778, 0.011831, 0.013934, 0.012383, 0.009549, 0.006371, 0.001491, 0.000207, 0.000207, 0.000207, 0.000207, 0.000207, 0.000207, 0.000207, 0.000207, 0.000207, 0.000207, 0.000207, 0.000207, 0.000207, 0.000207, 0.000207, 0.000207, 0.000207, 0.000207, 0.000207]
-blue = [0.001635, 0.004592, 0.010623, 0.011566, 0.01086, 0.010781, 0.010519, 0.009694, 0.010226, 0.010679, 0.006101, 0.001332, 0.000464, 0.000175, 0.000059, 0.000059, 0.000059, 0.000059, 0.000059, 0.000059, 0.000059, 0.000059, 0.000059, 0.000059, 0.000059, 0.000059, 0.000059, 0.000059, 0.000059, 0.000059, 0.000059, 0.000059, 0.000059, 0.000059, 0.000059, 0.000059, 0.000059, 0.000059, 0.000059, 0.000059, 0.000059]
+red = [0.000019, 0.000019, 0.000019, 0.000019, 0.000019, 0.000019, 0.000021, 0.00003, 0.000042, 0.000059, 0.000083, 0.000117, 0.000164, 0.000227, 0.000287, 0.000311, 0.000297, 0.000315, 0.000512, 0.000963, 0.002406, 0.004904, 0.007047, 0.009378, 0.011347, 0.012162, 0.013183, 0.018591, 0.014515, 0.002513, 0.000236, 0.000019, 0.000019, 0.000019, 0.000019, 0.000019, 0.000019, 0.000019, 0.000019, 0.000019, 0.000019]
+green = [0.000375, 0.000775, 0.001418, 0.00148, 0.001254, 0.001075, 0.000958, 0.000925, 0.000961, 0.001105, 0.001879, 0.003293, 0.00473, 0.005792, 0.007111, 0.009084, 0.012243, 0.014419, 0.012815, 0.009882, 0.006593, 0.001543, 0.000204, 0.000033, 0.000015, 0.000015, 0.000015, 0.000015, 0.000015, 0.000015, 0.000015, 0.000015, 0.000015, 0.000015, 0.000015, 0.000015, 0.000015, 0.000015, 0.000015, 0.000015, 0.000015]
+blue = [0.001654, 0.004648, 0.010753, 0.011707, 0.010992, 0.010912, 0.010647, 0.009812, 0.010351, 0.010809, 0.006175, 0.001348, 0.00047, 0.000177, 0.000058, 0.000021, 0.000012, 0.000012, 0.000012, 0.000012, 0.000012, 0.000012, 0.000012, 0.000012, 0.000012, 0.000012, 0.000012, 0.000012, 0.000012, 0.000012, 0.000012, 0.000012, 0.000012, 0.000012, 0.000012, 0.000012, 0.000012, 0.000012, 0.000012, 0.000012, 0.000012]
 
-# Approximate aesthetic tuning of the imported dye shapes. The wavelengths are
-# the split of (midscale spectral density minus D-min). The scales are not:
-# red (cyan dye) 1.45, green (magenta dye) 0.98, blue (yellow dye) 0.95.
-# That keeps saturation pastel, warms skin, and holds blues a little cyan.
+# The importer's split of (midscale spectral density minus D-min), each
+# dye scaled to read density 1 through its own Status M channel.
 [dye_density]
-red = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.001193, 0.005472, 0.01808, 0.047002, 0.095567, 0.155354, 0.220307, 0.301374, 0.414639, 0.546187, 0.694018, 0.846439, 0.993088, 1.123418, 1.239058, 1.335202, 1.407432, 1.45, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-green = [0, 0, 0, 0, 0, 0.001022, 0.004684, 0.01519, 0.039852, 0.085915, 0.156461, 0.252772, 0.380373, 0.535443, 0.706395, 0.865782, 0.975064, 0.98, 0.852713, 0.646188, 0.456011, 0.32331, 0.233563, 0.159248, 0.100336, 0.056511, 0.027748, 0.01158, 0.003987, 0.000992, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-blue = [0, 0, 0, 0.650277, 0.77806, 0.887176, 0.938394, 0.95, 0.919439, 0.829536, 0.69763, 0.558859, 0.435292, 0.321738, 0.219991, 0.134177, 0.070443, 0.030298, 0.010193, 0.002632, 0.000497, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+red = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.001107, 0.005073, 0.016762, 0.043573, 0.088596, 0.144023, 0.204238, 0.279391, 0.384396, 0.506349, 0.643396, 0.7847, 0.920652, 1.041475, 1.148681, 1.237812, 1.304774, 1.344237, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+green = [0, 0, 0, 0, 0, 0.0012, 0.005499, 0.017833, 0.046786, 0.100863, 0.183684, 0.296754, 0.446556, 0.628606, 0.829304, 1.016423, 1.14472, 1.150515, 1.001081, 0.758622, 0.535354, 0.379564, 0.274203, 0.186957, 0.117794, 0.066344, 0.032575, 0.013594, 0.004681, 0.001164, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+blue = [0, 0, 0, 0.729123, 0.872399, 0.994746, 1.052175, 1.065188, 1.030922, 0.930118, 0.782218, 0.626621, 0.488072, 0.36075, 0.246666, 0.150446, 0.078985, 0.033972, 0.011428, 0.002952, 0.000557, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 
+# ISO 5-3 Status M, the densitometer the datasheet curves were read
+# with. The negative is scanned with it, not with the eye.
+[scan_response]
+red = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.000463, 0.108436, 0.359893, 0.285216, 0.136199, 0.064294, 0.026988, 0.011147, 0.00452, 0.001751, 0.000669, 0.00026, 0.000101, 0.000041, 0.000016, 0.000006, 0]
+green = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0.000032, 0.000361, 0.003207, 0.014257, 0.041883, 0.094632, 0.166739, 0.223892, 0.221329, 0.147244, 0.064274, 0.018409, 0.003327, 0.000388, 0.000026, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+blue = [0, 0, 0, 0.000314, 0.031937, 0.105998, 0.18378, 0.247342, 0.222996, 0.136867, 0.054488, 0.013687, 0.002417, 0.000176, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+# Portra Endura paper dyes, scaled so equal print densities at the
+# 18 % aim view as a neutral under D65.
+[print_dye_density]
+red = [0.12701, 0.12701, 0.12701, 0.116508, 0.101877, 0.080729, 0.060393, 0.046341, 0.039235, 0.03523, 0.036897, 0.04053, 0.047835, 0.058771, 0.076188, 0.100041, 0.130875, 0.173264, 0.242215, 0.330663, 0.44746, 0.584528, 0.735699, 0.896854, 1.037152, 1.100611, 1.065887, 0.940325, 0.779723, 0.629787, 0.494539, 0.383235, 0.299105, 0.299105, 0.299105, 0.299105, 0.299105, 0.299105, 0.299105, 0.299105, 0.299105]
+green = [0.041388, 0.041388, 0.041388, 0.045187, 0.047469, 0.047566, 0.054778, 0.071656, 0.098584, 0.148808, 0.218314, 0.315084, 0.44202, 0.588852, 0.727469, 0.850229, 0.94679, 0.976205, 0.887025, 0.686199, 0.460421, 0.286459, 0.171549, 0.105795, 0.065508, 0.045824, 0.038083, 0.036247, 0.034019, 0.030837, 0.027431, 0.023796, 0.020821, 0.020694, 0.020694, 0.020694, 0.020694, 0.020694, 0.020694, 0.020694, 0.020694]
+blue = [0.395158, 0.395158, 0.395158, 0.587229, 0.784325, 0.903743, 0.954291, 0.962063, 0.921477, 0.812277, 0.655185, 0.489405, 0.33301, 0.208644, 0.12676, 0.076543, 0.04345, 0.029464, 0.017359, 0.013709, 0.010436, 0.007499, 0.005042, 0.003577, 0.003577, 0.003577, 0.003577, 0.005472, 0.007654, 0.009726, 0.01064, 0.009245, 0.010829, 0.010829, 0.010829, 0.010829, 0.010829, 0.010829, 0.010829, 0.010829, 0.010829]
+
+# Datasheet D-logH curves as dye amounts: the Status M readings above
+# D-min, unmixed by the inverse of the dyes' Status M readings.
 [red]
 log_exposure = [-3.3858, -3.2526, -3.1194, -2.9862, -2.8529, -2.7197, -2.5865, -2.4533, -2.3201, -2.1869, -2.0537, -1.9204, -1.7872, -1.654, -1.5208, -1.3876, -1.2544, -1.1211, -0.9879, -0.8547, -0.7215, -0.5883, -0.4551, -0.3219, -0.1886, -0.0554, 0.0778, 0.211, 0.3442, 0.4774, 0.5565]
-density = [0.2172, 0.2218, 0.2264, 0.2316, 0.2406, 0.2625, 0.3031, 0.3594, 0.4267, 0.4964, 0.5643, 0.6331, 0.7024, 0.7732, 0.8425, 0.9144, 0.9867, 1.0587, 1.1318, 1.2052, 1.2794, 1.3545, 1.4291, 1.505, 1.5809, 1.6564, 1.7327, 1.8094, 1.8866, 1.9643, 2.0108]
+density = [0, 0.004501, 0.009021, 0.014119, 0.02295, 0.044379, 0.084136, 0.139253, 0.205127, 0.273303, 0.339696, 0.407009, 0.474806, 0.544118, 0.611937, 0.682369, 0.753176, 0.823691, 0.895331, 0.967266, 1.040017, 1.113644, 1.186776, 1.261208, 1.335688, 1.409774, 1.484618, 1.559871, 1.635641, 1.711894, 1.75754]
 
 [green]
 log_exposure = [-3.3858, -3.2526, -3.1194, -2.9862, -2.8529, -2.7197, -2.5865, -2.4533, -2.3201, -2.1869, -2.0537, -1.9204, -1.7872, -1.654, -1.5208, -1.3876, -1.2544, -1.1211, -0.9879, -0.8547, -0.7215, -0.5883, -0.4551, -0.3219, -0.1886, -0.0554, 0.0778, 0.211, 0.3442, 0.4774, 0.5565]
-density = [0.6434, 0.6482, 0.6523, 0.6584, 0.669, 0.6951, 0.7393, 0.7995, 0.8708, 0.9463, 1.0211, 1.0951, 1.1698, 1.244, 1.3178, 1.3912, 1.4656, 1.5398, 1.613, 1.6864, 1.7592, 1.833, 1.9066, 1.9802, 2.0519, 2.1234, 2.1966, 2.2695, 2.3417, 2.4147, 2.4578]
+density = [0, 0.00422, 0.007577, 0.011942, 0.019099, 0.039104, 0.074853, 0.125057, 0.185585, 0.250258, 0.314224, 0.377355, 0.44113, 0.504308, 0.567163, 0.629462, 0.692799, 0.755836, 0.817829, 0.879984, 0.9415, 1.004003, 1.066323, 1.128592, 1.188869, 1.248907, 1.310674, 1.372116, 1.432786, 1.494186, 1.530441]
 
 [blue]
-log_exposure = [-3.3775, -3.2443, -3.1111, -2.9778, -2.8446, -2.7114, -2.5782, -2.445, -2.3118, -2.1785, -2.0453, -1.9121, -1.7789, -1.6457, -1.5125, -1.3793, -1.246, -1.1128, -0.9796, -0.8464, -0.7132, -0.58, -0.4467, -0.3135, -0.1803, -0.0471, 0.0861, 0.2193, 0.3525, 0.4858, 0.5607]
-density = [0.866, 0.8704, 0.8762, 0.8923, 0.9244, 0.9788, 1.0495, 1.1295, 1.2129, 1.2959, 1.3797, 1.4633, 1.5474, 1.6318, 1.716, 1.8007, 1.8849, 1.9702, 2.0554, 2.1409, 2.2264, 2.3117, 2.3971, 2.4824, 2.5685, 2.6552, 2.7413, 2.8275, 2.9142, 3.0015, 3.0499]
+log_exposure = [-3.3858, -3.2526, -3.1194, -2.9862, -2.8529, -2.7197, -2.5865, -2.4533, -2.3201, -2.1869, -2.0537, -1.9204, -1.7872, -1.654, -1.5208, -1.3876, -1.2544, -1.1211, -0.9879, -0.8547, -0.7215, -0.5883, -0.4551, -0.3219, -0.1886, -0.0554, 0.0778, 0.211, 0.3442, 0.4774, 0.5565]
+density = [0, 0.003936, 0.009497, 0.024748, 0.055539, 0.107649, 0.175723, 0.252882, 0.333343, 0.413396, 0.494261, 0.575092, 0.656288, 0.737823, 0.819204, 0.901067, 0.982386, 1.064837, 1.14725, 1.229932, 1.312661, 1.395158, 1.477684, 1.560181, 1.64358, 1.727538, 1.810893, 1.894319, 1.978255, 2.062691, 2.112245]
 
-# Approximate aesthetic tuning. Soft midtone slope, a long toe so highlights
-# roll off, and a shallow shoulder so shadows stay lifted and a little open.
+# Portra Endura paper, green layer, from the paper white.
 [print]
-log_exposure = [-1.6, -0.85, -0.25, 0.14, 0.50, 1.05, 1.9]
-density = [0.06, 0.14, 0.30, 0.60, 0.96, 1.26, 1.48]
+log_exposure = [-2.9904, -2.2949, -2.0481, -1.891, -1.7676, -1.6907, -1.5801, -1.4599, -1.3702, -1.2853, -1.2019, -1.1026, -1.0288, -0.9006, -0.7853, -0.6635, -0.5449, -0.4519, -0.3269, -0.1587]
+density = [0, 0.0113, 0.0742, 0.1888, 0.3405, 0.4793, 0.7407, 1.0893, 1.3878, 1.6363, 1.8607, 2.0624, 2.1689, 2.2996, 2.3771, 2.4319, 2.4836, 2.5175, 2.5352, 2.5675]
 
-# Approximate aesthetic tuning, not a published granularity table. Vision3-style
-# RMS-versus-density shape for a fine ISO 400 color negative: rms rises through
-# the midtones and falls toward D-max, and the blue layer is the grainiest.
-# size_mm is the primary dye-cloud sigma. Cyan dye (red record) is coarsest,
-# yellow dye (blue record) finest, at Portra's 10–18 µm rather than coarse clumps.
+# Approximate aesthetic tuning, not a published granularity table. The shape
+# follows the Vision3 250D (5207) RMS tables spectral_film_lut carries for
+# this film: rms rises through the midtones, eases toward D-max, and the
+# blue record is the grainiest. Density is the dye amount above D-min. The
+# print curve multiplies negative grain by the paper's contrast, about 2.5,
+# so these values sit near 5207's and well under the earlier hand table.
+# size_mm is the primary dye-cloud sigma, cyan (red record) coarsest.
 # rms is 1000 times the density standard deviation through a 48 µm aperture.
 [grain]
 frame_mm = 35
 seed = 400
 [grain.red]
-density = [0.15, 0.40, 0.80, 1.20, 1.70, 2.30, 2.80]
-rms = [10, 14, 19, 24, 22, 16, 12]
-size_mm = 0.018
+density = [0.0, 0.3, 0.7, 1.1, 1.5, 2.0, 2.6]
+rms = [4, 5, 7, 8, 7, 6, 5]
+size_mm = 0.014
 [grain.green]
-density = [0.15, 0.40, 0.80, 1.20, 1.70, 2.30, 2.80]
-rms = [12, 19, 26, 31, 26, 19, 14]
-size_mm = 0.013
+density = [0.0, 0.3, 0.7, 1.1, 1.5, 2.0, 2.6]
+rms = [4, 5, 8, 9, 8, 7, 6]
+size_mm = 0.011
 [grain.blue]
-density = [0.15, 0.40, 0.80, 1.20, 1.70, 2.30, 2.80]
-rms = [14, 22, 31, 38, 31, 22, 17]
-size_mm = 0.010
+density = [0.0, 0.3, 0.7, 1.1, 1.5, 2.0, 2.6]
+rms = [7, 8, 10, 12, 11, 10, 9]
+size_mm = 0.009
 
 # Approximate aesthetic tuning. Portra has an anti-halation layer, so this is
 # only a faint red fringe on highlights well above middle gray. Threshold is
@@ -95,4 +105,3 @@ size_mm = 0.010
 threshold = 0.25
 radius = 0.008
 weight = [0.08, 0.008, 0.0]
-

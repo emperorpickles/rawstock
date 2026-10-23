@@ -49,6 +49,32 @@ impl Observer {
         project_rows(wavelengths, &CIE_D65, matrix)
     }
 
+    /// A densitometer or printer with its own red, green, and blue responses.
+    ///
+    /// Each row is weighted by the trapezoid on `wavelengths` and scaled so a
+    /// clear film reads 1, the same white rule as [`Self::acescg_d65`]. `None`
+    /// when a row has no weight on the grid.
+    pub(crate) fn from_responses(wavelengths: &[f32], responses: &[Vec<f32>; 3]) -> Option<Self> {
+        let weights = trapezoid(wavelengths);
+        let mut rows = [Vec::new(), Vec::new(), Vec::new()];
+        for (row, response) in rows.iter_mut().zip(responses) {
+            let weighted: Vec<f64> = response
+                .iter()
+                .zip(&weights)
+                .map(|(sample, weight)| f64::from(*sample) * weight)
+                .collect();
+            let white: f64 = weighted.iter().sum();
+            if !white.is_finite() || white < 1.0e-12 {
+                return None;
+            }
+            *row = weighted
+                .iter()
+                .map(|sample| (sample / white) as f32)
+                .collect();
+        }
+        Some(Self { rows })
+    }
+
     /// Weights per channel, the trapezoid and white already folded in.
     #[cfg(feature = "gpu")]
     pub(crate) fn rows(&self) -> &[Vec<f32>; 3] {
@@ -286,6 +312,25 @@ fn mono_coeff(value: f32) -> [f32; COEFFS] {
     [0.0, 0.0, constant]
 }
 
+/// Trapezoidal weight of each sample on `wavelengths`.
+fn trapezoid(wavelengths: &[f32]) -> Vec<f64> {
+    (0..wavelengths.len())
+        .map(|index| {
+            let left = if index == 0 {
+                0.0
+            } else {
+                wavelengths[index] - wavelengths[index - 1]
+            };
+            let right = if index + 1 == wavelengths.len() {
+                0.0
+            } else {
+                wavelengths[index + 1] - wavelengths[index]
+            };
+            0.5 * f64::from(left + right)
+        })
+        .collect()
+}
+
 fn project_rows(
     wavelengths: &[f32],
     illuminant: &[f32; 95],
@@ -293,18 +338,7 @@ fn project_rows(
 ) -> Option<Observer> {
     let mut weighted = vec![[0.0f64; 3]; wavelengths.len()];
     let mut white = [0.0f64; 3];
-    for index in 0..wavelengths.len() {
-        let left = if index == 0 {
-            0.0
-        } else {
-            wavelengths[index] - wavelengths[index - 1]
-        };
-        let right = if index + 1 == wavelengths.len() {
-            0.0
-        } else {
-            wavelengths[index + 1] - wavelengths[index]
-        };
-        let weight = 0.5 * f64::from(left + right);
+    for (index, weight) in trapezoid(wavelengths).into_iter().enumerate() {
         let cmf = cie_xyz(wavelengths[index]);
         let light = f64::from(cie_at(illuminant, wavelengths[index]));
         let sample = [

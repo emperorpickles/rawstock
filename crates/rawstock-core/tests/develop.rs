@@ -54,6 +54,47 @@ fn develops_iphone_proraw_to_acescg() {
     );
 }
 
+#[test]
+fn quick_xtrans_develop_is_a_third_of_the_full_frame() {
+    let Some(path) = X_S10.prepare() else {
+        return;
+    };
+    let raw = RawImage::open(&path).unwrap();
+    let quick = raw
+        .develop_quick_linear()
+        .unwrap()
+        .expect("X-Trans has a quick develop");
+    let full = raw.develop_linear().unwrap();
+    assert_eq!(
+        (quick.full_width, quick.full_height),
+        (full.width(), full.height())
+    );
+    assert_eq!(
+        (quick.image.width(), quick.image.height()),
+        (full.width() / 3, full.height() / 3)
+    );
+    // A preview from either is the same picture.
+    let fast = quick.image.area_downsample(720).unwrap();
+    let slow = full.area_downsample(720).unwrap();
+    assert_eq!((fast.width(), fast.height()), (slow.width(), slow.height()));
+    let mut miss = 0.0_f64;
+    let mut total = 0.0_f64;
+    for (a, b) in fast.pixels().iter().zip(slow.pixels()) {
+        miss += f64::from((a - b).abs());
+        total += f64::from(b.abs());
+    }
+    assert!(miss / total < 0.02, "proxies differ by {}", miss / total);
+}
+
+#[test]
+fn quick_develop_is_x_trans_only() {
+    let Some(path) = IPHONE_12_PRO.prepare() else {
+        return;
+    };
+    let raw = RawImage::open(&path).unwrap();
+    assert!(raw.develop_quick_linear().unwrap().is_none());
+}
+
 fn develop_fixture(fixture: &Fixture, patch: GrayPatch) {
     let Some(path) = fixture.prepare() else {
         return;
