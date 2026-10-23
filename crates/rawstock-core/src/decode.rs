@@ -427,6 +427,8 @@ pub struct RawImage {
     as_shot_wb: [f32; 4],
     /// XYZ → camera RGBE matrix.
     camera_matrix: [[f32; 3]; 4],
+    /// Correct chromatic aberration when developing. On by default.
+    correct_chromatic_aberration: bool,
     /// Sensor samples and CFA layout. Not part of [`Debug`] output.
     decoded: rawler::rawimage::RawImage,
 }
@@ -479,6 +481,19 @@ impl RawImage {
     /// Camera color matrix, XYZ → camera RGBE, row-major.
     pub fn camera_matrix(&self) -> [[f32; 3]; 4] {
         self.camera_matrix
+    }
+
+    /// Whether [`Self::develop_linear`] corrects chromatic aberration:
+    /// lateral misregistration of red and blue, then the blue/purple glow
+    /// beside bright edges. On by default. Linear DNG (ProRAW) arrives
+    /// corrected and is left alone either way.
+    pub fn corrects_chromatic_aberration(&self) -> bool {
+        self.correct_chromatic_aberration
+    }
+
+    /// Turn chromatic aberration correction on or off for later develops.
+    pub fn set_chromatic_aberration_correction(&mut self, enabled: bool) {
+        self.correct_chromatic_aberration = enabled;
     }
 
     /// Sensor samples backing this image.
@@ -535,6 +550,7 @@ impl RawImage {
             white_levels,
             as_shot_wb: decoded.wb_coeffs,
             camera_matrix,
+            correct_chromatic_aberration: true,
             decoded,
         })
     }
@@ -601,6 +617,10 @@ impl fmt::Debug for RawImage {
             .field("white_levels", &self.white_levels)
             .field("as_shot_wb", &self.as_shot_wb)
             .field("camera_matrix", &self.camera_matrix)
+            .field(
+                "correct_chromatic_aberration",
+                &self.correct_chromatic_aberration,
+            )
             .finish_non_exhaustive()
     }
 }

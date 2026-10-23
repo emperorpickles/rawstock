@@ -14,6 +14,7 @@
 mod cie1931;
 pub mod color;
 pub mod decode;
+mod defringe;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 mod grain;

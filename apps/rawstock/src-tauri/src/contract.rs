@@ -199,6 +199,24 @@ pub struct CropRect {
     pub h: f64,
 }
 
+/// Lens corrections applied while the RAW file is developed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LensEdit {
+    /// Chromatic aberration correction: red and blue registered onto green,
+    /// then the blue/purple glow beside bright edges desaturated. On unless
+    /// the edit turns it off.
+    pub ca_correction: bool,
+}
+
+impl Default for LensEdit {
+    fn default() -> Self {
+        Self {
+            ca_correction: true,
+        }
+    }
+}
+
 /// Rotation, straighten, and an optional crop.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
@@ -227,6 +245,7 @@ pub struct EditSettings {
     pub halation: HalationEdit,
     pub scan: ScanEdit,
     pub geometry: GeometryEdit,
+    pub lens: LensEdit,
 }
 
 impl Default for EditSettings {
@@ -243,6 +262,7 @@ impl Default for EditSettings {
             halation: HalationEdit::default(),
             scan: ScanEdit::default(),
             geometry: GeometryEdit::default(),
+            lens: LensEdit::default(),
         }
     }
 }
@@ -893,6 +913,16 @@ revision = 2
         let explicit = EditSettings::default();
         let from_empty: EditSettings = toml::from_str("").unwrap();
         assert_eq!(settings_hash(&explicit), settings_hash(&from_empty));
+    }
+
+    #[test]
+    fn ca_correction_defaults_on_and_an_older_sidecar_keeps_it_on() {
+        assert!(EditSettings::default().lens.ca_correction);
+        let older: EditSettings = toml::from_str("exposureEv = 0.5").unwrap();
+        assert!(older.lens.ca_correction);
+        let off: EditSettings = toml::from_str("[lens]\ncaCorrection = false").unwrap();
+        assert!(!off.lens.ca_correction);
+        assert_ne!(settings_hash(&off), settings_hash(&EditSettings::default()));
     }
 
     #[test]

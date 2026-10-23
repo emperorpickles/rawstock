@@ -82,6 +82,12 @@ export interface GeometryEdit {
   crop?: CropRect;
 }
 
+/** Lens corrections applied while the RAW file is developed. */
+export interface LensEdit {
+  /** Red/blue registration plus the blue/purple defringe. On by default. */
+  caCorrection: boolean;
+}
+
 export interface EditSettings {
   schema: 1;
   stock: StockRef;
@@ -94,6 +100,7 @@ export interface EditSettings {
   halation: HalationEdit;
   scan: { look: string };
   geometry: GeometryEdit;
+  lens: LensEdit;
 }
 
 export interface SidecarInfo {
@@ -221,6 +228,7 @@ export function defaultSettings(): EditSettings {
     halation: { enabled: false },
     scan: { look: "default" },
     geometry: { quarterTurns: 0, straightenDeg: 0 },
+    lens: { caCorrection: true },
   };
 }
 

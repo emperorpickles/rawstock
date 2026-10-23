@@ -53,6 +53,9 @@ pub struct SessionState {
     pub orientation: String,
     /// Clockwise quarter-turns added on top of the camera tag, in `0..4`.
     pub quarter_turns: u8,
+    /// Chromatic aberration correction (red/blue registration and the
+    /// blue/purple defringe) is on for this file's develop.
+    pub ca_correction: bool,
     pub stock: Option<StockState>,
 }
 

@@ -229,6 +229,21 @@
     }
   }
 
+  async function toggleCaCorrection() {
+    if (!host || !session) return;
+    fault = "";
+    notice = "";
+    try {
+      const next = await host.setCaCorrection(!session.caCorrection);
+      retarget();
+      session = next;
+      loop?.now();
+    } catch (error) {
+      fault = CommandError.message(error);
+      void pull();
+    }
+  }
+
   function onKey(event: KeyboardEvent) {
     if (event.metaKey || event.ctrlKey || event.altKey) return;
     const target = event.target;
@@ -472,6 +487,14 @@
         aria-label="Rotate right"
         disabled={!session}
         onclick={() => rotate("clockwise")}>↻</button
+      >
+      <button
+        type="button"
+        class:on={session?.caCorrection ?? true}
+        title="Correct chromatic aberration: red/blue edge fringes and the blue/purple glow beside bright edges"
+        aria-pressed={session?.caCorrection ?? true}
+        disabled={!session}
+        onclick={toggleCaCorrection}>CA fix</button
       >
       <button type="button" class:on={compare} disabled={!session?.stock} onclick={toggleCompare}>
         A/B
