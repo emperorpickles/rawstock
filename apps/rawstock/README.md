@@ -10,6 +10,10 @@ They assign job ids, enforce the cancellation rules, and emit progress and
 cache events. They do not decode a RAW file or run the film pipeline. That
 service is still to be wired. There is no onboarding sample.
 
+Edits are written to `<file>.rawstock.toml` next to the photo. The RAW file
+is never written, renamed, or touched. A sidecar that cannot be parsed is
+left in place until Reset edits renames it to `.bak`.
+
 ## Run from a checkout
 
 Install a stable Rust toolchain and Node 22. The commands below are the same

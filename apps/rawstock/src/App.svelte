@@ -8,6 +8,15 @@
   import { appError, defaultSettings } from "./lib/contract";
   import type { EditSettings, ImageInfo, StockSummary } from "./lib/contract";
   import { Delivery, JobTracker } from "./lib/delivery";
+  import {
+    Autosave,
+    EditHistory,
+    baselineSettings,
+    invalidSidecarNotice,
+    sidecarFromSave,
+    sortImages,
+    versionWarning,
+  } from "./lib/edits";
   import Filmstrip from "./lib/Filmstrip.svelte";
   import { FrameBuffer } from "./lib/frame";
   import type { PackedFrame } from "./lib/frame";
@@ -26,8 +35,32 @@
 
   const host = Host.available() ? new Host() : null;
   const jobs = new JobTracker();
+  const history = new EditHistory();
   const platform = Shortcuts.platform();
   const modLabel = platform === "mac" ? "Meta" : "Control";
+  const autosave = new Autosave(
+    500,
+    async (imageId, next) => {
+      if (!host) {
+        return;
+      }
+      try {
+        await host.saveSidecar(imageId, next);
+      } catch (error) {
+        if (appError(error).code === "sidecarInvalid") {
+          autosave.block(imageId, true);
+        }
+        throw error;
+      }
+      images = images.map((image) =>
+        image.imageId === imageId ? { ...image, sidecar: sidecarFromSave(next, stocks) } : image,
+      );
+    },
+    undefined,
+    (error) => {
+      errors = [appError(error).message];
+    },
+  );
 
   let images = $state<ImageInfo[]>([]);
   let selected = $state<string>("");
@@ -58,12 +91,35 @@
   let cacheWidth = $state(0);
   let cacheHeight = $state(0);
   let exportDialog = $state<HTMLDialogElement | null>(null);
+  let resetting = $state(false);
+  let closing = false;
 
   $effect(() => {
     Prefs.applyAppearance(appSettings);
   });
 
   const selectedImage = $derived(images.find((image) => image.imageId === selected) ?? null);
+  const openProblem = $derived(selectedImage?.error?.message ?? "");
+  const versionNotice = $derived(
+    selected && !selectedImage?.error ? versionWarning(settings, stocks) : null,
+  );
+  const invalidNotice = $derived(
+    selectedImage?.sidecar.status === "invalid" ? invalidSidecarNotice(selectedImage.fileName) : null,
+  );
+  const missingStockNotice = $derived.by(() => {
+    if (!selected || selectedImage?.error || stocks.length === 0 || !settings.stock.id) {
+      return null;
+    }
+    if (stocks.some((stock) => stock.id === settings.stock.id)) {
+      return null;
+    }
+    const status = selectedImage?.sidecar.status;
+    if (status !== "loaded" && status !== "stockVersionMismatch") {
+      return null;
+    }
+    return `The stock "${settings.stock.id}" is not installed. Choose another stock. The photo was not changed.`;
+  });
+  const adjustmentsDisabled = $derived(!selected || selectedImage?.error != null);
 
   $effect(() => {
     syncDialog(exportDialog, exportOpen);
@@ -91,6 +147,10 @@
       event.preventDefault();
       if (action === "filmstrip-prev" || action === "filmstrip-next") {
         stepFilmstrip(action === "filmstrip-next" ? 1 : -1);
+        return;
+      }
+      if (action === "filmstrip-first" || action === "filmstrip-last") {
+        selectEdge(action === "filmstrip-last" ? "last" : "first");
         return;
       }
       if (!host || Shortcuts.dispatchLocally(action, event)) {
@@ -206,6 +266,29 @@
         await ingest(startup);
       }
       try {
+        const closed = await getCurrentWindow().onCloseRequested(async (event) => {
+          if (closing) {
+            return;
+          }
+          event.preventDefault();
+          closing = true;
+          try {
+            await autosave.flush();
+          } catch (error) {
+            errors = [appError(error).message];
+          }
+          try {
+            await getCurrentWindow().destroy();
+          } catch (error) {
+            closing = false;
+            errors = [appError(error).message];
+          }
+        });
+        cleanups.push(closed);
+      } catch (error) {
+        errors = [appError(error).message];
+      }
+      try {
         const webview = getCurrentWebview();
         const drop = await webview.onDragDropEvent((event) => {
           if (event.payload.type === "enter" || event.payload.type === "over") {
@@ -234,9 +317,7 @@
     }
     try {
       const outcome = await host.openPaths(paths);
-      if (outcome.rejected.length) {
-        errors = outcome.rejected.map((item) => item.error.message);
-      }
+      errors = outcome.rejected.map((item) => item.error.message);
       if (outcome.images.length === 0) {
         return;
       }
@@ -244,20 +325,50 @@
       for (const image of outcome.images) {
         known.set(image.imageId, image);
       }
-      images = [...known.values()];
-      await activate(outcome.images[0].imageId);
+      images = sortImages([...known.values()]);
+      const opened = new Set(outcome.images.map((image) => image.imageId));
+      const pick =
+        images.find((image) => opened.has(image.imageId) && !image.error) ??
+        images.find((image) => opened.has(image.imageId));
+      if (pick) {
+        await activate(pick.imageId, true);
+      }
     } catch (error) {
       errors = [appError(error).message];
     }
   }
 
-  async function activate(imageId: string) {
+  async function activate(imageId: string, reload = false) {
     if (!host) {
       return;
     }
+    if (!reload && imageId === selected && history.has(imageId)) {
+      return;
+    }
+    if (selected && selected !== imageId) {
+      try {
+        await autosave.flush();
+      } catch (error) {
+        errors = [appError(error).message];
+      }
+    }
     try {
       const info = await host.selectImage(imageId);
+      const merged = images.some((image) => image.imageId === info.imageId)
+        ? images.map((image) => (image.imageId === info.imageId ? info : image))
+        : [...images, info];
+      images = sortImages(merged);
+      const known = history.has(info.imageId);
+      const current = history.open(
+        info.imageId,
+        baselineSettings(info, Prefs.startingStock(appSettings, stocks)),
+      );
+      if (!known) {
+        autosave.remember(info.imageId, current);
+      }
+      autosave.block(info.imageId, info.sidecar.status === "invalid");
       selected = info.imageId;
+      settings = current;
       frame = null;
       frameMode = "empty";
       fullJob = null;
@@ -281,6 +392,89 @@
     }
   }
 
+  function selectEdge(edge: "first" | "last") {
+    if (images.length === 0) {
+      return;
+    }
+    const next = edge === "first" ? images[0] : images[images.length - 1];
+    if (next) {
+      void activate(next.imageId);
+    }
+  }
+
+  function applyPreview(next: EditSettings) {
+    if (!selected || selectedImage?.error) {
+      return;
+    }
+    settings = next;
+    history.preview(selected, next);
+  }
+
+  function applyCommit(next: EditSettings) {
+    if (!selected || selectedImage?.error) {
+      return;
+    }
+    settings = next;
+    if (history.commit(selected, next)) {
+      autosave.schedule(selected, next);
+    }
+  }
+
+  function undoEdit() {
+    if (!selected) {
+      notice = "Nothing to undo.";
+      return;
+    }
+    const next = history.undo(selected);
+    if (!next) {
+      notice = "Nothing to undo.";
+      return;
+    }
+    settings = next;
+    autosave.schedule(selected, next);
+    notice = selectedImage?.fileName ?? "Undo";
+  }
+
+  function redoEdit() {
+    if (!selected) {
+      notice = "Nothing to redo.";
+      return;
+    }
+    const next = history.redo(selected);
+    if (!next) {
+      notice = "Nothing to redo.";
+      return;
+    }
+    settings = next;
+    autosave.schedule(selected, next);
+    notice = selectedImage?.fileName ?? "Redo";
+  }
+
+  async function resetEdits() {
+    if (!host || !selected || resetting) {
+      return;
+    }
+    resetting = true;
+    try {
+      const info = await host.resetSidecar(selected);
+      images = images.map((image) => (image.imageId === info.imageId ? info : image));
+      autosave.block(info.imageId, false);
+      const live = history.current(info.imageId);
+      if (live) {
+        history.commit(info.imageId, live);
+        if (history.dirty(info.imageId)) {
+          autosave.schedule(info.imageId, live);
+          await autosave.flush();
+        }
+      }
+      notice = info.fileName;
+    } catch (error) {
+      errors = [appError(error).message];
+    } finally {
+      resetting = false;
+    }
+  }
+
   async function perform(action: string) {
     switch (action) {
       case "open":
@@ -293,6 +487,11 @@
         exportOpen = true;
         break;
       case "close":
+        try {
+          await autosave.flush();
+        } catch (error) {
+          errors = [appError(error).message];
+        }
         selected = "";
         frame = null;
         frameMode = "empty";
@@ -302,10 +501,10 @@
         }
         break;
       case "undo":
-        notice = "Nothing to undo.";
+        undoEdit();
         break;
       case "redo":
-        notice = "Nothing to redo.";
+        redoEdit();
         break;
       case "fit":
         zoom = "fit";
@@ -374,10 +573,10 @@
   }
 
   function chooseStock(stock: StockSummary) {
-    settings = {
+    applyCommit({
       ...settings,
       stock: { id: stock.id, revision: stock.revision },
-    };
+    });
     notice = `${stock.name}, revision ${stock.revision}`;
   }
 
@@ -506,20 +705,43 @@
     </div>
   {/if}
 
+  {#if versionNotice || missingStockNotice}
+    <div class="banner" role="status">
+      {#if versionNotice}<p>{versionNotice}</p>{/if}
+      {#if missingStockNotice}<p>{missingStockNotice}</p>{/if}
+    </div>
+  {/if}
+
+  {#if invalidNotice}
+    <div class="banner" role="alert">
+      <p>{invalidNotice}</p>
+      <button type="button" onclick={() => void resetEdits()} disabled={resetting}>Reset edits</button>
+    </div>
+  {/if}
+
   <div class="workspace">
     <Filmstrip images={images} selected={selected} onselect={(id) => void activate(id)} />
     <Viewer
       {frame}
-      mode={selected && frame ? frameMode : "empty"}
+      mode={selected && frame && !openProblem ? frameMode : "empty"}
       {zoom}
       fileName={selectedImage?.fileName ?? ""}
+      problem={openProblem}
       {dropActive}
       imageWidth={cacheWidth}
       imageHeight={cacheHeight}
       onopen={() => void perform("open")}
       onview={viewChanged}
     />
-    <SidePanel {stocks} stockId={settings.stock.id} onstock={chooseStock} />
+    <SidePanel
+      {stocks}
+      {settings}
+      stockId={settings.stock.id}
+      disabled={adjustmentsDisabled}
+      onstock={chooseStock}
+      onpreview={applyPreview}
+      oncommit={applyCommit}
+    />
   </div>
 
   <footer class="status" aria-live="polite">

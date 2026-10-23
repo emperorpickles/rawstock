@@ -39,7 +39,8 @@ button.primary {
   border-color: #f2f2f2;
 }
 
-button:disabled {
+button:disabled,
+input:disabled {
   opacity: 0.45;
   cursor: default;
 }
@@ -74,8 +75,8 @@ canvas:focus-visible {
 
 .app {
   height: 100%;
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  display: flex;
+  flex-direction: column;
   background: #141414;
 }
 
@@ -121,9 +122,10 @@ canvas:focus-visible {
 }
 
 .workspace {
+  flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: 200px minmax(0, 1fr) 280px;
+  grid-template-columns: 220px minmax(0, 1fr) 280px;
 }
 
 h1 {

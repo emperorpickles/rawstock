@@ -96,6 +96,10 @@ export class Host {
     return this.invoke("save_sidecar", { imageId, settings });
   }
 
+  async resetSidecar(imageId: string): Promise<ImageInfo> {
+    return this.invoke("reset_sidecar", { imageId });
+  }
+
   async recentFiles(): Promise<string[]> {
     return this.invoke("recent_files");
   }

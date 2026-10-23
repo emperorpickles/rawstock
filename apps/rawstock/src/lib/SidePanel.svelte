@@ -1,20 +1,32 @@
 <script lang="ts">
-  import type { StockSummary } from "./contract";
+  import type { EditSettings, StockSummary } from "./contract";
   import { exposureText, quantityText } from "./shortcuts";
 
   let {
     stocks,
     stockId = "",
+    settings,
+    disabled = false,
     onstock,
+    onpreview,
+    oncommit,
   }: {
     stocks: StockSummary[];
     stockId?: string;
+    settings: EditSettings;
+    disabled?: boolean;
     onstock: (stock: StockSummary) => void;
+    onpreview: (settings: EditSettings) => void;
+    oncommit: (settings: EditSettings) => void;
   } = $props();
 
-  let exposure = $state(0);
-  let printExposure = $state(0);
-  let grain = $state(1);
+  function patch(next: EditSettings, commit: boolean) {
+    if (commit) {
+      oncommit(next);
+    } else {
+      onpreview(next);
+    }
+  }
 
   const categoryLabel: Record<StockSummary["category"], string> = {
     colorNegative: "Color negative",
@@ -36,6 +48,7 @@
             <button
               type="button"
               aria-pressed={stock.id === stockId}
+              {disabled}
               onclick={() => onstock(stock)}
             >
               <span class="name">{stock.name}</span>
@@ -56,13 +69,24 @@
       min="-3"
       max="3"
       step="0.01"
-      bind:value={exposure}
-      aria-valuetext={exposureText(exposure)}
+      {disabled}
+      value={settings.exposureEv}
+      aria-valuetext={exposureText(settings.exposureEv)}
+      oninput={(event) =>
+        patch({ ...settings, exposureEv: Number(event.currentTarget.value) }, false)}
+      onchange={(event) =>
+        patch({ ...settings, exposureEv: Number(event.currentTarget.value) }, true)}
     />
-    <p class="readout">{exposureText(exposure)}</p>
+    <p class="readout">{exposureText(settings.exposureEv)}</p>
 
     <p class="field" id="wb-label">White balance</p>
-    <p class="readout" aria-labelledby="wb-label">As shot</p>
+    {#if settings.whiteBalance.mode === "custom"}
+      <p class="readout" aria-labelledby="wb-label">
+        Custom white balance is saved. This build develops as shot.
+      </p>
+    {:else}
+      <p class="readout" aria-labelledby="wb-label">As shot</p>
+    {/if}
 
     <label class="field" for="print">Print exposure</label>
     <input
@@ -71,10 +95,15 @@
       min="0"
       max="2.5"
       step="0.01"
-      bind:value={printExposure}
-      aria-valuetext={quantityText(printExposure, "print")}
+      {disabled}
+      value={settings.printExposure}
+      aria-valuetext={quantityText(settings.printExposure, "print")}
+      oninput={(event) =>
+        patch({ ...settings, printExposure: Number(event.currentTarget.value) }, false)}
+      onchange={(event) =>
+        patch({ ...settings, printExposure: Number(event.currentTarget.value) }, true)}
     />
-    <p class="readout">{printExposure.toFixed(2)}</p>
+    <p class="readout">{settings.printExposure.toFixed(2)}</p>
 
     <label class="field" for="grain">Grain amount</label>
     <input
@@ -83,10 +112,21 @@
       min="0"
       max="2"
       step="0.01"
-      bind:value={grain}
-      aria-valuetext={quantityText(grain, "times the stock grain")}
+      {disabled}
+      value={settings.grain.amount}
+      aria-valuetext={quantityText(settings.grain.amount, "times the stock grain")}
+      oninput={(event) =>
+        patch(
+          { ...settings, grain: { ...settings.grain, amount: Number(event.currentTarget.value) } },
+          false,
+        )}
+      onchange={(event) =>
+        patch(
+          { ...settings, grain: { ...settings.grain, amount: Number(event.currentTarget.value) } },
+          true,
+        )}
     />
-    <p class="readout">{grain.toFixed(2)}×</p>
+    <p class="readout">{settings.grain.amount.toFixed(2)}×</p>
   </section>
 </aside>
 

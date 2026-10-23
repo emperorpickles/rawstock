@@ -30,10 +30,12 @@ fn open_paths(app: AppHandle, paths: Vec<String>) -> Result<OpenOutcome, AppErro
             stub.insert_image(image.clone());
         }
     }
-    if !outcome.images.is_empty() {
+    if outcome.images.iter().any(|image| image.error.is_none()) {
         let mut recent = lock(&app_state.recent);
         for image in &outcome.images {
-            recent.remember(std::path::Path::new(&image.path));
+            if image.error.is_none() {
+                recent.remember(std::path::Path::new(&image.path));
+            }
         }
         let _ = recent.save();
     }
@@ -161,12 +163,32 @@ fn save_sidecar(
     image_id: String,
     settings: EditSettings,
 ) -> Result<SaveResult, AppError> {
-    let saved = lock(&app.state::<AppState>().stub).save_sidecar(&image_id, &settings)?;
-    state::log_info(
-        &app.state::<AppState>().log_dir,
-        "save_sidecar validated the edit and did not write it; the atomic write is issue #37",
-    );
-    Ok(saved)
+    let state = app.state::<AppState>();
+    match lock(&state.stub).save_sidecar(&image_id, &settings) {
+        Ok(saved) => Ok(saved),
+        Err(failure) => {
+            state::log_detail(&state.log_dir, &failure.detail);
+            Err(failure.error)
+        }
+    }
+}
+
+#[tauri::command]
+fn reset_sidecar(app: AppHandle, image_id: String) -> Result<crate::contract::ImageInfo, AppError> {
+    let state = app.state::<AppState>();
+    match lock(&state.stub).reset_sidecar(&image_id) {
+        Ok(info) => {
+            state::log_info(
+                &state.log_dir,
+                &format!("renamed the edit file beside {} to .bak", info.file_name),
+            );
+            Ok(info)
+        }
+        Err(failure) => {
+            state::log_detail(&state.log_dir, &failure.detail);
+            Err(failure.error)
+        }
+    }
 }
 
 #[tauri::command]
@@ -312,6 +334,7 @@ pub fn handlers() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sy
         cancel,
         export_image,
         save_sidecar,
+        reset_sidecar,
         recent_files,
         clear_recent,
         get_app_settings,

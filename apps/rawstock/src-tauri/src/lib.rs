@@ -14,6 +14,7 @@ mod onboarding;
 mod recent;
 mod settings;
 mod shell;
+mod sidecar;
 mod state;
 mod stocks;
 mod worker;
