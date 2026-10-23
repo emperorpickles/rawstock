@@ -136,6 +136,36 @@ scanned and each channel's scanned density is mapped onto the mean of the
 three, so every gray prints neutral, like a scanner's per-channel curves.
 Colors pass through the same three curves.
 
+`emulsion = "monochrome"` is an optional spectral key for black and white
+film. The default is `color`. A monochrome stock has one silver layer: one
+`[sensitivity]` entry, `silver`, a single `[silver]` curve in place of
+`[red]`, `[green]`, and `[blue]`, and `[grain.silver]` in place of the three
+grain layers. Core copies that layer into all three channels, so the print
+stage and the GPU run unchanged and every color develops to a neutral gray.
+Silver grain puts every cloud in all three channels, so it has no chroma.
+`[print]` inverts the silver density as usual; `[print_dye_density]` is
+allowed, for a toned paper. Dye curves, scan responses, coupling,
+`reference_log_exposure`, `neutral_scale`, and `process` are rejected, and a
+parametric stock rejects the `emulsion` key.
+
+```toml
+model = "spectral"
+emulsion = "monochrome"
+
+[sensitivity]
+silver = [0.0, 0.05, 0.0]
+
+[silver]
+log_exposure = [-3.0, 0.0]
+density = [0.0, 1.7]
+
+[grain]
+[grain.silver]
+density = [0.0, 1.0, 2.0]
+rms = [8.0, 15.0, 14.0]
+size_mm = 0.006               # silver clump sigma; one size for the layer
+```
+
 `[grain]` and `[halation]` are optional schema 1 tables. Leaving them out
 is the same file older stocks already use, so `schema_version` stays 1.
 `[grain]` holds one RMS-granularity-versus-density table per layer, the
@@ -245,6 +275,36 @@ The rest is an **approximate tuning**:
   Fujifilm's quoted RMS granularity of 9 agrees with its peak.
 
 There is no halation.
+
+## Ilford HP5 Plus
+
+[ilford-hp5-plus.stock.toml](ilford-hp5-plus.stock.toml) is the first black
+and white stock, a monochrome spectral negative. It is an **approximate**
+hand reading, not a measurement: Ilford publishes HP5 Plus's spectral
+sensitivity (a wedge spectrogram to tungsten) and its characteristic curve
+only as figures, and no permissively licensed digitization exists.
+`lab/ilford_bw.py` writes the file from a few knots per curve.
+
+- **Sensitivity.** Panchromatic: native blue, a shallow gap near 500 nm,
+  dye-sensitized green and red, and a red edge near 670 nm, so deep reds
+  print darker than the eye sees them.
+- **Curve.** Net density above base plus fog, the shape of the ILFOTEC HC
+  1+31 curve: ISO speed point (net 0.10) at `log10(0.8 / 400)`, a gentle
+  toe, and a long straight line near G-bar 0.62.
+- **Print.** Kodak Professional Polymax Fine-Art paper, grade 1, from the
+  paper white. That curve is measured: the MIT-licensed `KODAK_POLYMAX`
+  module in [spectral_film_lut](https://github.com/JanLohse/spectral_film_lut).
+  Grade 1 suits a camera file, which has no lens flare to lift the shadows.
+- **Placement.** `exposure_ev` puts the camera's metered middle gray
+  (scene-linear about 0.08) on the ISO middle-gray log exposure, and
+  `print_exposure` prints it at an 18 % reflector's density.
+- **Grain and halation** are an approximate aesthetic tuning. Silver grain
+  is about Tri-X's strength, rises with density, and has a 6 µm clump sigma.
+  Halation is a faint neutral glow.
+
+FP4 Plus, the Delta films, and Pan F Plus can be added the same way: a new
+entry in the script's `FILMS` table. Ilford, HP5, and Polymax are
+trademarks of their owners.
 
 ## Velvia
 

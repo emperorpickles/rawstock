@@ -55,6 +55,10 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   Exposure placed for camera files, a new spectral `neutral_scale` key
   (per-channel neutral scan balance, CPU and GPU), and an approximate
   saturation coupling.
+- **#76** — Ilford HP5 Plus, the first black and white stock (`agent:
+  claude`, `stage: ready`, waiting on Caleb's look review). Adds
+  `emulsion = "monochrome"` (one silver layer and silver grain, CPU and
+  GPU) and `lab/ilford_bw.py` for further Ilford films.
 - **#52, #53** — 1.0 app presets and export queue (`agent: claude`,
   `stage: holding`) until #39 and #41 land.
 

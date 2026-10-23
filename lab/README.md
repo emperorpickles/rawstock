@@ -67,6 +67,21 @@ python3 lab/import_spectral_film_lut.py \
     -o stocks/velvia50-spectral.stock.toml
 ```
 
+## Ilford black and white stocks
+
+`ilford_bw.py` writes monochrome stocks (`emulsion = "monochrome"`) from
+hand-drawn knots, because Ilford publishes its curves only as figures. Every
+number but the paper curve is an approximation, and the written file says
+so. The paper curve is read from spectral_film_lut's MIT-licensed Polymax
+module as source text. Only HP5 Plus is drawn so far; other Ilford films are
+new entries in its `FILMS` table.
+
+```bash
+python3 lab/ilford_bw.py hp5 \
+    --paper path/to/spectral_film_lut/src/spectral_film_lut/bw_print_film/kodak_polymax_fine_art.py \
+    -o stocks/ilford-hp5-plus.stock.toml
+```
+
 ## Parametric stock fitter
 
 `fit_stock.py` fits a schema-1 parametric stock to camera JPEG pairs. It

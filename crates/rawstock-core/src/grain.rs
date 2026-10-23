@@ -22,18 +22,24 @@ use crate::workers::Workers;
 /// blue. Shared clouds use the geometric mean, so a clump is the same shape
 /// in every layer. Each layer also keeps a small private field at its own
 /// size. That is the chroma.
+///
+/// A monochrome (silver) emulsion has one image layer. Every process then
+/// lands in all three channels, so the field is the same in each and the
+/// grain has no chroma.
 pub(crate) struct FilmGrain {
     frame_mm: f32,
     seed: u32,
     size_mm: [f32; 3],
+    monochrome: bool,
 }
 
 impl FilmGrain {
-    pub(crate) fn new(frame_mm: f32, seed: u32, size_mm: [f32; 3]) -> Self {
+    pub(crate) fn new(frame_mm: f32, seed: u32, size_mm: [f32; 3], monochrome: bool) -> Self {
         Self {
             frame_mm,
             seed,
             size_mm,
+            monochrome,
         }
     }
 
@@ -49,7 +55,7 @@ impl FilmGrain {
         control: &mut dyn DevelopControl,
     ) -> Result<Vec<f32>, Cancelled> {
         let pitch = self.frame_mm / plane.frame_width as f32;
-        let processes = Process::table(self.size_mm);
+        let processes = Process::table(self.size_mm, self.monochrome);
         let scanner = Scanner::at_pitch(pitch);
         let blur = scanner.active() && processes.iter().all(|process| process.resolved(pitch));
         let pad = if blur { scanner.pad() } else { 0 };
@@ -146,7 +152,7 @@ pub(crate) struct GpuProcess {
 impl FilmGrain {
     pub(crate) fn gpu_plan(&self, frame_width: u32) -> GpuPlan {
         let pitch = self.frame_mm / frame_width as f32;
-        let processes = Process::table(self.size_mm);
+        let processes = Process::table(self.size_mm, self.monochrome);
         let scanner = Scanner::at_pitch(pitch);
         let blur = scanner.active() && processes.iter().all(|process| process.resolved(pitch));
         let mut mean = [0.0_f32; 3];
@@ -221,7 +227,8 @@ struct Process {
 }
 
 impl Process {
-    fn table(size_mm: [f32; 3]) -> [Self; PROCESS_COUNT] {
+    /// With `monochrome`, the private processes join every layer too.
+    fn table(size_mm: [f32; 3], monochrome: bool) -> [Self; PROCESS_COUNT] {
         let shared = (size_mm[0] * size_mm[1] * size_mm[2]).cbrt();
         std::array::from_fn(|index| {
             let kind = &PROCESS_KINDS[index];
@@ -238,7 +245,11 @@ impl Process {
                 sigma_hi: kind.sigma_scale[1] * size,
                 aspect_max: kind.aspect_max,
                 variance: kind.variance,
-                layers: kind.layers,
+                layers: if monochrome {
+                    SHARED_LAYERS
+                } else {
+                    kind.layers
+                },
             }
         })
     }
@@ -927,7 +938,7 @@ mod tests {
 
     #[test]
     fn aggregate_matches_the_compound_poisson_moments() {
-        let process = &Process::table([0.010; 3])[0];
+        let process = &Process::table([0.010; 3], false)[0];
         let samples = 400_000;
         // A few clouds per pixel draws the count from the table. Hundreds is
         // gaussian.
@@ -963,7 +974,7 @@ mod tests {
 
     #[test]
     fn unresolved_crop_matches_the_full_frame() {
-        let grain = FilmGrain::new(35.0, 11, [0.018, 0.013, 0.010]);
+        let grain = FilmGrain::new(35.0, 11, [0.018, 0.013, 0.010], false);
         let frame_width = 360;
         let full = grain
             .render(

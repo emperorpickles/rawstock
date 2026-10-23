@@ -45,7 +45,9 @@ Implemented order:
 3. **Halation**, when the stock sets it.
 4. **Film model.** Parametric reads scene RGB as three layer exposures.
    Spectral upsamples and integrates per-layer sensitivities. Both then
-   apply D-logH curves and interlayer coupling. `FilmModel` is an enum,
+   apply D-logH curves and interlayer coupling. A monochrome (black and
+   white) spectral stock has one silver layer, copied into all three
+   channels, and grain that is the same in each. `FilmModel` is an enum,
    not a trait object, unless there is a stated reason.
 5. **Grain** in density, when the stock sets it.
 6. **Print/scan.** A spectral stock with dye curves converts to printing

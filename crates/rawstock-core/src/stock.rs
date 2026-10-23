@@ -69,6 +69,10 @@ pub struct Parametric {
 /// With [`Self::with_neutral_scale`] the scan is balanced at every gray
 /// level, not only at `reference_log_exposure`: each channel gets its own
 /// tone curve, the way a scanner neutralizes a slide.
+///
+/// [`Self::monochrome`] is a black and white film: one panchromatic silver
+/// layer, stored as three identical layers so every later stage, on CPU and
+/// GPU, runs unchanged and a scene of any color develops to a neutral.
 #[derive(Debug, Clone)]
 pub struct Spectral {
     wavelengths: Vec<f32>,
@@ -91,6 +95,7 @@ pub struct Spectral {
     curves: [Curve; 3],
     coupling: Option<[[f32; 3]; 3]>,
     process: Process,
+    emulsion: Emulsion,
 }
 
 /// Spectral density of the print's three dyes, viewed under D65.
@@ -109,6 +114,26 @@ pub enum Process {
     Negative,
     /// Slide film. Density falls with exposure and the dyes are the image.
     Reversal,
+}
+
+/// How many image layers a film has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Emulsion {
+    /// Red, green, and blue records, each with its own dye.
+    #[default]
+    Color,
+    /// One panchromatic silver layer. Black and white film.
+    Monochrome,
+}
+
+impl fmt::Display for Emulsion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Color => "color",
+            Self::Monochrome => "monochrome",
+        })
+    }
 }
 
 impl fmt::Display for Process {
@@ -485,8 +510,36 @@ impl Spectral {
             curves,
             coupling,
             process,
+            emulsion: Emulsion::Color,
         };
         model.rebalance();
+        Ok(model)
+    }
+
+    /// A black and white film: one silver layer.
+    ///
+    /// `sensitivity` follows the rules of [`Self::new`] and `curve` rises.
+    /// The silver image is neutral, so there are no dye curves, no coupling,
+    /// and no scan balance. The print stage inverts the silver density with
+    /// the print curve, or views it through `[print_dye_density]` when the
+    /// stock sets one.
+    pub fn monochrome(
+        wavelengths: Vec<f32>,
+        sensitivity: Vec<f32>,
+        curve: Curve,
+    ) -> Result<Self, ModelError> {
+        if curve.falls() {
+            return Err(ModelError::ReversalCurve);
+        }
+        let mut model = Self::new(
+            wavelengths,
+            [sensitivity.clone(), sensitivity.clone(), sensitivity],
+            None,
+            [curve.clone(), curve.clone(), curve],
+            None,
+            None,
+        )?;
+        model.emulsion = Emulsion::Monochrome;
         Ok(model)
     }
 
@@ -658,6 +711,11 @@ impl Spectral {
         self.process
     }
 
+    /// Color, or one silver layer copied into all three channels.
+    pub fn emulsion(&self) -> Emulsion {
+        self.emulsion
+    }
+
     /// Dye curves multiplied by `scales`, with the scan balance recomputed.
     ///
     /// Each scale is finite and non-negative. The stock must already have dye
@@ -719,6 +777,15 @@ impl Spectral {
             }
             for pixel in row.as_chunks::<3>().0 {
                 spectrum::fill_scene_spectrum(*pixel, &self.wavelengths, &mut spectrum);
+                if self.emulsion == Emulsion::Monochrome {
+                    let mut silver = 0.0f32;
+                    for (sample, weight) in spectrum.iter().zip(&self.weighted_sensitivity[0]) {
+                        silver += sample * weight;
+                    }
+                    let silver = self.curves[0].eval(silver.max(EXPOSURE_FLOOR).log10());
+                    density.extend([silver; 3]);
+                    continue;
+                }
                 let mut log_h = [0.0f32; 3];
                 for (layer, log_exposure) in log_h.iter_mut().enumerate() {
                     let mut layer_exposure = 0.0f32;
@@ -985,6 +1052,7 @@ impl FilmModel {
             }
             (Self::Spectral(left), Self::Spectral(right)) => {
                 left.wavelengths == right.wavelengths
+                    && left.emulsion == right.emulsion
                     && left.sensitivity == right.sensitivity
                     && curves_eq(&left.curves, &right.curves)
                     && left.coupling == right.coupling
@@ -1090,12 +1158,16 @@ impl GrainRegion {
 /// `sqrt(cell_px)`. [`Self::size_mm`] is the primary dye-cloud sigma of each
 /// layer, in millimetres. It scales with [`Self::frame_mm`], not with the
 /// pixel.
+///
+/// [`Self::monochrome`] is silver grain: one image layer, so the three
+/// channels carry the same table, the same size, and the same clouds.
 #[derive(Debug, Clone)]
 pub struct Grain {
     frame_mm: f32,
     seed: u32,
     layers: [Granularity; 3],
     size_mm: [f32; 3],
+    monochrome: bool,
 }
 
 /// Highlight halation on scene-linear exposure.
@@ -1187,6 +1259,11 @@ impl Grain {
     /// record) the finest. These are Portra-scale clouds, about 10–18 µm.
     pub const DEFAULT_SIZE_MM: [f32; 3] = [0.018, 0.013, 0.010];
 
+    /// Silver clump sigma for monochrome grain without a `size_mm`, in
+    /// millimetres. Coarser than the color clouds: a 400-speed silver image
+    /// shows clumps of developed grains, not single crystals.
+    pub const MONOCHROME_SIZE_MM: f32 = 0.016;
+
     /// `layers` are red, green, and blue, in that order.
     ///
     /// Cloud sizes start at [`Self::DEFAULT_SIZE_MM`].
@@ -1199,12 +1276,35 @@ impl Grain {
             seed,
             layers,
             size_mm: Self::DEFAULT_SIZE_MM,
+            monochrome: false,
         })
     }
 
+    /// Silver grain for a monochrome emulsion.
+    ///
+    /// `layer` is the one granularity table and `size_mm` the silver clump
+    /// sigma, in millimetres. All three channels share them and every cloud,
+    /// so a neutral image stays neutral.
+    pub fn monochrome(
+        frame_mm: f32,
+        seed: u32,
+        layer: Granularity,
+        size_mm: f32,
+    ) -> Result<Self, ModelError> {
+        let mut grain = Self::new(frame_mm, seed, [layer.clone(), layer.clone(), layer])?
+            .with_size_mm([size_mm; 3])?;
+        grain.monochrome = true;
+        Ok(grain)
+    }
+
     /// Replace the per-layer dye-cloud sizes, in millimetres.
+    ///
+    /// Monochrome grain needs one size in all three layers.
     pub fn with_size_mm(mut self, size_mm: [f32; 3]) -> Result<Self, ModelError> {
         if size_mm.iter().any(|size| !size.is_finite() || *size <= 0.0) {
+            return Err(ModelError::GrainSize);
+        }
+        if self.monochrome && size_mm.iter().any(|size| *size != size_mm[0]) {
             return Err(ModelError::GrainSize);
         }
         self.size_mm = size_mm;
@@ -1250,6 +1350,11 @@ impl Grain {
         self.size_mm
     }
 
+    /// Whether this is silver grain, the same in every channel.
+    pub fn is_monochrome(&self) -> bool {
+        self.monochrome
+    }
+
     /// Multiply every layer's RMS by `amount`.
     ///
     /// Frame width, seed, and dye-cloud size stay. `amount` follows
@@ -1260,6 +1365,7 @@ impl Grain {
             frame_mm: self.frame_mm,
             seed: self.seed,
             size_mm: self.size_mm,
+            monochrome: self.monochrome,
             layers: [
                 self.layers[0].scaled(amount)?,
                 self.layers[1].scaled(amount)?,
@@ -1340,16 +1446,18 @@ impl Grain {
         control: &mut dyn crate::render::DevelopControl,
     ) -> Result<Vec<f32>, crate::render::Cancelled> {
         crate::render::begin(crate::render::Stage::Grain, rows as u32, control)?;
-        let out = crate::grain::FilmGrain::new(self.frame_mm, self.seed, self.size_mm).render(
-            crate::grain::Plane {
-                width: region.width,
-                rows,
-                origin_x: region.origin_x,
-                origin_y: region.origin_y,
-                frame_width: region.frame_width,
-            },
-            control,
-        )?;
+        let out =
+            crate::grain::FilmGrain::new(self.frame_mm, self.seed, self.size_mm, self.monochrome)
+                .render(
+                crate::grain::Plane {
+                    width: region.width,
+                    rows,
+                    origin_x: region.origin_x,
+                    origin_y: region.origin_y,
+                    frame_width: region.frame_width,
+                },
+                control,
+            )?;
         control.on_progress(crate::render::Stage::Grain, rows as u32, rows as u32);
         if control.cancelled() {
             return Err(crate::render::Cancelled);
@@ -1705,6 +1813,25 @@ pub enum StockError {
         field: &'static str,
     },
 
+    /// A layer table the emulsion needs was missing.
+    #[error("{emulsion} stock is missing {field}")]
+    MissingLayer {
+        /// `color` or `monochrome`.
+        emulsion: Emulsion,
+        /// The missing table, such as `silver` or `grain.red`.
+        field: &'static str,
+    },
+
+    /// A table that belongs to the other emulsion, or that a monochrome
+    /// film has no use for.
+    #[error("{emulsion} stock cannot include {field}")]
+    WrongLayer {
+        /// `color` or `monochrome`.
+        emulsion: Emulsion,
+        /// The field that does not belong.
+        field: &'static str,
+    },
+
     /// A parametric stock set a field only the spectral model reads.
     #[error("parametric stock cannot include {field}")]
     NotParametric {
@@ -1756,9 +1883,19 @@ struct StockFile {
     exposure_ev: f32,
     #[serde(deserialize_with = "de_f32")]
     print_exposure: f32,
-    red: CurveSamples,
-    green: CurveSamples,
-    blue: CurveSamples,
+    /// `color` (the default) or `monochrome`. Spectral stocks only.
+    #[serde(default)]
+    emulsion: Option<Emulsion>,
+    /// Color layer curves. A monochrome stock has `silver` instead.
+    #[serde(default)]
+    red: Option<CurveSamples>,
+    #[serde(default)]
+    green: Option<CurveSamples>,
+    #[serde(default)]
+    blue: Option<CurveSamples>,
+    /// The one silver layer of a monochrome stock.
+    #[serde(default)]
+    silver: Option<CurveSamples>,
     print: CurveSamples,
     #[serde(default)]
     coupling: Option<CouplingSamples>,
@@ -1771,7 +1908,7 @@ struct StockFile {
     wavelength_nm: Option<Vec<f32>>,
     /// Per-layer spectral sensitivity. Spectral stocks only.
     #[serde(default)]
-    sensitivity: Option<RgbSamples>,
+    sensitivity: Option<SensitivitySamples>,
     /// Per-layer spectral dye density. Optional on a spectral stock.
     #[serde(default)]
     dye_density: Option<RgbSamples>,
@@ -1804,7 +1941,25 @@ struct RgbSamples {
     blue: Vec<f32>,
 }
 
+/// Spectral sensitivity: red, green, and blue, or `silver` alone for a
+/// monochrome stock.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SensitivitySamples {
+    #[serde(default, deserialize_with = "de_option_f32_vec")]
+    red: Option<Vec<f32>>,
+    #[serde(default, deserialize_with = "de_option_f32_vec")]
+    green: Option<Vec<f32>>,
+    #[serde(default, deserialize_with = "de_option_f32_vec")]
+    blue: Option<Vec<f32>>,
+    #[serde(default, deserialize_with = "de_option_f32_vec")]
+    silver: Option<Vec<f32>>,
+}
+
 /// Optional per-layer grain. Absent means the pipeline adds none.
+///
+/// A color stock has `red`, `green`, and `blue`; a monochrome stock has
+/// `silver` alone.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GrainSamples {
@@ -1814,9 +1969,14 @@ struct GrainSamples {
     /// Mixed into the grain hash. Defaults to 0.
     #[serde(default)]
     seed: u32,
-    red: RmsSamples,
-    green: RmsSamples,
-    blue: RmsSamples,
+    #[serde(default)]
+    red: Option<RmsSamples>,
+    #[serde(default)]
+    green: Option<RmsSamples>,
+    #[serde(default)]
+    blue: Option<RmsSamples>,
+    #[serde(default)]
+    silver: Option<RmsSamples>,
 }
 
 fn default_frame_mm() -> f32 {
@@ -1994,19 +2154,22 @@ impl Stock {
         let source = require_text("source", &file.source)?.to_string();
         let license = require_text("license", &file.license)?.to_string();
         let process = file.process.unwrap_or_default();
-        let red = curve_from_samples("red", &file.red, process)?;
-        let green = curve_from_samples("green", &file.green, process)?;
-        let blue = curve_from_samples("blue", &file.blue, process)?;
+        let emulsion = file.emulsion.unwrap_or_default();
         let print = curve_from_samples("print", &file.print, Process::Negative)?;
         let coupling = file.coupling.as_ref().map(|coupling| coupling.matrix);
-        let film = match file.model {
-            StockModel::Parametric => {
+        let film = match (file.model, emulsion) {
+            (StockModel::Parametric, _) => {
                 reject_spectral_fields(&file)?;
+                let [red, green, blue] = color_curves(&file, process)?;
                 FilmModel::Parametric(
                     Parametric::new([red, green, blue], coupling).map_err(StockError::Model)?,
                 )
             }
-            StockModel::Spectral => {
+            (StockModel::Spectral, Emulsion::Monochrome) => {
+                FilmModel::Spectral(Box::new(monochrome_film(&file)?))
+            }
+            (StockModel::Spectral, Emulsion::Color) => {
+                let [red, green, blue] = color_curves(&file, process)?;
                 let wavelengths =
                     file.wavelength_nm
                         .clone()
@@ -2019,7 +2182,7 @@ impl Stock {
                     .ok_or(StockError::MissingSpectral {
                         field: "sensitivity",
                     })?;
-                let sensitivity = rgb_samples("sensitivity", sensitivity, wavelengths.len())?;
+                let sensitivity = color_sensitivity(sensitivity, wavelengths.len())?;
                 let dye_density = file
                     .dye_density
                     .as_ref()
@@ -2061,7 +2224,7 @@ impl Stock {
         let mut parameters = Parameters::new(file.exposure_ev, film, file.print_exposure, print)
             .map_err(StockError::Model)?;
         if let Some(grain) = file.grain {
-            parameters = parameters.with_grain(grain_from_samples(grain)?);
+            parameters = parameters.with_grain(grain_from_samples(grain, emulsion)?);
         }
         if let Some(halation) = file.halation {
             parameters = parameters.with_halation(halation_from_samples(halation)?);
@@ -2110,20 +2273,54 @@ fn curve_from_samples(
     .map_err(|source| StockError::Curve { curve, source })
 }
 
-fn grain_from_samples(samples: GrainSamples) -> Result<Grain, StockError> {
-    let red = granularity_from_samples("red", &samples.red)?;
-    let green = granularity_from_samples("green", &samples.green)?;
-    let blue = granularity_from_samples("blue", &samples.blue)?;
+fn grain_from_samples(samples: GrainSamples, emulsion: Emulsion) -> Result<Grain, StockError> {
+    if emulsion == Emulsion::Monochrome {
+        for (field, present) in [
+            ("grain.red", samples.red.is_some()),
+            ("grain.green", samples.green.is_some()),
+            ("grain.blue", samples.blue.is_some()),
+        ] {
+            if present {
+                return Err(StockError::WrongLayer { emulsion, field });
+            }
+        }
+        let silver = samples.silver.as_ref().ok_or(StockError::MissingLayer {
+            emulsion,
+            field: "grain.silver",
+        })?;
+        let layer = granularity_from_samples("silver", silver)?;
+        return Grain::monochrome(
+            samples.frame_mm,
+            samples.seed,
+            layer,
+            silver.size_mm.unwrap_or(Grain::MONOCHROME_SIZE_MM),
+        )
+        .map_err(StockError::Model);
+    }
+    if samples.silver.is_some() {
+        return Err(StockError::WrongLayer {
+            emulsion,
+            field: "grain.silver",
+        });
+    }
+    let layer = |field: &'static str, layer: &'static str, samples: &Option<RmsSamples>| {
+        samples
+            .as_ref()
+            .ok_or(StockError::MissingLayer { emulsion, field })
+            .and_then(|samples| {
+                granularity_from_samples(layer, samples).map(|table| (table, samples.size_mm))
+            })
+    };
+    let (red, red_size) = layer("grain.red", "red", &samples.red)?;
+    let (green, green_size) = layer("grain.green", "green", &samples.green)?;
+    let (blue, blue_size) = layer("grain.blue", "blue", &samples.blue)?;
     let mut grain = Grain::new(samples.frame_mm, samples.seed, [red, green, blue])
         .map_err(StockError::Model)?;
-    if samples.red.size_mm.is_some()
-        || samples.green.size_mm.is_some()
-        || samples.blue.size_mm.is_some()
-    {
+    if red_size.is_some() || green_size.is_some() || blue_size.is_some() {
         let size_mm = [
-            samples.red.size_mm.unwrap_or(Grain::DEFAULT_SIZE_MM[0]),
-            samples.green.size_mm.unwrap_or(Grain::DEFAULT_SIZE_MM[1]),
-            samples.blue.size_mm.unwrap_or(Grain::DEFAULT_SIZE_MM[2]),
+            red_size.unwrap_or(Grain::DEFAULT_SIZE_MM[0]),
+            green_size.unwrap_or(Grain::DEFAULT_SIZE_MM[1]),
+            blue_size.unwrap_or(Grain::DEFAULT_SIZE_MM[2]),
         ];
         grain = grain.with_size_mm(size_mm).map_err(StockError::Model)?;
     }
@@ -2253,7 +2450,135 @@ fn box_blur_vertical(src: &[f32], dst: &mut [f32], width: usize, height: usize, 
     }
 }
 
+/// The red, green, and blue curves of a color stock.
+fn color_curves(file: &StockFile, process: Process) -> Result<[Curve; 3], StockError> {
+    let emulsion = Emulsion::Color;
+    if file.silver.is_some() {
+        return Err(StockError::WrongLayer {
+            emulsion,
+            field: "silver",
+        });
+    }
+    let curve = |field: &'static str, samples: &Option<CurveSamples>| {
+        samples
+            .as_ref()
+            .ok_or(StockError::MissingLayer { emulsion, field })
+            .and_then(|samples| curve_from_samples(field, samples, process))
+    };
+    Ok([
+        curve("red", &file.red)?,
+        curve("green", &file.green)?,
+        curve("blue", &file.blue)?,
+    ])
+}
+
+/// Red, green, and blue sensitivities of a color stock.
+fn color_sensitivity(
+    samples: &SensitivitySamples,
+    expected: usize,
+) -> Result<[Vec<f32>; 3], StockError> {
+    let emulsion = Emulsion::Color;
+    if samples.silver.is_some() {
+        return Err(StockError::WrongLayer {
+            emulsion,
+            field: "sensitivity.silver",
+        });
+    }
+    let channel = |field: &'static str, values: &Option<Vec<f32>>| {
+        let values = values
+            .as_ref()
+            .ok_or(StockError::MissingLayer { emulsion, field })?;
+        if values.len() != expected {
+            return Err(StockError::SpectralLength {
+                field,
+                len: values.len(),
+                expected,
+            });
+        }
+        Ok(values.clone())
+    };
+    Ok([
+        channel("sensitivity.red", &samples.red)?,
+        channel("sensitivity.green", &samples.green)?,
+        channel("sensitivity.blue", &samples.blue)?,
+    ])
+}
+
+/// A black and white spectral stock: one silver sensitivity and curve.
+///
+/// Color-only tables are rejected: dye curves, scan responses, coupling,
+/// the scan balance, and reversal processing. `[print_dye_density]` is
+/// allowed, for a toned or warm-black paper.
+fn monochrome_film(file: &StockFile) -> Result<Spectral, StockError> {
+    let emulsion = Emulsion::Monochrome;
+    for (field, present) in [
+        ("red", file.red.is_some()),
+        ("green", file.green.is_some()),
+        ("blue", file.blue.is_some()),
+        ("coupling", file.coupling.is_some()),
+        ("dye_density", file.dye_density.is_some()),
+        ("scan_response", file.scan_response.is_some()),
+        (
+            "reference_log_exposure",
+            file.reference_log_exposure.is_some(),
+        ),
+        ("process", file.process.is_some()),
+        ("neutral_scale", file.neutral_scale.is_some()),
+    ] {
+        if present {
+            return Err(StockError::WrongLayer { emulsion, field });
+        }
+    }
+    let wavelengths = file
+        .wavelength_nm
+        .clone()
+        .ok_or(StockError::MissingSpectral {
+            field: "wavelength_nm",
+        })?;
+    let sensitivity = file
+        .sensitivity
+        .as_ref()
+        .ok_or(StockError::MissingSpectral {
+            field: "sensitivity",
+        })?;
+    for (field, present) in [
+        ("sensitivity.red", sensitivity.red.is_some()),
+        ("sensitivity.green", sensitivity.green.is_some()),
+        ("sensitivity.blue", sensitivity.blue.is_some()),
+    ] {
+        if present {
+            return Err(StockError::WrongLayer { emulsion, field });
+        }
+    }
+    let silver = sensitivity.silver.clone().ok_or(StockError::MissingLayer {
+        emulsion,
+        field: "sensitivity.silver",
+    })?;
+    if silver.len() != wavelengths.len() {
+        return Err(StockError::SpectralLength {
+            field: "sensitivity.silver",
+            len: silver.len(),
+            expected: wavelengths.len(),
+        });
+    }
+    let curve = file.silver.as_ref().ok_or(StockError::MissingLayer {
+        emulsion,
+        field: "silver",
+    })?;
+    let curve = curve_from_samples("silver", curve, Process::Negative)?;
+    let mut model =
+        Spectral::monochrome(wavelengths.clone(), silver, curve).map_err(StockError::Model)?;
+    if let Some(samples) = &file.print_dye_density {
+        let dyes = rgb_samples("print_dye_density", samples, wavelengths.len())?;
+        model = model.with_print_dyes(dyes).map_err(StockError::Model)?;
+    }
+    Ok(model)
+}
+
 fn reject_spectral_fields(file: &StockFile) -> Result<(), StockError> {
+    if file.emulsion.is_some() {
+        return Err(StockError::NotParametric { field: "emulsion" });
+    }
     if file.wavelength_nm.is_some() {
         return Err(StockError::NotParametric {
             field: "wavelength_nm",
@@ -2308,9 +2633,6 @@ fn rgb_samples(
         if values.len() != expected {
             return Err(StockError::SpectralLength {
                 field: match (table, name) {
-                    ("sensitivity", "red") => "sensitivity.red",
-                    ("sensitivity", "green") => "sensitivity.green",
-                    ("sensitivity", "blue") => "sensitivity.blue",
                     ("dye_density", "red") => "dye_density.red",
                     ("dye_density", "green") => "dye_density.green",
                     ("dye_density", "blue") => "dye_density.blue",
@@ -2477,7 +2799,14 @@ impl StockText {
         text.key_raw("model", &stock.model.to_string());
         text.key_float("exposure_ev", stock.parameters.exposure_ev());
         text.key_float("print_exposure", stock.parameters.print_exposure());
+        let monochrome = matches!(
+            stock.parameters.film(),
+            FilmModel::Spectral(model) if model.emulsion() == Emulsion::Monochrome
+        );
         if let FilmModel::Spectral(model) = stock.parameters.film() {
+            if monochrome {
+                text.key_raw("emulsion", &model.emulsion().to_string());
+            }
             if model.process() == Process::Reversal {
                 text.key_raw("process", &model.process().to_string());
             }
@@ -2494,8 +2823,12 @@ impl StockText {
             FilmModel::Parametric(model) => (model.curves(), model.coupling()),
             FilmModel::Spectral(model) => (model.curves(), model.coupling()),
         };
-        for (name, curve) in ["red", "green", "blue"].into_iter().zip(curves) {
-            text.curve(name, curve);
+        if monochrome {
+            text.curve("silver", &curves[0]);
+        } else {
+            for (name, curve) in ["red", "green", "blue"].into_iter().zip(curves) {
+                text.curve(name, curve);
+            }
         }
         text.curve("print", stock.parameters.print_curve());
         if let Some(matrix) = coupling {
@@ -2508,11 +2841,12 @@ impl StockText {
             text.table("grain");
             text.key_float("frame_mm", grain.frame_mm());
             text.key_int("seed", grain.seed());
-            for (index, (name, layer)) in ["red", "green", "blue"]
-                .into_iter()
-                .zip(grain.layers())
-                .enumerate()
-            {
+            let names: &[&str] = if grain.is_monochrome() {
+                &["silver"]
+            } else {
+                &["red", "green", "blue"]
+            };
+            for (index, (name, layer)) in names.iter().zip(grain.layers()).enumerate() {
                 text.table(&format!("grain.{name}"));
                 let (density, rms): (Vec<f32>, Vec<f32>) = layer.points().unzip();
                 text.key_floats("density", &density);
@@ -2529,7 +2863,12 @@ impl StockText {
         }
         if let FilmModel::Spectral(model) = stock.parameters.film() {
             text.line("");
-            text.rgb_table("sensitivity", model.sensitivities());
+            if monochrome {
+                text.table("sensitivity");
+                text.key_floats("silver", &model.sensitivities()[0]);
+            } else {
+                text.rgb_table("sensitivity", model.sensitivities());
+            }
             if let Some(dyes) = model.dye_density() {
                 text.line("");
                 text.rgb_table("dye_density", dyes);
