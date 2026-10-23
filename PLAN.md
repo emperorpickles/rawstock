@@ -46,14 +46,16 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
 - Ilford HP5 Plus, the first black and white stock (#76):
   `emulsion = "monochrome"` (one silver layer, silver grain, CPU and GPU),
   curves digitized from Ilford's datasheet charts by `lab/ilford_bw.py`.
+- 1.0 app adjust panel (#39, #86): exposure, print, dye, contrast, grain,
+  and halation, as-shot white balance, scan look, and crop, straighten, and
+  rotate. Warm and neutral themes. A zoomed drag develops the full frame
+  once on release, and preview events that beat the command are buffered.
 
 ## In flight
 
-- **#39** — 1.0 app adjust panel (`agent: grok`). Exposure, print, dye,
-  contrast, grain, and halation sliders, as-shot white balance, scan look,
-  and crop, straighten, and rotate. Edits go through the sidecar and
-  `develop_preview`. Warm and neutral themes. Depends on #37, which is on
-  `main`.
+- **#41** — 1.0 JPEG export dialog (`agent: grok`, PR #95 on
+  `grok/export-dialog`, ready, builds on #86). Quality, save path, overwrite
+  confirmation, and cancel. The develop service still does not write pixels.
 - **#17** — Provia simulation fit (`agent: grok`, `stage: holding`).
   Waiting on more Provia RAF+JPEG pairs from Caleb. Pairs already in hand
   are held out. Do not commit them.

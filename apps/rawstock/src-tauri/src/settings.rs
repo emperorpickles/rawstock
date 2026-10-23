@@ -3,8 +3,9 @@
 //! never read or written here.
 //!
 //! Missing keys fall back to defaults. Unknown keys, including whole
-//! namespaces a later version adds (`export.*`), are kept on save, so
-//! another issue can add its own keys without a migration.
+//! namespaces a later version adds, are kept on save, so another issue
+//! can add its own keys without a migration. `export` is this version's
+//! namespace: last JPEG quality and folder.
 
 use std::path::{Path, PathBuf};
 
@@ -87,6 +88,28 @@ pub struct Onboarding {
     pub extra: Map<String, Value>,
 }
 
+/// Last JPEG export. Quality defaults to 92. The folder is the last one
+/// the user exported into, not a catalog.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ExportPrefs {
+    pub quality: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_folder: Option<String>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl Default for ExportPrefs {
+    fn default() -> Self {
+        Self {
+            quality: 92,
+            last_folder: None,
+            extra: Map::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AppSettings {
@@ -95,6 +118,7 @@ pub struct AppSettings {
     pub new_image: NewImage,
     pub recent: RecentPrefs,
     pub onboarding: Onboarding,
+    pub export: ExportPrefs,
     /// Namespaces this version does not know. Kept verbatim.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -108,6 +132,7 @@ impl Default for AppSettings {
             new_image: NewImage::default(),
             recent: RecentPrefs::default(),
             onboarding: Onboarding::default(),
+            export: ExportPrefs::default(),
             extra: Map::new(),
         }
     }
@@ -132,7 +157,33 @@ impl AppSettings {
         {
             return Err(invalid("The default stock id is empty.".to_string()));
         }
+        if !(1..=100).contains(&self.export.quality) {
+            return Err(invalid("JPEG quality must be from 1 to 100.".to_string()));
+        }
+        if self
+            .export
+            .last_folder
+            .as_ref()
+            .is_some_and(|folder| folder.trim().is_empty())
+        {
+            return Err(invalid("The last export folder is empty.".to_string()));
+        }
         Ok(())
+    }
+
+    /// Fill an export block a file omitted or damaged. Other keys stay.
+    pub fn normalize(&mut self) {
+        if !(1..=100).contains(&self.export.quality) {
+            self.export.quality = 92;
+        }
+        if self
+            .export
+            .last_folder
+            .as_ref()
+            .is_some_and(|folder| folder.trim().is_empty())
+        {
+            self.export.last_folder = None;
+        }
     }
 }
 
@@ -175,7 +226,8 @@ impl SettingsStore {
         };
         let parsed = serde_json::from_str::<AppSettings>(&text)
             .map_err(|error| error.to_string())
-            .and_then(|settings| {
+            .and_then(|mut settings| {
+                settings.normalize();
                 settings
                     .validate()
                     .map(|()| settings)
@@ -270,6 +322,8 @@ mod tests {
         assert_eq!(store.get().appearance.theme, Theme::Warm);
         assert_eq!(store.get().recent.limit, 10);
         assert!(!store.get().onboarding.completed);
+        assert_eq!(store.get().export.quality, 92);
+        assert_eq!(store.get().export.last_folder, None);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -305,6 +359,8 @@ mod tests {
         next.new_image.default_stock_id = Some("velvia".to_string());
         next.recent.limit = 15;
         next.onboarding.completed = true;
+        next.export.quality = 80;
+        next.export.last_folder = Some("/exports".to_string());
         store.set(next.clone()).unwrap();
         assert!(!dir.join("settings.json.tmp").exists());
 
@@ -315,6 +371,8 @@ mod tests {
         assert!(text.contains("\"reduceMotion\": \"on\""));
         assert!(text.contains("\"theme\": \"neutral\""));
         assert!(text.contains("\"defaultStockId\": \"velvia\""));
+        assert!(text.contains("\"quality\": 80"));
+        assert!(text.contains("\"lastFolder\": \"/exports\""));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -326,7 +384,8 @@ mod tests {
             &file,
             r#"{
               "version": 1,
-              "export": { "quality": 92, "lastFolder": "/tmp/out" },
+              "export": { "quality": 92, "lastFolder": "/tmp/out", "template": "{stem}" },
+              "batch": { "size": 4 },
               "appearance": { "surround": "dark", "accent": "grey" }
             }"#,
         )
@@ -340,6 +399,8 @@ mod tests {
         let saved: Value = serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
         assert_eq!(saved["export"]["quality"], 92);
         assert_eq!(saved["export"]["lastFolder"], "/tmp/out");
+        assert_eq!(saved["export"]["template"], "{stem}");
+        assert_eq!(saved["batch"]["size"], 4);
         assert_eq!(saved["appearance"]["accent"], "grey");
         assert_eq!(saved["recent"]["limit"], 7);
         let _ = std::fs::remove_dir_all(dir);
@@ -355,6 +416,12 @@ mod tests {
         assert!(store.set(next).is_err());
         let mut next = store.get().clone();
         next.new_image.default_stock_id = Some(" ".to_string());
+        assert!(store.set(next).is_err());
+        let mut next = store.get().clone();
+        next.export.quality = 0;
+        assert!(store.set(next).is_err());
+        let mut next = store.get().clone();
+        next.export.last_folder = Some(" ".to_string());
         assert!(store.set(next).is_err());
         assert!(!file.exists());
         assert_eq!(store.get(), &AppSettings::default());

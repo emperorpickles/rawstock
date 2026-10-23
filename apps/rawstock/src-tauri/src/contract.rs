@@ -447,13 +447,17 @@ pub enum CacheReason {
     MemoryBudget,
 }
 
-/// JPEG export. TIFF, PNG, and the other M2 options belong to #41.
+/// JPEG export for M1. TIFF, PNG, color space, resize, and metadata stay
+/// out until their own issues. `overwrite` is true only after the user
+/// confirms replacing an existing file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportOptions {
     pub format: String,
     pub quality: u32,
     pub path: String,
+    #[serde(default)]
+    pub overwrite: bool,
 }
 
 impl ExportOptions {

@@ -16,6 +16,7 @@ use crate::contract::{
     ContractEvent, DoneEvent, EditSettings, ExportOptions, FailedEvent, ImageInfo, JobKind,
     JobStarted, ProgressEvent, SaveResult, ThumbnailReadyEvent, settings_hash,
 };
+use crate::export_dest::{self, ExportAction};
 use crate::frame::{self, placeholder, stub_size};
 
 #[derive(Debug)]
@@ -295,6 +296,12 @@ impl ContractStub {
         })
     }
 
+    /// Queue a full-frame JPEG export of `settings`.
+    ///
+    /// Crop, straighten, and rotation travel on `settings` and are part of
+    /// the settings hash. The develop service is still a placeholder: this
+    /// checks the destination and reports progress, and it does not decode,
+    /// render, or write pixels. A partial file is removed on cancel.
     pub fn export_image(
         &mut self,
         image_id: &str,
@@ -302,14 +309,32 @@ impl ContractStub {
         options: &ExportOptions,
     ) -> Result<(JobStarted, Vec<ContractEvent>), AppError> {
         options.validate()?;
+        let Some(info) = self.images.get(image_id) else {
+            return Err(AppError::internal("Open a photo before developing it."));
+        };
+        if let Some(error) = info.error.clone() {
+            return Err(error);
+        }
+        let raw = std::path::PathBuf::from(&info.path);
+        let review = export_dest::review_path(&raw, &options.path);
+        let output = match review.action {
+            ExportAction::Refuse => {
+                return Err(AppError::internal(review.message));
+            }
+            ExportAction::Confirm if !options.overwrite => {
+                return Err(AppError::internal(review.message));
+            }
+            ExportAction::Export | ExportAction::Confirm => review.path,
+        };
         self.start(StartArgs {
             image_id,
             kind: JobKind::Export,
             settings,
+            // Placeholder bitmap size. The real develop is full frame.
             long_edge: 48,
             compare: false,
             stock_ids: Vec::new(),
-            output_path: Some(options.path.clone()),
+            output_path: Some(output),
         })
     }
 
@@ -399,6 +424,7 @@ impl ContractStub {
         if !known {
             return Err(AppError::internal("That develop is no longer running."));
         }
+        self.discard_export_partial(job_id);
         let job = self.jobs.get_mut(&job_id).expect("job");
         job.terminal = true;
         let event = ContractEvent::Failed(FailedEvent {
@@ -612,7 +638,9 @@ impl ContractStub {
         let salt = u8::try_from(id % 64).unwrap_or(0) + u8::from(job.compare) * 40;
         let (width, height) = size.unwrap_or_else(|| stub_size(long_edge));
         let packed = frame.unwrap_or_else(|| placeholder(width, height, salt));
-        if kind != JobKind::Thumbnails {
+        // An export is a file, not a preview bitmap. The placeholder frame
+        // stays out of the take_frame map so the UI cannot save the screen.
+        if kind != JobKind::Thumbnails && kind != JobKind::Export {
             self.pending_frames.insert((id, None), packed.clone());
         }
         let mut events = vec![ContractEvent::Done(DoneEvent {
@@ -643,6 +671,7 @@ impl ContractStub {
         job.cancel = Some(reason);
         let image_id = job.image_id.clone();
         let kind = job.kind;
+        self.discard_export_partial(id);
         self.pending_frames.retain(|(job_id, _), _| *job_id != id);
         let event = ContractEvent::Cancelled(CancelledEvent {
             job_id: id,
@@ -742,6 +771,23 @@ impl ContractStub {
         Vec::new()
     }
 
+    fn discard_export_partial(&self, id: u64) {
+        let Some(job) = self.jobs.get(&id) else {
+            return;
+        };
+        if job.kind != JobKind::Export {
+            return;
+        }
+        let Some(dest) = job.output_path.as_deref() else {
+            return;
+        };
+        let raw = self
+            .images
+            .get(&job.image_id)
+            .map(|info| std::path::PathBuf::from(&info.path));
+        export_dest::remove_partial(raw.as_deref(), std::path::Path::new(dest));
+    }
+
     fn progress_event(&self, id: u64) -> ContractEvent {
         let job = &self.jobs[&id];
         let index = job.completed.unwrap_or(0);
@@ -812,7 +858,7 @@ fn run_to_done(stub: &mut ContractStub, id: u64) -> Vec<ContractEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contract::{CacheReason, CancelReason, ErrorCode, StockRef};
+    use crate::contract::{CacheReason, CancelReason, CropRect, ErrorCode, StockRef};
 
     fn photo(id: &str) -> ImageInfo {
         ImageInfo {
@@ -905,6 +951,7 @@ mod tests {
             format: "jpeg".to_string(),
             quality: 90,
             path: "/tmp/out.jpg".to_string(),
+            overwrite: false,
         };
         let (export_job, _) = stub.export_image("a", &settings(2), &export).unwrap();
         let (_info, events) = stub.select_image("b").unwrap();
@@ -933,6 +980,7 @@ mod tests {
             format: "jpeg".to_string(),
             quality: 80,
             path: "/tmp/a.jpg".to_string(),
+            overwrite: false,
         };
         let (first, _) = stub.export_image("a", &settings(2), &options).unwrap();
         let second_options = ExportOptions {
@@ -1108,5 +1156,124 @@ mod tests {
         assert!(stub.select_image("bad").is_ok());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("rawstock-export-job-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn export_refuses_the_raw_and_sidecar_and_confirms_an_existing_jpeg() {
+        let dir = temp_dir("refuse");
+        let raw = dir.join("frame.RAF");
+        let sidecar = crate::contract::sidecar_path(&raw);
+        let jpeg = dir.join("frame.jpg");
+        std::fs::write(&raw, b"raw-bytes").unwrap();
+        std::fs::write(&sidecar, b"side").unwrap();
+        std::fs::write(&jpeg, b"old-jpeg").unwrap();
+
+        let mut info = photo("frame");
+        info.path = raw.display().to_string();
+        let mut stub = ContractStub::default();
+        stub.insert_image(info);
+        let edit = settings(2);
+
+        let onto_raw = ExportOptions {
+            format: "jpeg".to_string(),
+            quality: 92,
+            path: raw.display().to_string(),
+            overwrite: true,
+        };
+        let refused = stub.export_image("frame", &edit, &onto_raw).unwrap_err();
+        assert!(refused.message.contains("RAW photo"));
+        assert_eq!(std::fs::read(&raw).unwrap(), b"raw-bytes");
+
+        let onto_side = ExportOptions {
+            path: sidecar.display().to_string(),
+            overwrite: true,
+            ..onto_raw.clone()
+        };
+        let refused = stub.export_image("frame", &edit, &onto_side).unwrap_err();
+        assert!(refused.message.contains("edit saved beside the photo"));
+        assert_eq!(std::fs::read(&sidecar).unwrap(), b"side");
+
+        let onto_jpeg = ExportOptions {
+            path: jpeg.display().to_string(),
+            overwrite: false,
+            ..onto_raw
+        };
+        let needs_confirm = stub.export_image("frame", &edit, &onto_jpeg).unwrap_err();
+        assert!(
+            needs_confirm
+                .message
+                .contains("already exists. Replace it?")
+        );
+        assert_eq!(std::fs::read(&jpeg).unwrap(), b"old-jpeg");
+
+        let confirmed = ExportOptions {
+            overwrite: true,
+            ..onto_jpeg
+        };
+        let (job, _) = stub.export_image("frame", &edit, &confirmed).unwrap();
+        let partial = export_dest::partial_path(&jpeg);
+        std::fs::write(&partial, b"partial").unwrap();
+        let (cancelled, _) = stub.cancel(job.job_id);
+        assert!(cancelled);
+        stub.tick();
+        assert!(!partial.exists());
+        assert_eq!(std::fs::read(&jpeg).unwrap(), b"old-jpeg");
+        assert_eq!(std::fs::read(&raw).unwrap(), b"raw-bytes");
+        assert_eq!(std::fs::read(&sidecar).unwrap(), b"side");
+        assert!(stub.take_frame(job.job_id, None).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn export_maps_the_whole_edit_including_crop_straighten_and_rotate() {
+        let dir = temp_dir("geometry");
+        let raw = dir.join("frame.RAF");
+        std::fs::write(&raw, b"raw-bytes").unwrap();
+        let dest = dir.join("frame.jpg");
+        let mut info = photo("frame");
+        info.path = raw.display().to_string();
+        let mut stub = ContractStub::default();
+        stub.insert_image(info);
+
+        let mut edit = settings(4);
+        edit.exposure_ev = 0.3;
+        edit.geometry.quarter_turns = 1;
+        edit.geometry.straighten_deg = -1.25;
+        edit.geometry.crop = Some(CropRect {
+            x: 0.08,
+            y: 0.1,
+            w: 0.84,
+            h: 0.8,
+        });
+        let options = ExportOptions {
+            format: "jpeg".to_string(),
+            quality: 92,
+            path: dest.display().to_string(),
+            overwrite: false,
+        };
+        let plain = settings_hash(&settings(4));
+        let (job, _) = stub.export_image("frame", &edit, &options).unwrap();
+        let events = run_to_done(&mut stub, job.job_id);
+        let done = events.iter().find_map(|event| match event {
+            ContractEvent::Done(done) if done.job_id == job.job_id => Some(done),
+            _ => None,
+        });
+        let done = done.expect("export finishes");
+        assert!(done.exact);
+        assert_eq!(done.settings_hash, settings_hash(&edit));
+        assert_ne!(done.settings_hash, plain);
+        assert_eq!(done.output_path.as_deref(), Some(dest.to_str().unwrap()));
+        assert!(!dest.exists());
+        assert_eq!(std::fs::read(&raw).unwrap(), b"raw-bytes");
+        assert!(stub.take_frame(job.job_id, None).is_err());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
