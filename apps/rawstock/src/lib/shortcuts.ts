@@ -1,5 +1,66 @@
 export type ShortcutPlatform = "mac" | "windows" | "other";
 
+/** Shape of a keydown that `Shortcuts.match` reads. A `KeyboardEvent` fits. */
+export interface KeyPress {
+  key: string;
+  metaKey: boolean;
+  ctrlKey: boolean;
+  shiftKey: boolean;
+  altKey: boolean;
+  repeat?: boolean;
+}
+
+export interface ShortcutSpec {
+  action: string;
+  /** What the cheat sheet says it does. */
+  label: string;
+  /** `KeyboardEvent.key`, lower case for letters. */
+  key: string;
+  /** Command on macOS, Control elsewhere. */
+  mod: boolean;
+  /** Only for modifier shortcuts. Unmodified keys ignore Shift (`?` needs it). */
+  shift?: boolean;
+  /** Limits the shortcut to one platform. */
+  platform?: ShortcutPlatform;
+  /** Menu item that carries the same accelerator, when it differs from `action`. */
+  menuId?: string;
+}
+
+export interface CheatSheetRow {
+  action: string;
+  label: string;
+  keys: string;
+}
+
+/**
+ * Every keyboard shortcut. `actionFor` matches against this table and the
+ * cheat sheet is generated from it, so the two cannot drift. A unit test
+ * checks the modifier rows against the menu accelerators in `menu.rs`.
+ */
+export const SHORTCUTS: readonly ShortcutSpec[] = [
+  { action: "open", label: "Open a RAW file", key: "o", mod: true },
+  { action: "open-folder", label: "Open a folder", key: "o", mod: true, shift: true },
+  { action: "export", label: "Export", key: "e", mod: true },
+  { action: "undo", label: "Undo", key: "z", mod: true },
+  { action: "redo", label: "Redo", key: "z", mod: true, shift: true },
+  { action: "redo", label: "Redo", key: "y", mod: true, platform: "windows", menuId: "redo-y" },
+  { action: "fit", label: "Fit to window", key: "0", mod: true },
+  { action: "zoom-100", label: "Zoom to 100%", key: "1", mod: true },
+  { action: "zoom-200", label: "Zoom to 200%", key: "2", mod: true },
+  { action: "preferences", label: "Preferences", key: ",", mod: true },
+  { action: "before-after", label: "Before and after", key: "\\", mod: false },
+  { action: "clipping", label: "Clipping overlay", key: "j", mod: false },
+  { action: "filmstrip-prev", label: "Previous photo", key: "ArrowLeft", mod: false },
+  { action: "filmstrip-next", label: "Next photo", key: "ArrowRight", mod: false },
+  { action: "cheat-sheet", label: "Keyboard shortcuts", key: "?", mod: false },
+];
+
+const KEY_NAMES: Record<string, string> = {
+  ArrowLeft: "Left Arrow",
+  ArrowRight: "Right Arrow",
+  ",": ",",
+};
+
 export class Shortcuts {
   static platform(): ShortcutPlatform {
     const value = navigator.platform || "";
@@ -13,7 +74,7 @@ export class Shortcuts {
   }
 
   static isTextEntry(target: EventTarget | null): boolean {
-    if (!(target instanceof HTMLElement)) {
+    if (typeof HTMLElement === "undefined" || !(target instanceof HTMLElement)) {
       return false;
     }
     if (target.isContentEditable) {
@@ -25,66 +86,36 @@ export class Shortcuts {
 
   /**
    * Modifier shortcuts use Command on macOS and Control elsewhere.
-   * `\` , `J`, and the arrow keys have no modifier. `Ctrl+Y` is redo on Windows.
-   * Returns null while a text field is focused so those keys type instead.
+   * `\` , `J`, `?`, and the arrow keys have no modifier. `Ctrl+Y` is redo on
+   * Windows. Returns null while a text field is focused so those keys type
+   * instead.
    */
   static actionFor(event: KeyboardEvent): string | null {
-    if (event.altKey || event.repeat || Shortcuts.isTextEntry(event.target)) {
+    if (Shortcuts.isTextEntry(event.target)) {
       return null;
     }
-    const key = event.key.toLowerCase();
-    const platform = Shortcuts.platform();
+    return Shortcuts.match(event, Shortcuts.platform());
+  }
+
+  /** Table lookup without the focus check. */
+  static match(event: KeyPress, platform: ShortcutPlatform): string | null {
+    if (event.altKey || event.repeat) {
+      return null;
+    }
     const mod = platform === "mac" ? event.metaKey : event.ctrlKey;
     const otherMod = platform === "mac" ? event.ctrlKey : event.metaKey;
     if (otherMod) {
       return null;
     }
-    if (mod && event.shiftKey && key === "o") {
-      return "open-folder";
-    }
-    if (mod && event.shiftKey && key === "z") {
-      return "redo";
-    }
-    if (mod && !event.shiftKey && key === "o") {
-      return "open";
-    }
-    if (mod && !event.shiftKey && key === "e") {
-      return "export";
-    }
-    if (mod && !event.shiftKey && key === "z") {
-      return "undo";
-    }
-    if (mod && !event.shiftKey && key === "0") {
-      return "fit";
-    }
-    if (mod && !event.shiftKey && key === "1") {
-      return "zoom-100";
-    }
-    if (mod && !event.shiftKey && key === "2") {
-      return "zoom-200";
-    }
-    if (mod && !event.shiftKey && key === ",") {
-      return "preferences";
-    }
-    if (platform === "windows" && event.ctrlKey && !event.shiftKey && key === "y") {
-      return "redo";
-    }
-    if (mod) {
-      return null;
-    }
-    if (event.key === "\\") {
-      return "before-after";
-    }
-    if (key === "j") {
-      return "clipping";
-    }
-    if (event.key === "ArrowLeft") {
-      return "filmstrip-prev";
-    }
-    if (event.key === "ArrowRight") {
-      return "filmstrip-next";
-    }
-    return null;
+    const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+    const hit = SHORTCUTS.find(
+      (spec) =>
+        spec.mod === mod &&
+        spec.key === key &&
+        (!spec.mod || Boolean(spec.shift) === event.shiftKey) &&
+        (!spec.platform || spec.platform === platform),
+    );
+    return hit?.action ?? null;
   }
 
   /** True when the webview should emit the action itself. */
@@ -97,6 +128,37 @@ export class Shortcuts {
       return true;
     }
     return !event.metaKey && !event.ctrlKey;
+  }
+
+  /** How a shortcut is written for `platform`: `Cmd+Shift+O`, `Ctrl+E`, `J`. */
+  static keys(spec: ShortcutSpec, platform: ShortcutPlatform): string {
+    const parts: string[] = [];
+    if (spec.mod) {
+      parts.push(platform === "mac" ? "Cmd" : "Ctrl");
+    }
+    if (spec.mod && spec.shift) {
+      parts.push("Shift");
+    }
+    parts.push(KEY_NAMES[spec.key] ?? spec.key.toUpperCase());
+    return parts.join("+");
+  }
+
+  /** One row per action, alternate keys joined with "or". */
+  static cheatSheet(platform: ShortcutPlatform): CheatSheetRow[] {
+    const rows: CheatSheetRow[] = [];
+    for (const spec of SHORTCUTS) {
+      if (spec.platform && spec.platform !== platform) {
+        continue;
+      }
+      const keys = Shortcuts.keys(spec, platform);
+      const existing = rows.find((row) => row.action === spec.action);
+      if (existing) {
+        existing.keys = `${existing.keys} or ${keys}`;
+      } else {
+        rows.push({ action: spec.action, label: spec.label, keys });
+      }
+    }
+    return rows;
   }
 }
 

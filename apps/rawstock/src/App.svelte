@@ -16,6 +16,7 @@
   import { Report } from "./lib/help/report";
   import type { AppInfo } from "./lib/help/report";
   import { Host } from "./lib/host";
+  import Onboarding from "./lib/onboarding/Onboarding.svelte";
   import Preferences from "./lib/preferences/Preferences.svelte";
   import { Preferences as Prefs } from "./lib/preferences/settings";
   import type { AppSettings } from "./lib/preferences/settings";
@@ -43,6 +44,9 @@
   let aboutOpen = $state(false);
   let licensesOpen = $state(false);
   let preferencesOpen = $state(false);
+  let onboardingOpen = $state(false);
+  let onboardingMode = $state<"welcome" | "cheat-sheet">("welcome");
+  let samplePath = $state<string | null>(null);
   let appSettings = $state<AppSettings>(Prefs.defaults());
   let appInfo = $state<AppInfo | null>(null);
   let quality = $state(90);
@@ -172,8 +176,16 @@
       cleanups.push(...unlisten);
       try {
         appSettings = await host.getAppSettings();
+        if (!appSettings.onboarding.completed) {
+          showOnboarding("welcome");
+        }
       } catch (error) {
         errors = [appError(error).message];
+      }
+      try {
+        samplePath = await host.onboardingSample();
+      } catch {
+        samplePath = null;
       }
       try {
         appInfo = await host.appInfo();
@@ -313,6 +325,12 @@
       case "preferences":
         preferencesOpen = true;
         break;
+      case "welcome":
+        showOnboarding("welcome");
+        break;
+      case "cheat-sheet":
+        showOnboarding("cheat-sheet");
+        break;
       case "about":
         aboutOpen = true;
         break;
@@ -372,6 +390,25 @@
       appSettings = await host.setAppSettings(next);
     } catch (error) {
       errors = [appError(error).message];
+    }
+  }
+
+  function showOnboarding(mode: "welcome" | "cheat-sheet") {
+    if (onboardingOpen) {
+      return;
+    }
+    onboardingMode = mode;
+    onboardingOpen = true;
+  }
+
+  function closeOnboarding(dontShowAgain: boolean) {
+    onboardingOpen = false;
+    const completed = onboardingMode === "welcome" ? dontShowAgain : appSettings.onboarding.completed;
+    if (completed !== appSettings.onboarding.completed) {
+      void changeAppSettings({
+        ...appSettings,
+        onboarding: { ...appSettings.onboarding, completed },
+      });
     }
   }
 
@@ -519,6 +556,21 @@
   onchange={(next) => void changeAppSettings(next)}
   onreset={(clearRecent) => void resetAppSettings(clearRecent)}
   onclose={() => (preferencesOpen = false)}
+/>
+
+<Onboarding
+  open={onboardingOpen}
+  mode={onboardingMode}
+  {platform}
+  sampleAvailable={samplePath !== null}
+  onopen={() => void perform("open")}
+  onopenfolder={() => void perform("open-folder")}
+  onsample={() => {
+    if (host && samplePath) {
+      void host.requestOpen([samplePath]);
+    }
+  }}
+  onclose={closeOnboarding}
 />
 
 <About

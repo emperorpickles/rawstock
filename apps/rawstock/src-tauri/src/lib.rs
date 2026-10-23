@@ -10,6 +10,7 @@ mod frame;
 mod help;
 mod jobs;
 mod menu;
+mod onboarding;
 mod recent;
 mod settings;
 mod shell;

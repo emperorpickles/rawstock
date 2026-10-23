@@ -43,6 +43,11 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   with a Status M scan, the Portra Endura paper curve and dyes, and grain
   retuned for the paper's contrast. Adds `[scan_response]` and
   `[print_dye_density]` to schema 1, CPU and GPU.
+- **#49, #50, #51** — 1.0 app Preferences and settings store, Help menu
+  (About, generated Licenses, Report an issue, log), and the first-launch
+  welcome (`agent: claude`, `stage: ready`). #49 merged in #55; PRs #56
+  and #57 are open, and #57 merges last. #52 (presets) and #53 (export
+  queue) stay `stage: holding` until #39 and #41 land.
 
 ## Next
 

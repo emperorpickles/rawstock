@@ -241,6 +241,13 @@ fn apply_settings(app: &AppHandle, settings: &AppSettings, clear_recent: bool) {
     );
 }
 
+/// Path of the bundled onboarding sample, or `None` when the build has none.
+#[tauri::command]
+fn onboarding_sample(app: AppHandle) -> Option<String> {
+    let dir = app.path().resource_dir().ok()?;
+    crate::onboarding::OnboardingSample::find(&dir).map(|path| path.display().to_string())
+}
+
 #[tauri::command]
 fn app_info(state: State<'_, AppState>) -> crate::help::AppInfo {
     crate::help::AppInfo::current(&state.log_dir)
@@ -311,6 +318,7 @@ pub fn handlers() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sy
         set_app_settings,
         reset_app_settings,
         app_info,
+        onboarding_sample,
         dispatch_menu_action,
         set_shortcuts_suspended,
         request_open,
