@@ -1,6 +1,8 @@
 //! Tauri commands. Develop commands return a job id and emit the contract
-//! events. They do not run the film pipeline.
+//! events. Only stock thumbnails run the film pipeline so far
+//! ([`crate::thumbnails`]); the other develops are still the stub.
 
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 
 use tauri::ipc::Response;
@@ -15,6 +17,7 @@ use crate::settings::{AppSettings, SettingsChanged};
 use crate::shell;
 use crate::state::{self, AppState, lock};
 use crate::stocks;
+use crate::thumbnails::ThumbnailRequest;
 use crate::worker;
 
 #[tauri::command]
@@ -119,9 +122,22 @@ fn render_thumbnails(
     stock_ids: Vec<String>,
     long_edge: u32,
 ) -> Result<JobStarted, AppError> {
-    dispatch(&app, |stub| {
-        stub.render_thumbnails(&image_id, &settings, stock_ids, long_edge)
-    })
+    let path = lock(&app.state::<AppState>().stub).image_path(&image_id);
+    let started = dispatch(&app, |stub| {
+        stub.render_thumbnails(&image_id, &settings, stock_ids.clone(), long_edge)
+    })?;
+    if let (Some(path), Some(thumbnailer)) =
+        (path, lock(&app.state::<AppState>().thumbnailer).as_ref())
+    {
+        thumbnailer.submit(ThumbnailRequest {
+            job_id: started.job_id,
+            path: PathBuf::from(path),
+            settings,
+            stock_ids,
+            long_edge,
+        });
+    }
+    Ok(started)
 }
 
 #[tauri::command]

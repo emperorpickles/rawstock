@@ -17,6 +17,7 @@ mod shell;
 mod sidecar;
 mod state;
 mod stocks;
+mod thumbnails;
 mod worker;
 
 use std::sync::atomic::Ordering;
@@ -73,6 +74,8 @@ pub fn run() {
             }
             menu::refresh_recent_menu(app.handle())?;
             worker::spawn(app.handle().clone());
+            let thumbnailer = thumbnails::Thumbnailer::spawn(app.handle().clone());
+            *lock(&state.thumbnailer) = Some(thumbnailer);
             Ok(())
         })
         .on_menu_event(|app, event| {

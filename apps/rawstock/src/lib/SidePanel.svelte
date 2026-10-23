@@ -1,10 +1,13 @@
 <script lang="ts">
   import type { EditSettings, StockSummary } from "./contract";
+  import type { PackedFrame } from "./frame";
   import { exposureText, quantityText } from "./shortcuts";
+  import StockBrowser from "./StockBrowser.svelte";
 
   let {
     stocks,
     stockId = "",
+    thumbnails = {},
     settings,
     disabled = false,
     onstock,
@@ -13,6 +16,7 @@
   }: {
     stocks: StockSummary[];
     stockId?: string;
+    thumbnails?: Record<string, PackedFrame>;
     settings: EditSettings;
     disabled?: boolean;
     onstock: (stock: StockSummary) => void;
@@ -27,13 +31,6 @@
       onpreview(next);
     }
   }
-
-  const categoryLabel: Record<StockSummary["category"], string> = {
-    colorNegative: "Color negative",
-    slide: "Slide",
-    bw: "Black and white",
-    fujiSim: "Fuji simulation",
-  };
 </script>
 
 <aside class="side" aria-label="Stock and adjustments">
@@ -42,21 +39,7 @@
     {#if stocks.length === 0}
       <p class="hint">Stocks appear here when the catalog can be read.</p>
     {:else}
-      <ul class="list">
-        {#each stocks as stock (stock.id)}
-          <li>
-            <button
-              type="button"
-              aria-pressed={stock.id === stockId}
-              {disabled}
-              onclick={() => onstock(stock)}
-            >
-              <span class="name">{stock.name}</span>
-              <span class="meta">{categoryLabel[stock.category]} · rev {stock.revision}</span>
-            </button>
-          </li>
-        {/each}
-      </ul>
+      <StockBrowser {stocks} {stockId} {thumbnails} {disabled} {onstock} />
     {/if}
   </section>
 
@@ -158,7 +141,6 @@
   }
 
   .hint,
-  .meta,
   .readout {
     color: #b8b8b8;
     font-size: 0.85rem;
@@ -168,34 +150,6 @@
   .readout,
   .field {
     margin: 0.15rem 0 0.45rem;
-  }
-
-  .list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.3rem;
-  }
-
-  .list button {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 0.1rem;
-    text-align: left;
-    border-radius: 6px;
-    padding: 0.4rem 0.5rem;
-  }
-
-  .list button[aria-pressed="true"] {
-    background: #2a2a2a;
-    border-color: #6a6a6a;
-  }
-
-  .name {
-    color: #f2f2f2;
   }
 
   input[type="range"] {

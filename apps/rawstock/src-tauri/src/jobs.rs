@@ -63,6 +63,9 @@ pub struct ContractStub {
     running_export: Option<u64>,
     pending_frames: HashMap<(u64, Option<String>), Vec<u8>>,
     cache: Option<CachedFrame>,
+    /// Thumbnail jobs are rendered by [`crate::thumbnails::Thumbnailer`]
+    /// and reported through [`Self::deliver_thumbnail`], not by `tick`.
+    external_thumbnails: bool,
 }
 
 impl ContractStub {
@@ -73,7 +76,82 @@ impl ContractStub {
     pub fn has_running(&self) -> bool {
         self.jobs
             .values()
-            .any(|job| !job.terminal && job.completed.is_some())
+            .any(|job| self.ticks(job) && !job.terminal && job.completed.is_some())
+    }
+
+    /// Hand thumbnail jobs to the real renderer from now on.
+    pub fn render_thumbnails_elsewhere(&mut self) {
+        self.external_thumbnails = true;
+    }
+
+    fn ticks(&self, job: &Job) -> bool {
+        !(self.external_thumbnails && job.kind == JobKind::Thumbnails)
+    }
+
+    /// Path of an opened image, for the renderer.
+    pub fn image_path(&self, image_id: &str) -> Option<String> {
+        self.images.get(image_id).map(|info| info.path.clone())
+    }
+
+    /// Whether a thumbnail job should keep rendering. A cancel request
+    /// ends the job here, on the boundary between two stocks.
+    pub fn thumbnail_check(&mut self, job_id: u64) -> (bool, Vec<ContractEvent>) {
+        let Some(job) = self.jobs.get(&job_id) else {
+            return (false, Vec::new());
+        };
+        if job.terminal {
+            return (false, Vec::new());
+        }
+        if let Some(reason) = job.cancel {
+            return (false, self.finish_cancel(job_id, reason));
+        }
+        (true, Vec::new())
+    }
+
+    /// Store one rendered stock for `take_frame` and announce it. Nothing
+    /// is kept for a job that has already ended.
+    pub fn deliver_thumbnail(
+        &mut self,
+        job_id: u64,
+        stock_id: &str,
+        packed: Vec<u8>,
+    ) -> Vec<ContractEvent> {
+        let Some(job) = self.jobs.get_mut(&job_id) else {
+            return Vec::new();
+        };
+        if job.terminal || job.kind != JobKind::Thumbnails {
+            return Vec::new();
+        }
+        let Some(index) = job.stock_ids.iter().position(|id| id == stock_id) else {
+            return Vec::new();
+        };
+        job.completed = Some((index + 1).min(job.stages.len().saturating_sub(1)));
+        let ready = ContractEvent::ThumbnailReady(ThumbnailReadyEvent {
+            job_id,
+            image_id: job.image_id.clone(),
+            stock_id: stock_id.to_string(),
+            settings_hash: job.settings_hash.clone(),
+        });
+        self.pending_frames
+            .insert((job_id, Some(stock_id.to_string())), packed);
+        vec![ready, self.progress_event(job_id)]
+    }
+
+    /// End a thumbnail job once every stock has been delivered.
+    pub fn finish_thumbnails(
+        &mut self,
+        job_id: u64,
+        width: u32,
+        height: u32,
+    ) -> Vec<ContractEvent> {
+        if self
+            .jobs
+            .get(&job_id)
+            .is_none_or(|job| job.kind != JobKind::Thumbnails)
+        {
+            return Vec::new();
+        }
+        self.finish_sized(job_id, Some((width, height)))
     }
 
     pub fn select_image(
@@ -215,7 +293,7 @@ impl ContractStub {
         let ids: Vec<u64> = self
             .jobs
             .iter()
-            .filter(|(_, job)| !job.terminal && job.completed.is_some())
+            .filter(|(_, job)| self.ticks(job) && !job.terminal && job.completed.is_some())
             .map(|(id, _)| *id)
             .collect();
         let mut events = Vec::new();
@@ -459,6 +537,11 @@ impl ContractStub {
     }
 
     fn finish_done(&mut self, id: u64) -> Vec<ContractEvent> {
+        self.finish_sized(id, None)
+    }
+
+    /// `size` is the real frame size. `None` reports the stub bitmap's.
+    fn finish_sized(&mut self, id: u64, size: Option<(u32, u32)>) -> Vec<ContractEvent> {
         let Some(job) = self.jobs.get_mut(&id) else {
             return Vec::new();
         };
@@ -472,7 +555,7 @@ impl ContractStub {
         let output_path = job.output_path.clone();
         let long_edge = job.long_edge;
         let salt = u8::try_from(id % 64).unwrap_or(0) + u8::from(job.compare) * 40;
-        let (width, height) = stub_size(long_edge);
+        let (width, height) = size.unwrap_or_else(|| stub_size(long_edge));
         let packed = placeholder(width, height, salt);
         if kind != JobKind::Thumbnails {
             self.pending_frames.insert((id, None), packed.clone());

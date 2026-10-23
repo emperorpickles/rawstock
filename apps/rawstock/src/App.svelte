@@ -6,7 +6,7 @@
   import { onMount } from "svelte";
 
   import { appError, defaultSettings } from "./lib/contract";
-  import type { EditSettings, ImageInfo, StockSummary } from "./lib/contract";
+  import type { EditSettings, ImageInfo, StockSummary, ThumbnailReadyEvent } from "./lib/contract";
   import { Delivery, JobTracker } from "./lib/delivery";
   import {
     Autosave,
@@ -31,11 +31,13 @@
   import type { AppSettings } from "./lib/preferences/settings";
   import { Shortcuts } from "./lib/shortcuts";
   import SidePanel from "./lib/SidePanel.svelte";
+  import { StockBrowser, ThumbnailRequests } from "./lib/stockBrowser";
   import Viewer from "./lib/Viewer.svelte";
 
   const host = Host.available() ? new Host() : null;
   const jobs = new JobTracker();
   const history = new EditHistory();
+  const thumbnailRequests = new ThumbnailRequests();
   const platform = Shortcuts.platform();
   const modLabel = platform === "mac" ? "Meta" : "Control";
   const autosave = new Autosave(
@@ -84,6 +86,11 @@
   let appInfo = $state<AppInfo | null>(null);
   let quality = $state(90);
   let frame = $state<PackedFrame | null>(null);
+  /** Stock thumbnails for `thumbnailImage`, by stock id. */
+  let thumbnails = $state<Record<string, PackedFrame>>({});
+  let thumbnailImage = "";
+  /** Last committed edit. Thumbnails follow it, never a slider mid-drag. */
+  let committed = $state<EditSettings | null>(null);
   let frameMode = $state<"texture" | "region" | "empty">("empty");
   let memoryPressure = $state(false);
   let fullJob = $state<number | null>(null);
@@ -120,6 +127,21 @@
     return `The stock "${settings.stock.id}" is not installed. Choose another stock. The photo was not changed.`;
   });
   const adjustmentsDisabled = $derived(!selected || selectedImage?.error != null);
+  const browserStocks = $derived(StockBrowser.visible(stocks, import.meta.env.DEV));
+
+  $effect(() => {
+    const imageId = selected;
+    const edit = committed;
+    const list = browserStocks;
+    const broken = selectedImage?.error != null;
+    if (!host || !imageId || !edit || broken || list.length === 0) {
+      return;
+    }
+    const key = `${StockBrowser.thumbnailKey(edit)}|${list.map((stock) => stock.id).join(",")}`;
+    if (thumbnailRequests.needs(imageId, key)) {
+      void requestThumbnails(imageId, key, edit, list);
+    }
+  });
 
   $effect(() => {
     syncDialog(exportDialog, exportOpen);
@@ -229,9 +251,7 @@
             void developFull();
           }
         }),
-        host.onThumbnail(() => {
-          notice = "Stock thumbnails are not drawn in this build.";
-        }),
+        host.onThumbnail((event) => void adoptThumbnail(event)),
       ]);
       cleanups.push(...unlisten);
       try {
@@ -369,6 +389,7 @@
       autosave.block(info.imageId, info.sidecar.status === "invalid");
       selected = info.imageId;
       settings = current;
+      committed = current;
       frame = null;
       frameMode = "empty";
       fullJob = null;
@@ -415,6 +436,7 @@
       return;
     }
     settings = next;
+    committed = next;
     if (history.commit(selected, next)) {
       autosave.schedule(selected, next);
     }
@@ -431,6 +453,7 @@
       return;
     }
     settings = next;
+    committed = next;
     autosave.schedule(selected, next);
     notice = selectedImage?.fileName ?? "Undo";
   }
@@ -446,6 +469,7 @@
       return;
     }
     settings = next;
+    committed = next;
     autosave.schedule(selected, next);
     notice = selectedImage?.fileName ?? "Redo";
   }
@@ -495,6 +519,10 @@
         selected = "";
         frame = null;
         frameMode = "empty";
+        committed = null;
+        thumbnails = {};
+        thumbnailImage = "";
+        thumbnailRequests.clear();
         notice = "Ready";
         if (Host.available()) {
           await getCurrentWindow().setTitle("rawstock");
@@ -624,6 +652,52 @@
     }
   }
 
+  async function requestThumbnails(
+    imageId: string,
+    key: string,
+    edit: EditSettings,
+    list: StockSummary[],
+  ) {
+    if (!host) {
+      return;
+    }
+    thumbnailRequests.begin(imageId, key);
+    if (thumbnailImage !== imageId) {
+      // Never show another photo's thumbnails, even for a moment.
+      thumbnails = {};
+      thumbnailImage = imageId;
+    }
+    const longEdge = Math.min(768, Math.round(160 * (window.devicePixelRatio || 1)));
+    try {
+      const started = await host.renderThumbnails(
+        imageId,
+        edit,
+        list.map((stock) => stock.id),
+        longEdge,
+      );
+      if (thumbnailRequests.started(imageId, key, started.jobId)) {
+        jobs.note(imageId, "thumbnails", started.jobId);
+      }
+    } catch (error) {
+      errors = [appError(error).message];
+    }
+  }
+
+  async function adoptThumbnail(event: ThumbnailReadyEvent) {
+    if (!host || !thumbnailRequests.accepts(event)) {
+      return;
+    }
+    try {
+      const bytes = await host.takeFrame(event.jobId, event.stockId);
+      if (!thumbnailRequests.accepts(event)) {
+        return;
+      }
+      thumbnails = { ...thumbnails, [event.stockId]: FrameBuffer.decode(bytes) };
+    } catch (error) {
+      errors = [appError(error).message];
+    }
+  }
+
   async function developFull() {
     if (!host || !selected) {
       return;
@@ -734,7 +808,8 @@
       onview={viewChanged}
     />
     <SidePanel
-      {stocks}
+      stocks={browserStocks}
+      {thumbnails}
       {settings}
       stockId={settings.stock.id}
       disabled={adjustmentsDisabled}
