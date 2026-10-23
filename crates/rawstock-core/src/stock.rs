@@ -1932,6 +1932,10 @@ pub enum StockError {
         field: &'static str,
     },
 
+    /// `violet_cutoff_nm` was not two finite, rising wavelengths.
+    #[error("violet_cutoff_nm must be two finite wavelengths, the second larger")]
+    VioletCutoff,
+
     /// A parametric stock set a field only the spectral model reads.
     #[error("parametric stock cannot include {field}")]
     NotParametric {
@@ -2027,6 +2031,10 @@ struct StockFile {
     /// Balance the scan at every gray level. Spectral stocks with dyes only.
     #[serde(default)]
     neutral_scale: Option<bool>,
+    /// Fade layer sensitivity out below this violet band. Color spectral
+    /// stocks only. See [`VioletCutoff`].
+    #[serde(default)]
+    violet_cutoff_nm: Option<[f32; 2]>,
 }
 
 /// Three sampled spectra on the stock's wavelength grid.
@@ -2291,7 +2299,10 @@ impl Stock {
                     .ok_or(StockError::MissingSpectral {
                         field: "sensitivity",
                     })?;
-                let sensitivity = color_sensitivity(sensitivity, wavelengths.len())?;
+                let mut sensitivity = color_sensitivity(sensitivity, wavelengths.len())?;
+                if let Some([start_nm, end_nm]) = file.violet_cutoff_nm {
+                    VioletCutoff::new(start_nm, end_nm)?.apply(&wavelengths, &mut sensitivity);
+                }
                 let dye_density = file
                     .dye_density
                     .as_ref()
@@ -2655,6 +2666,7 @@ fn monochrome_film(file: &StockFile) -> Result<Spectral, StockError> {
         ),
         ("process", file.process.is_some()),
         ("neutral_scale", file.neutral_scale.is_some()),
+        ("violet_cutoff_nm", file.violet_cutoff_nm.is_some()),
     ] {
         if present {
             return Err(StockError::WrongLayer { emulsion, field });
@@ -2748,7 +2760,55 @@ fn reject_spectral_fields(file: &StockFile) -> Result<(), StockError> {
             field: "neutral_scale",
         });
     }
+    if file.violet_cutoff_nm.is_some() {
+        return Err(StockError::NotParametric {
+            field: "violet_cutoff_nm",
+        });
+    }
     Ok(())
+}
+
+/// A violet fade on a color stock's layer sensitivities, like a taking filter.
+///
+/// The RGB upsampler builds a reflectance that matches the eye. For reds
+/// and purples it reaches the bluish part of the color with energy at
+/// 380–430 nm, where the eye (and the camera that made the RGB) barely
+/// respond, so a lot of violet costs little color. A film's blue layer is
+/// as sensitive there as at 450 nm, so that violet, which the camera never
+/// measured, exposes it strongly and turns saturated reds magenta. Fading
+/// every layer below the band keeps the film reading what the camera saw.
+/// Each layer is renormalised to integrate to 1 again.
+struct VioletCutoff {
+    start_nm: f32,
+    end_nm: f32,
+}
+
+impl VioletCutoff {
+    /// Sensitivity is zero at or below `start_nm` and unchanged at or
+    /// above `end_nm`, with a smoothstep between.
+    fn new(start_nm: f32, end_nm: f32) -> Result<Self, StockError> {
+        if !start_nm.is_finite() || !end_nm.is_finite() || end_nm <= start_nm {
+            return Err(StockError::VioletCutoff);
+        }
+        Ok(Self { start_nm, end_nm })
+    }
+
+    fn transmittance(&self, wavelength: f32) -> f32 {
+        let t = ((wavelength - self.start_nm) / (self.end_nm - self.start_nm)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    }
+
+    fn apply(&self, wavelengths: &[f32], sensitivity: &mut [Vec<f32>; 3]) {
+        for layer in sensitivity.iter_mut() {
+            for (sample, wavelength) in layer.iter_mut().zip(wavelengths) {
+                *sample *= self.transmittance(*wavelength);
+            }
+            let total = integrate(wavelengths, layer);
+            if total > 0.0 {
+                layer.iter_mut().for_each(|sample| *sample /= total);
+            }
+        }
+    }
 }
 
 fn rgb_samples(

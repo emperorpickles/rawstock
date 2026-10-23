@@ -12,7 +12,8 @@
 //! hold: it is well below the brightest pixel within [`Defringe::RADIUS`]
 //! (it sits on the dark side of a high-contrast edge), and its color is in
 //! the fringe range, blue or purple to magenta, with blue the strongest
-//! channel or red and blue both above green. Luminance is kept, so edges do
+//! channel or red and blue both above green. A red whose blue is a small
+//! fraction of its red is not counted as magenta. Luminance is kept, so edges do
 //! not move or soften. A blue or purple subject away from bright edges keeps
 //! its color.
 
@@ -30,6 +31,11 @@ impl Defringe {
     /// Fringe color strength, as a fraction of luminance, where defringe
     /// starts and where it is at full strength.
     const HUE: (f32, f32) = (0.03, 0.25);
+    /// Blue as a fraction of red where a magenta reading starts to count,
+    /// and where it counts fully. A saturated red with green and blue both
+    /// near zero (a red sign) is not a fringe, even when noise lifts blue a
+    /// hair above green.
+    const BLUE_TO_RED: (f32, f32) = (0.25, 0.5);
     /// AP1 luminance weights (ACEScg to CIE Y).
     const LUMA: [f32; 3] = [0.272_228_7, 0.674_081_8, 0.053_689_5];
 
@@ -84,7 +90,12 @@ impl Defringe {
         }
         let [red, green, blue] = pixel;
         let blue_excess = (blue - red.max(green)) / luma;
-        let magenta_excess = (red.min(blue) - green) / luma;
+        let magenta_excess = (red.min(blue) - green) / luma
+            * if red > blue {
+                Self::smoothstep(Self::BLUE_TO_RED.0, Self::BLUE_TO_RED.1, blue / red)
+            } else {
+                1.0
+            };
         let strength = blue_excess.max(magenta_excess);
         Self::smoothstep(Self::HUE.0, Self::HUE.1, strength)
     }
@@ -203,6 +214,20 @@ mod tests {
         for y in 0..HEIGHT {
             let index = (y * WIDTH + 21) * 3;
             samples[index..index + 3].copy_from_slice(&[0.09, 0.03, 0.01]);
+        }
+        let original = samples.clone();
+        Defringe::apply(WIDTH, HEIGHT, &mut samples);
+        assert_eq!(pixel(&samples, 21, 4), pixel(&original, 21, 4));
+    }
+
+    #[test]
+    fn a_saturated_red_beside_a_bright_edge_keeps_its_color() {
+        // DSCF7392's red sign: blue a hair above green read as magenta and
+        // drew a gray outline around the white letters.
+        let mut samples = fringed_edge();
+        for y in 0..HEIGHT {
+            let index = (y * WIDTH + 21) * 3;
+            samples[index..index + 3].copy_from_slice(&[0.169, 0.014, 0.019]);
         }
         let original = samples.clone();
         Defringe::apply(WIDTH, HEIGHT, &mut samples);

@@ -60,6 +60,12 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   Exposure placed for camera files, a new spectral `neutral_scale` key
   (per-channel neutral scan balance, CPU and GPU), and an approximate
   saturation coupling.
+- **#96** — Spectral Velvia matched closer to the camera's Velvia on
+  DSCF7392 (`agent: claude`, `stage: ready`, waiting on Caleb's look
+  review). New color-spectral key `violet_cutoff_nm` fades layer
+  sensitivity below 440 nm (the upsampler's violet lobe turned reds
+  magenta), a Status M scan, a faint neutral halation, and the defringe no
+  longer desaturates saturated reds into gray outlines.
 - **#79** — Scale-correct grain and silver grain (`agent: claude`, `stage:
   ready`, waiting on Caleb's look review). The field is calibrated through
   the 48 µm aperture, so a preview matches the export shrunk to its size;
