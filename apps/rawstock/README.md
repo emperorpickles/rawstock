@@ -14,6 +14,17 @@ Edits are written to `<file>.rawstock.toml` next to the photo. The RAW file
 is never written, renamed, or touched. A sidecar that cannot be parsed is
 left in place until Reset edits renames it to `.bak`.
 
+## Alpha builds
+
+`.github/workflows/alpha.yml` builds unsigned bundles: an NSIS installer for
+Windows x64 and a universal `.dmg` for macOS. It runs when a `v*` tag is
+pushed, which drafts a GitHub release with the bundles and `.sha256`
+checksums for a person to publish, or by hand from the Actions tab, which
+keeps them as workflow artifacts. It never runs on pull requests. The
+bundles are not signed, so SmartScreen and Gatekeeper warn on first launch;
+[`ALPHA_NOTES.md`](ALPHA_NOTES.md) (the release notes) says how to open the
+app anyway. The stock files ship inside the bundle.
+
 ## Run from a checkout
 
 Install a stable Rust toolchain and Node 22. The commands below are the same

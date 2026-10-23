@@ -36,6 +36,9 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   navigable, applied with undo. Thumbnails are the first real film
   renders in `apps/rawstock` (`thumbnails.rs`: one quick decode per photo,
   grain and halation off). Other develops are still the contract stub.
+- Unsigned alpha bundles of the 1.0 app (#93): `.github/workflows/alpha.yml`
+  on a `v*` tag or by hand drafts a release with a Windows NSIS installer,
+  a universal macOS `.dmg`, and checksums. Stocks ship inside the bundle.
 - Ilford HP5 Plus, the first black and white stock (#76):
   `emulsion = "monochrome"` (one silver layer, silver grain, CPU and GPU),
   curves digitized from Ilford's datasheet charts by `lab/ilford_bw.py`.
