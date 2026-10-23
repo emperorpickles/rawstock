@@ -8,6 +8,9 @@
   import { Adjustments } from "./lib/adjust";
   import { appError, defaultSettings } from "./lib/contract";
   import type { CropRect, EditSettings, ImageInfo, StockSummary } from "./lib/contract";
+  import ExportDialog from "./lib/ExportDialog.svelte";
+  import { ExportPlan } from "./lib/export";
+  import type { ExportRequest } from "./lib/export";
   import { PreviewSchedule } from "./lib/preview";
   import { Delivery, JobTracker } from "./lib/delivery";
   import {
@@ -76,6 +79,17 @@
   let clipping = $state(false);
   let dropActive = $state(false);
   let exportOpen = $state(false);
+  let exportRun = $state<{
+    jobId: number;
+    imageId: string;
+    path: string;
+    stage: string;
+    done: number;
+    total: number;
+    cancelling: boolean;
+  } | null>(null);
+  let exportAwaiting: string | null = null;
+  let exportPath = "";
   let aboutOpen = $state(false);
   let licensesOpen = $state(false);
   let preferencesOpen = $state(false);
@@ -84,7 +98,6 @@
   let samplePath = $state<string | null>(null);
   let appSettings = $state<AppSettings>(Prefs.defaults());
   let appInfo = $state<AppInfo | null>(null);
-  let quality = $state(90);
   let frame = $state<PackedFrame | null>(null);
   let frameMode = $state<"texture" | "region" | "empty">("empty");
   let memoryPressure = $state(false);
@@ -92,7 +105,6 @@
   let cacheHash = $state("");
   let cacheWidth = $state(0);
   let cacheHeight = $state(0);
-  let exportDialog = $state<HTMLDialogElement | null>(null);
   let resetting = $state(false);
   let horizon = $state(false);
   let viewLongEdge = $state(720);
@@ -132,25 +144,23 @@
   });
   const adjustmentsDisabled = $derived(!selected || selectedImage?.error != null);
 
-  $effect(() => {
-    syncDialog(exportDialog, exportOpen);
-  });
-
-  function syncDialog(dialog: HTMLDialogElement | null, openDialog: boolean) {
-    if (!dialog) {
-      return;
+  function exportEvent(imageId: string, jobId: number): boolean {
+    if (jobs.current(imageId, "export", jobId)) {
+      return true;
     }
-    if (openDialog && !dialog.open) {
-      dialog.showModal();
+    if (exportAwaiting === imageId) {
+      jobs.note(imageId, "export", jobId);
+      return true;
     }
-    if (!openDialog && dialog.open) {
-      dialog.close();
-    }
+    return false;
   }
 
   onMount(() => {
     const cleanups: Array<() => void> = [];
     const onKey = (event: KeyboardEvent) => {
+      if (document.querySelector("dialog[open]")) {
+        return;
+      }
       const action = Shortcuts.actionFor(event);
       if (!action) {
         return;
@@ -198,6 +208,21 @@
         }),
         host.onOpen((paths) => void ingest(paths)),
         host.onProgress((event) => {
+          if (event.kind === "export") {
+            if (!exportEvent(event.imageId, event.jobId)) {
+              return;
+            }
+            exportRun = {
+              jobId: event.jobId,
+              imageId: event.imageId,
+              path: exportRun?.jobId === event.jobId && exportRun.path ? exportRun.path : exportPath,
+              stage: event.stage,
+              done: event.done,
+              total: event.total,
+              cancelling: exportRun?.jobId === event.jobId ? exportRun.cancelling : false,
+            };
+            return;
+          }
           if (jobs.current(event.imageId, event.kind, event.jobId)) {
             progress = `${event.stage} ${event.done + 1}/${event.total}`;
           }
@@ -207,6 +232,15 @@
             void showPreview(event.imageId, event.jobId);
             return;
           }
+          if (event.kind === "export") {
+            if (!exportEvent(event.imageId, event.jobId)) {
+              return;
+            }
+            const path = event.outputPath || exportRun?.path || exportPath;
+            exportRun = null;
+            notice = ExportPlan.finishedNotice(path);
+            return;
+          }
           if (!jobs.current(event.imageId, event.kind, event.jobId)) {
             return;
           }
@@ -214,16 +248,29 @@
           if (event.kind === "full") {
             fullJob = event.jobId;
           }
-          if (event.kind === "export") {
-            notice = "Export is not written in this build.";
-          }
         }),
         host.onCancelled((event) => {
+          if (event.kind === "export") {
+            if (!exportEvent(event.imageId, event.jobId)) {
+              return;
+            }
+            exportRun = null;
+            notice = ExportPlan.cancelledNotice();
+            return;
+          }
           if (jobs.current(event.imageId, event.kind, event.jobId)) {
             progress = "";
           }
         }),
         host.onFailed((event) => {
+          if (event.kind === "export") {
+            if (!exportEvent(event.imageId, event.jobId)) {
+              return;
+            }
+            exportRun = null;
+            errors = [event.error.message];
+            return;
+          }
           if (!jobs.current(event.imageId, event.kind, event.jobId)) {
             return;
           }
@@ -590,6 +637,14 @@
         await pick(true);
         break;
       case "export":
+        if (!selected || selectedImage?.error) {
+          notice = selected ? "That photo cannot be exported." : "Open a photo before exporting.";
+          break;
+        }
+        if (exportRun) {
+          notice = "An export is already running.";
+          break;
+        }
         exportOpen = true;
         break;
       case "close":
@@ -730,6 +785,54 @@
     }
   }
 
+  async function startExport(request: ExportRequest) {
+    if (!host) {
+      throw {
+        code: "internal",
+        message: "Open a photo from the rawstock desktop window.",
+      };
+    }
+    exportPath = request.options.path;
+    exportAwaiting = request.imageId;
+    try {
+      const started = await host.exportImage(request.imageId, request.settings, request.options);
+      jobs.note(request.imageId, "export", started.jobId);
+      if (!exportRun || exportRun.jobId !== started.jobId) {
+        exportRun = {
+          jobId: started.jobId,
+          imageId: request.imageId,
+          path: request.options.path,
+          stage: "queued",
+          done: 0,
+          total: 0,
+          cancelling: false,
+        };
+      }
+    } finally {
+      exportAwaiting = null;
+    }
+    exportOpen = false;
+    await changeAppSettings(
+      ExportPlan.remembered(appSettings, request.options.quality, request.options.path),
+    );
+  }
+
+  async function cancelExport() {
+    if (!host || !exportRun || exportRun.cancelling) {
+      return;
+    }
+    const jobId = exportRun.jobId;
+    exportRun = { ...exportRun, cancelling: true };
+    try {
+      await host.cancel(jobId);
+    } catch (error) {
+      errors = [appError(error).message];
+      if (exportRun?.jobId === jobId) {
+        exportRun = { ...exportRun, cancelling: false };
+      }
+    }
+  }
+
   async function developFull() {
     if (!host || !selected) {
       return;
@@ -859,6 +962,22 @@
     />
   </div>
 
+  {#if exportRun}
+    <div class="export-run" role="status">
+      <span class="count">{ExportPlan.progressText(exportRun.stage, exportRun.done, exportRun.total)}</span>
+      <span class="who">{ExportPlan.baseName(exportRun.path)}</span>
+      <span class="spacer"></span>
+      <button
+        type="button"
+        onclick={() => void cancelExport()}
+        disabled={exportRun.cancelling}
+        aria-label={exportRun.cancelling ? "Cancelling export" : "Cancel export"}
+      >
+        {exportRun.cancelling ? "Cancelling…" : "Cancel"}
+      </button>
+    </div>
+  {/if}
+
   <footer class="status" aria-live="polite">
     <span>{progress || notice}</span>
     {#if compare}<span>Before</span>{/if}
@@ -866,24 +985,15 @@
   </footer>
 </div>
 
-<dialog bind:this={exportDialog} aria-labelledby="export-title" onclose={() => (exportOpen = false)}>
-  <h2 id="export-title">Export</h2>
-  <p>JPEG export is not hooked up in this build. The photo will not be written.</p>
-  <label class="field">
-    JPEG quality
-    <input
-      type="range"
-      min="1"
-      max="100"
-      step="1"
-      bind:value={quality}
-      aria-valuetext={`${quality} percent`}
-    />
-  </label>
-  <div class="dialog-actions">
-    <button type="button" onclick={() => (exportOpen = false)}>Close</button>
-  </div>
-</dialog>
+<ExportDialog
+  open={exportOpen}
+  image={selectedImage}
+  {settings}
+  quality={appSettings.export?.quality ?? 92}
+  lastFolder={appSettings.export?.lastFolder ?? null}
+  onclose={() => (exportOpen = false)}
+  onexport={startExport}
+/>
 
 <Preferences
   open={preferencesOpen}
@@ -921,3 +1031,32 @@
 />
 
 <Licenses open={licensesOpen} onclose={() => (licensesOpen = false)} />
+
+<style>
+  .export-run {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.35rem 0.7rem;
+    background: var(--paper);
+    border-top: 1px solid var(--line);
+    color: var(--ink);
+  }
+
+  .export-run .count,
+  .export-run .who {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .export-run .who {
+    color: var(--muted);
+  }
+
+  .export-run button {
+    border-radius: 4px;
+    font-size: 0.78rem;
+    padding: 0.2rem 0.55rem;
+  }
+</style>

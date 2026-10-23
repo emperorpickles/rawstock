@@ -160,6 +160,8 @@ export interface ExportOptions {
   format: "jpeg";
   quality: number;
   path: string;
+  /** True only after the user confirms replacing an existing file. */
+  overwrite: boolean;
 }
 
 export interface SaveResult {

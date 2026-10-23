@@ -42,6 +42,9 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   and crop, straighten, and rotate. Edits go through the sidecar and
   `develop_preview`. Warm and neutral themes. Depends on #37, which is on
   `main`.
+- **#41** — 1.0 JPEG export dialog (`agent: grok`, draft on
+  `grok/export-dialog`, builds on #39). Quality, save path, overwrite
+  confirmation, and cancel. The develop service still does not write pixels.
 - **#17** — Provia simulation fit (`agent: grok`, `stage: holding`).
   Waiting on more Provia RAF+JPEG pairs from Caleb. Pairs already in hand
   are held out. Do not commit them.
