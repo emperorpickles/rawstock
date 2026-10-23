@@ -71,6 +71,11 @@ enum Job {
         direction: TurnDirection,
         reply: Reply<SessionState>,
     },
+    CaCorrection {
+        enabled: bool,
+        epoch: u64,
+        reply: Reply<SessionState>,
+    },
     Save {
         request: SaveRequest,
         reply: Reply<StockState>,
@@ -174,6 +179,17 @@ impl WorkerHandle {
         wait(rx).await
     }
 
+    pub async fn set_ca_correction(&self, enabled: bool) -> Result<SessionState, String> {
+        let epoch = self.bump();
+        let (tx, rx) = mpsc::channel();
+        self.send(Job::CaCorrection {
+            enabled,
+            epoch,
+            reply: tx,
+        })?;
+        wait(rx).await
+    }
+
     pub async fn export(&self, path: PathBuf) -> Result<(), String> {
         let epoch = self.bump();
         let (tx, rx) = mpsc::channel();
@@ -221,6 +237,7 @@ impl Worker {
             latest,
             studio: Studio {
                 renderer: Renderer::start(),
+                ca_correction: true,
                 ..Studio::default()
             },
         }
@@ -273,6 +290,14 @@ impl Worker {
                 finish(self.studio.export(path, &mut progress), reply);
             }
             Job::Rotate { direction, reply } => finish(self.studio.rotate(direction), reply),
+            Job::CaCorrection {
+                enabled,
+                epoch,
+                reply,
+            } => {
+                let mut progress = self.control(epoch);
+                finish(self.studio.set_ca_correction(enabled, &mut progress), reply);
+            }
             Job::Save { request, reply } => finish(self.studio.save(request), reply),
         }
     }
@@ -394,6 +419,8 @@ struct Studio {
     /// The full develop of a staged session, still running.
     full: Option<Receiver<Result<LinearImage, String>>>,
     renderer: Renderer,
+    /// Correct chromatic aberration on develop. Kept across files.
+    ca_correction: bool,
 }
 
 /// The GPU, opened once in the background when the worker starts, so the
@@ -481,7 +508,8 @@ impl Studio {
         if progress.cancelled() {
             return Err(Cancelled.into());
         }
-        let raw = RawImage::open(path).with_context(|| format!("open {}", path.display()))?;
+        let mut raw = RawImage::open(path).with_context(|| format!("open {}", path.display()))?;
+        raw.set_chromatic_aberration_correction(self.ca_correction);
         if progress.cancelled() {
             return Err(Cancelled.into());
         }
@@ -565,6 +593,32 @@ impl Studio {
             .write(&path, Orientation::Normal)
             .with_context(|| format!("export {}", path.display()))?;
         Ok(())
+    }
+
+    /// Turn chromatic aberration correction on or off and develop the open
+    /// file again. The stock, edits, and turns stay; only the decoded image
+    /// is replaced.
+    fn set_ca_correction(
+        &mut self,
+        enabled: bool,
+        progress: &mut JobControl,
+    ) -> Result<SessionState> {
+        self.ca_correction = enabled;
+        let Some(path) = self.raw_path.clone() else {
+            anyhow::bail!("Open a RAW file first.");
+        };
+        progress.emit_progress("Demosaic", 0, 1);
+        let mut raw = RawImage::open(&path).with_context(|| format!("open {}", path.display()))?;
+        raw.set_chromatic_aberration_correction(enabled);
+        // A full develop still running was made with the old setting.
+        self.full = None;
+        let linear = raw
+            .develop_linear()
+            .with_context(|| format!("develop {}", path.display()))?;
+        let session = self.session.as_mut().context("Open a RAW file first.")?;
+        session.install_full(linear)?;
+        progress.emit_progress("Demosaic", 1, 1);
+        self.ready_state()
     }
 
     fn rotate(&mut self, direction: TurnDirection) -> Result<SessionState> {
@@ -764,6 +818,7 @@ impl Studio {
             display_height,
             orientation: session.orientation().to_string(),
             quarter_turns: session.quarter_turns(),
+            ca_correction: self.ca_correction,
             stock: self.stock.as_ref().map(|stock| describe(stock, session)),
         }
     }

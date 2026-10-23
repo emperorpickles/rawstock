@@ -33,6 +33,10 @@ Implemented order:
    Mosaic files then get lateral chromatic aberration correction
    (`lateral_ca.rs`): red and blue are measured against green per frame
    and resampled onto it, in camera RGB, as cameras do for their JPEGs.
+   After the ACEScg conversion, `defringe.rs` desaturates the blue/purple
+   glow beside bright edges. One switch turns both off
+   (`RawImage::set_chromatic_aberration_correction`, CLI
+   `--no-ca-correction`, the tuner's CA fix button).
 2. **White balance, then ACEScg.** As-shot white balance is in camera RGB,
    baked into the camera → ACEScg matrix. ACEScg (scene-linear AP1) is the
    working space. **Exposure (`exposure_ev`) is a stop scale after that

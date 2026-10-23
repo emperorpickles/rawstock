@@ -44,6 +44,10 @@ export class TauriHost implements Host {
     return invoke<SessionState>("rotate_image", { direction });
   }
 
+  async setCaCorrection(enabled: boolean): Promise<SessionState> {
+    return invoke<SessionState>("set_ca_correction", { enabled });
+  }
+
   async render(request: RenderRequest) {
     const bytes = await invoke<ArrayBuffer | Uint8Array>("render_frame", { request });
     return FrameBuffer.decode(bytes);
