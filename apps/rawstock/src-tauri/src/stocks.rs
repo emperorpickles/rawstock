@@ -79,11 +79,23 @@ fn stock_id(path: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
-/// `RAWSTOCK_STOCKS` wins. Otherwise the repo `stocks/` directory next to
-/// this crate, then a walk up from the current directory.
+/// `RAWSTOCK_STOCKS` wins. Then the stocks a bundle installs beside the
+/// executable (`stocks/` on Windows, `../Resources/stocks` in a macOS
+/// app), then the repo `stocks/` directory next to this crate, then a walk
+/// up from the current directory.
 pub fn directory() -> PathBuf {
     if let Some(path) = std::env::var_os("RAWSTOCK_STOCKS") {
         return PathBuf::from(path);
+    }
+    if let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+    {
+        for bundled in [exe_dir.join("stocks"), exe_dir.join("../Resources/stocks")] {
+            if bundled.join("neutral.stock.toml").is_file() {
+                return bundled;
+            }
+        }
     }
     let compiled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../stocks");
     if compiled.join("neutral.stock.toml").is_file() {
