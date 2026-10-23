@@ -41,8 +41,8 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
 
 ## In flight
 
-- **#41** — 1.0 JPEG export dialog (`agent: grok`, draft PR #95 on
-  `grok/export-dialog`, builds on #86). Quality, save path, overwrite
+- **#41** — 1.0 JPEG export dialog (`agent: grok`, PR #95 on
+  `grok/export-dialog`, ready, builds on #86). Quality, save path, overwrite
   confirmation, and cancel. The develop service still does not write pixels.
 - **#17** — Provia simulation fit (`agent: grok`, `stage: holding`).
   Waiting on more Provia RAF+JPEG pairs from Caleb. Pairs already in hand
