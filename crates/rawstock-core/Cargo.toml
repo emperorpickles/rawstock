@@ -9,6 +9,7 @@ license.workspace = true
 exr = "1.73"
 image = { version = "0.25", default-features = false, features = ["jpeg", "tiff"] }
 rawler = "0.8"
+# Already in the tree through rawler. Runs on the calling thread on wasm32.
 rayon = "1.12"
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2"

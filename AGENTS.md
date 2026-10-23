@@ -30,6 +30,9 @@ Implemented order:
 
 1. **Decode** with `rawler`. Bayer uses PPG. Linear DNG (ProRAW) is already
    demosaiced and passes through. X-Trans uses rawler's 3-pass Markesteijn.
+   Mosaic files then get lateral chromatic aberration correction
+   (`lateral_ca.rs`): red and blue are measured against green per frame
+   and resampled onto it, in camera RGB, as cameras do for their JPEGs.
 2. **White balance, then ACEScg.** As-shot white balance is in camera RGB,
    baked into the camera → ACEScg matrix. ACEScg (scene-linear AP1) is the
    working space. **Exposure (`exposure_ev`) is a stop scale after that

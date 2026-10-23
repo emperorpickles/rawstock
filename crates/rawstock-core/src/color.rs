@@ -2,7 +2,7 @@
 //!
 //! [`RawImage::develop_linear`](crate::decode::RawImage::develop_linear) asks
 //! [`rawler`] to rescale black/white levels and demosaic (PPG for Bayer,
-//! bilinear for X-Trans, pass-through for linear DNG). White balance and the
+//! Markesteijn for X-Trans, pass-through for linear DNG). White balance and the
 //! camera → ACEScg matrix live here. ACEScg negatives are kept.
 //! [`encode_srgb`] is the output transform: ACEScg to encoded sRGB, applied
 //! after the film pipeline.
@@ -18,6 +18,7 @@ use rayon::prelude::*;
 use thiserror::Error;
 
 use crate::decode::{CfaKind, RawImage};
+use crate::lateral_ca::LateralCa;
 use crate::matrices;
 use crate::workers::Workers;
 
@@ -262,8 +263,11 @@ impl RawImage {
     /// Demosaic and convert this file to scene-linear ACEScg.
     ///
     /// Black/white normalization and demosaic are `rawler`'s rescale and
-    /// demosaic steps (Bayer via PPG, X-Trans via bilinear, linear DNG
-    /// unchanged). Rescale does not clip above the white level, so highlights
+    /// demosaic steps (Bayer via PPG, X-Trans via Markesteijn, linear DNG
+    /// unchanged). Mosaic files then get lateral chromatic aberration
+    /// correction ([`LateralCa`]): red and blue are measured against green
+    /// and resampled onto it, as the camera does for its own JPEGs. Rescale
+    /// does not clip above the white level, so highlights
     /// are cut to that level in camera RGB, white-balanced with green at 1,
     /// then cut again at the smallest multiplier. That second cut is what
     /// keeps a clipped neutral from turning magenta: the short channel would
@@ -273,7 +277,7 @@ impl RawImage {
     /// into ACEScg. White balance is already in the samples, so the matrix
     /// sees an identity balance.
     ///
-    /// Markesteijn runs on the capped [`Workers`] pool.
+    /// Markesteijn and the CA correction run on the capped [`Workers`] pool.
     pub fn develop_linear(&self) -> Result<LinearImage, DevelopError> {
         Workers::install(|| self.develop_linear_here())
     }
@@ -288,7 +292,7 @@ impl RawImage {
                 .map_err(|source| DevelopError::Demosaic { source })?
         };
 
-        let (width, height, samples) = match developed {
+        let (width, height, mut samples) = match developed {
             Intermediate::ThreeColor(pixels) => take_rgb(pixels)?,
             Intermediate::FourColor(_) => {
                 return Err(DevelopError::UnexpectedChannels { channels: 4 });
@@ -297,6 +301,13 @@ impl RawImage {
                 return Err(DevelopError::UnexpectedChannels { channels: 1 });
             }
         };
+
+        // ProRAW arrives already corrected by the phone.
+        if self.cfa() != CfaKind::LinearDng {
+            let (columns, rows) = (width as usize, height as usize);
+            let lateral_ca = LateralCa::estimate(columns, rows, &samples);
+            lateral_ca.apply(columns, rows, &mut samples);
+        }
 
         self.finish_linear(width, height, samples)
     }
@@ -318,7 +329,8 @@ impl RawImage {
     /// takes seconds. A preview downsampled from it is within about 0.5% of
     /// one downsampled from Markesteijn. The
     /// frame is the one [`Self::develop_linear`] returns, a third the size.
-    /// `None` for a sensor that is not X-Trans.
+    /// Lateral chromatic aberration is not corrected: at a third the size
+    /// it is a fraction of a pixel. `None` for a sensor that is not X-Trans.
     pub fn develop_quick_linear(&self) -> Result<Option<QuickDevelop>, DevelopError> {
         if self.cfa() != CfaKind::XTrans {
             return Ok(None);
