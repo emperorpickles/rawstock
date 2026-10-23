@@ -8,6 +8,7 @@ use std::sync::mpsc;
 use crate::jobs::ContractStub;
 use crate::recent::RecentFiles;
 use crate::settings::SettingsStore;
+use crate::thumbnails::Thumbnailer;
 
 pub struct AppState {
     pub stub: Mutex<ContractStub>,
@@ -23,6 +24,8 @@ pub struct AppState {
     /// Paths last painted into File > Open Recent, in menu order.
     pub menu_paths: Mutex<Vec<String>>,
     pub wake: Mutex<Option<mpsc::Sender<()>>>,
+    /// Real stock thumbnails. Set once the app has started.
+    pub thumbnailer: Mutex<Option<Thumbnailer>>,
 }
 
 impl AppState {
@@ -39,6 +42,7 @@ impl AppState {
             log_dir,
             menu_paths: Mutex::new(Vec::new()),
             wake: Mutex::new(None),
+            thumbnailer: Mutex::new(None),
         }
     }
 }

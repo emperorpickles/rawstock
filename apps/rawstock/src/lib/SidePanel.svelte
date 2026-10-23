@@ -1,10 +1,13 @@
 <script lang="ts">
   import AdjustPanel from "./AdjustPanel.svelte";
   import type { EditSettings, StockSummary } from "./contract";
+  import type { PackedFrame } from "./frame";
+  import StockBrowser from "./StockBrowser.svelte";
 
   let {
     stocks,
     stockId = "",
+    thumbnails = {},
     settings,
     disabled = false,
     frameWidth = 0,
@@ -17,6 +20,7 @@
   }: {
     stocks: StockSummary[];
     stockId?: string;
+    thumbnails?: Record<string, PackedFrame>;
     settings: EditSettings;
     disabled?: boolean;
     frameWidth?: number;
@@ -28,12 +32,6 @@
     onhorizon: (on: boolean) => void;
   } = $props();
 
-  const categoryLabel: Record<StockSummary["category"], string> = {
-    colorNegative: "Color negative",
-    slide: "Slide",
-    bw: "Black and white",
-    fujiSim: "Fuji simulation",
-  };
 </script>
 
 <aside class="side" aria-label="Stock and adjustments">
@@ -42,21 +40,7 @@
     {#if stocks.length === 0}
       <p class="hint">Stocks appear here when the catalog can be read.</p>
     {:else}
-      <ul class="list">
-        {#each stocks as stock (stock.id)}
-          <li>
-            <button
-              type="button"
-              aria-pressed={stock.id === stockId}
-              {disabled}
-              onclick={() => onstock(stock)}
-            >
-              <span class="name">{stock.name}</span>
-              <span class="meta">{categoryLabel[stock.category]} · rev {stock.revision}</span>
-            </button>
-          </li>
-        {/each}
-      </ul>
+      <StockBrowser {stocks} {stockId} {thumbnails} {disabled} {onstock} />
     {/if}
   </section>
 
@@ -102,42 +86,12 @@
     color: var(--muted);
   }
 
-  .hint,
-  .meta {
+  .hint {
     color: var(--muted);
     font-size: 0.78rem;
   }
 
   .hint {
     margin: 0.15rem 0 0.45rem;
-  }
-
-  .list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.3rem;
-  }
-
-  .list button {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 0.1rem;
-    text-align: left;
-    border-radius: 6px;
-    padding: 0.4rem 0.5rem;
-  }
-
-  .list button[aria-pressed="true"] {
-    background: var(--paper);
-    border-color: var(--accent);
-    color: var(--ink);
-  }
-
-  .name {
-    color: var(--ink);
   }
 </style>

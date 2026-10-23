@@ -31,6 +31,11 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   core, the CLI (`--no-ca-correction`) and the tuner (#71).
 - 1.0 app open, filmstrip, and `.rawstock.toml` sidecars (#37): files and
   folders, capture order, per-image undo, and autosave beside the RAW.
+- 1.0 app stock browser (#38): thumbnails of every installed stock drawn
+  from the open photo, grouped by category in a 2-column grid, keyboard
+  navigable, applied with undo. Thumbnails are the first real film
+  renders in `apps/rawstock` (`thumbnails.rs`: one quick decode per photo,
+  grain and halation off). Other develops are still the contract stub.
 - Ilford HP5 Plus, the first black and white stock (#76):
   `emulsion = "monochrome"` (one silver layer, silver grain, CPU and GPU),
   curves digitized from Ilford's datasheet charts by `lab/ilford_bw.py`.
