@@ -182,9 +182,12 @@ jobs:
 
   # CPU/GPU parity on software adapters: lavapipe (Vulkan) and WARP (DX12).
   # RAWSTOCK_REQUIRE_GPU makes a missing adapter a failure, not a skip.
+  # Green runs finish in under 10 minutes. The cap is only so a stuck
+  # apt or test cannot sit until the runner's 6h default.
   gpu-vulkan:
     name: GPU parity (Vulkan, lavapipe)
     needs: changes
+    timeout-minutes: 40
     if: >-
       !cancelled() &&
       (github.event_name == 'push' ||
@@ -201,10 +204,36 @@ jobs:
         with:
           shared-key: ${{ github.job }}
           save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'grok/ci-speed' }}
+      # apt-get update has hung with no further output until the job was
+      # cancelled at 6h (run 39827263865). Update normally takes a few
+      # seconds, so each update attempt dies at 2 minutes and retries.
+      # One slow mesa-vulkan-drivers download still finished in about 8
+      # minutes, so the install bound stays above that. Socket timeouts
+      # make a stalled mirror fail inside apt; the step bound is the
+      # backstop if the loop itself stalls.
       - name: lavapipe
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
-          sudo apt-get install -y mesa-vulkan-drivers
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt_opts=(
+            -o Acquire::http::Timeout=30
+            -o Acquire::https::Timeout=30
+            -o Acquire::Retries=3
+            -o Dpkg::Lock::Timeout=60
+          )
+          for attempt in 1 2 3; do
+            if sudo timeout --kill-after=15s 2m apt-get "${apt_opts[@]}" update \
+              && sudo timeout --kill-after=15s 10m apt-get "${apt_opts[@]}" install -y mesa-vulkan-drivers
+            then
+              exit 0
+            fi
+            echo "lavapipe apt attempt ${attempt} failed; retrying" >&2
+            sudo timeout --kill-after=15s 60s dpkg --configure -a || true
+            sleep $((attempt * 5))
+          done
+          echo "lavapipe apt install failed after 3 attempts" >&2
+          exit 1
       - name: cargo clippy (gpu)
         run: cargo clippy -p rawstock-core --features gpu --all-targets -- -D warnings
       - name: GPU parity
@@ -222,6 +251,7 @@ jobs:
   gpu-dx12:
     name: GPU parity (DX12, WARP)
     needs: changes
+    timeout-minutes: 40
     if: >-
       !cancelled() &&
       (github.event_name == 'push' ||
