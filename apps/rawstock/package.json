@@ -5,9 +5,10 @@
   "license": "GPL-3.0-or-later",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "dev": "node scripts/licenses.mjs && vite",
+    "build": "node scripts/licenses.mjs && vite build",
+    "check": "svelte-check --tsconfig ./tsconfig.json && node --test \"scripts/**/*.test.mjs\" \"src/**/*.test.mjs\"",
+    "licenses": "node scripts/licenses.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

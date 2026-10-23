@@ -47,19 +47,14 @@ pub fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|err| err.into_inner())
 }
 
+/// Detail behind a user-facing error. The message the user saw is
+/// friendlier; this is what goes in the log they can attach to a report.
 pub fn log_detail(dir: &std::path::Path, detail: &str) {
-    let path = dir.join("rawstock.log");
-    let _ = std::fs::create_dir_all(dir);
-    let mut file = match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        Ok(file) => file,
-        Err(_) => return,
-    };
-    use std::io::Write;
-    let _ = writeln!(file, "{detail}");
+    crate::help::Log::write(dir, crate::help::Level::Error, detail);
+}
+
+pub fn log_info(dir: &std::path::Path, detail: &str) {
+    crate::help::Log::write(dir, crate::help::Level::Info, detail);
 }
 
 pub fn wake(state: &AppState) {

@@ -36,6 +36,7 @@ pub fn menu_hit(id: &str) -> MenuHit {
         "licenses" => MenuHit::Action("licenses"),
         "report-issue" => MenuHit::Action("report-issue"),
         "preferences" => MenuHit::Action("preferences"),
+        "show-log" => MenuHit::Action("show-log"),
         "recent-empty" => MenuHit::Ignore,
         other => {
             if let Some(index) = other.strip_prefix("recent-")
@@ -135,6 +136,7 @@ fn install_menu(app: &AppHandle, paths: &[String]) -> tauri::Result<()> {
     let about = item(app, "about", "About", None)?;
     let licenses = item(app, "licenses", "Licenses", None)?;
     let report = item(app, "report-issue", "Report an issue", None)?;
+    let show_log = item(app, "show-log", "Show Log File", None)?;
     let sep_help = PredefinedMenuItem::separator(app)?;
 
     let file = {
@@ -195,7 +197,12 @@ fn install_menu(app: &AppHandle, paths: &[String]) -> tauri::Result<()> {
             &clipping,
         ],
     )?;
-    let help = Submenu::with_items(app, "Help", true, &[&about, &licenses, &sep_help, &report])?;
+    let help = Submenu::with_items(
+        app,
+        "Help",
+        true,
+        &[&about, &licenses, &sep_help, &report, &show_log],
+    )?;
 
     #[cfg(target_os = "macos")]
     let menu = {
@@ -297,6 +304,7 @@ mod tests {
         assert_eq!(menu_hit("redo-y"), MenuHit::Action("redo"));
         assert_eq!(menu_hit("zoom-100"), MenuHit::Action("zoom-100"));
         assert_eq!(menu_hit("preferences"), MenuHit::Action("preferences"));
+        assert_eq!(menu_hit("show-log"), MenuHit::Action("show-log"));
         assert_eq!(menu_hit("recent-2"), MenuHit::Recent(2));
         assert_eq!(menu_hit("recent-empty"), MenuHit::Ignore);
         assert_eq!(menu_hit("quit"), MenuHit::Ignore);

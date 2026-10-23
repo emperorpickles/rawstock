@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import { appError } from "./contract";
 import type { AppSettings, SettingsChanged } from "./preferences/settings";
+import type { AppInfo } from "./help/report";
 import type {
   CacheEvictedEvent,
   CacheReadyEvent,
@@ -113,6 +114,10 @@ export class Host {
 
   async resetAppSettings(clearRecent: boolean): Promise<AppSettings> {
     return this.invoke("reset_app_settings", { clearRecent });
+  }
+
+  async appInfo(): Promise<AppInfo> {
+    return this.invoke("app_info");
   }
 
   async dispatchMenuAction(action: string): Promise<boolean> {
