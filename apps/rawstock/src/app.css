@@ -52,14 +52,24 @@ canvas:focus-visible {
   outline-offset: 2px;
 }
 
+/* `data-reduce-motion` is the Preferences override: "on" always reduces,
+   "off" ignores the system setting, "system" follows it. */
 @media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
+  :root:not([data-reduce-motion="off"]) *,
+  :root:not([data-reduce-motion="off"]) *::before,
+  :root:not([data-reduce-motion="off"]) *::after {
     animation: none !important;
     transition: none !important;
     scroll-behavior: auto !important;
   }
+}
+
+:root[data-reduce-motion="on"] *,
+:root[data-reduce-motion="on"] *::before,
+:root[data-reduce-motion="on"] *::after {
+  animation: none !important;
+  transition: none !important;
+  scroll-behavior: auto !important;
 }
 
 .app {

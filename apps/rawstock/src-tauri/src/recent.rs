@@ -1,5 +1,6 @@
 //! Recent-files list. A convenience cache in the app config directory,
-//! never the source of truth. At most ten paths, newest first.
+//! never the source of truth. Newest first, capped by the `recent.limit`
+//! setting (ten by default).
 
 use std::path::{Path, PathBuf};
 
@@ -18,6 +19,7 @@ struct RecentFileDocument {
 pub struct RecentFiles {
     file: PathBuf,
     paths: Vec<PathBuf>,
+    limit: usize,
 }
 
 impl RecentFiles {
@@ -27,15 +29,25 @@ impl RecentFiles {
             .and_then(|text| serde_json::from_str::<RecentFileDocument>(&text).ok())
             .map(|document| document.paths.into_iter().map(PathBuf::from).collect())
             .unwrap_or_default();
-        Self { file, paths }
+        Self {
+            file,
+            paths,
+            limit: LIMIT,
+        }
     }
 
-    /// Move `path` to the front and drop the oldest past [`LIMIT`].
+    /// Change the cap and drop the oldest paths past it.
+    pub fn set_limit(&mut self, limit: usize) {
+        self.limit = limit.max(1);
+        self.paths.truncate(self.limit);
+    }
+
+    /// Move `path` to the front and drop the oldest past the limit.
     pub fn remember(&mut self, path: &Path) {
         let canonical = canonical_path(path);
         self.paths.retain(|existing| existing != &canonical);
         self.paths.insert(0, canonical);
-        self.paths.truncate(LIMIT);
+        self.paths.truncate(self.limit);
     }
 
     /// Drop paths that are no longer files. Returns how many were removed.
@@ -99,6 +111,23 @@ mod tests {
         recent.save().unwrap();
         let loaded = RecentFiles::load(recent.file.clone());
         assert_eq!(loaded.list().len(), 9);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_lower_limit_drops_the_oldest_paths() {
+        let store = temp_file("limit");
+        let dir = store.parent().unwrap().to_path_buf();
+        let mut recent = RecentFiles::load(store);
+        for index in 0..8 {
+            let path = dir.join(format!("frame-{index}.raf"));
+            std::fs::write(&path, b"x").unwrap();
+            recent.remember(&path);
+        }
+        recent.set_limit(5);
+        assert_eq!(recent.list().len(), 5);
+        assert!(recent.list()[0].ends_with("frame-7.raf"));
+        assert!(recent.list()[4].ends_with("frame-3.raf"));
         let _ = std::fs::remove_dir_all(dir);
     }
 }
