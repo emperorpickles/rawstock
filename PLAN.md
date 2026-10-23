@@ -102,6 +102,9 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   develop service lands.
 - **#52, #53** — 1.0 app presets and export queue (`agent: claude`,
   `stage: holding`) until #39 and #41 land.
+- **#63** — Lavapipe apt timeout and retry in CI (`agent: grok`). GPU
+  parity jobs cap at 40 minutes, and a hung apt mirror fails fast and
+  retries.
 
 ## Next
 
