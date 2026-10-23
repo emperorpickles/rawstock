@@ -29,6 +29,9 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
 - Chromatic aberration correction for X-Trans and Bayer: red/blue
   registration (#62) and a blue/purple defringe, behind one switch in
   core, the CLI (`--no-ca-correction`) and the tuner (#71).
+- Ilford HP5 Plus, the first black and white stock (#76):
+  `emulsion = "monochrome"` (one silver layer, silver grain, CPU and GPU),
+  curves digitized from Ilford's datasheet charts by `lab/ilford_bw.py`.
 
 ## In flight
 

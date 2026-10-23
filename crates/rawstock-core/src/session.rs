@@ -146,6 +146,7 @@ struct CloudField {
     frame_mm: u32,
     seed: u32,
     size_mm: [u32; 3],
+    monochrome: bool,
     origin_x: u32,
     origin_y: u32,
     width: u32,
@@ -159,6 +160,7 @@ impl CloudField {
         self.frame_mm == grain.frame_mm().to_bits()
             && self.seed == grain.seed()
             && self.size_mm == grain.size_mm().map(f32::to_bits)
+            && self.monochrome == grain.is_monochrome()
             && self.origin_x == region.origin_x
             && self.origin_y == region.origin_y
             && self.width == region.width
@@ -176,6 +178,7 @@ impl CloudField {
             frame_mm: grain.frame_mm().to_bits(),
             seed: grain.seed(),
             size_mm: grain.size_mm().map(f32::to_bits),
+            monochrome: grain.is_monochrome(),
             origin_x: region.origin_x,
             origin_y: region.origin_y,
             width: region.width,
@@ -1308,6 +1311,7 @@ fn grain_eq(left: Option<&Grain>, right: Option<&Grain>) -> bool {
             left.frame_mm() == right.frame_mm()
                 && left.seed() == right.seed()
                 && left.size_mm() == right.size_mm()
+                && left.is_monochrome() == right.is_monochrome()
                 && left
                     .layers()
                     .iter()

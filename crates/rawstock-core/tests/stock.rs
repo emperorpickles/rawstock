@@ -5,7 +5,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rawstock_core::color::LinearImage;
 use rawstock_core::render::{Parameters, Pipeline};
-use rawstock_core::stock::{FilmModel, Grain, ModelError, Process, Stock, StockError, StockModel};
+use rawstock_core::stock::{
+    Emulsion, FilmModel, Grain, Granularity, ModelError, Process, Stock, StockError, StockModel,
+};
 
 fn neutral_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stocks/neutral.stock.toml")
@@ -642,6 +644,172 @@ fn portra_paper_white_is_display_white() {
     for &channel in developed.pixels() {
         assert!(channel > 0.99, "paper white: {:?}", developed.pixels());
     }
+}
+
+fn hp5_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stocks/ilford-hp5-plus.stock.toml")
+}
+
+#[test]
+fn hp5_is_one_silver_layer() {
+    let stock = Stock::load(hp5_path()).unwrap();
+    assert_eq!(stock.name(), "Ilford HP5 Plus");
+    assert!(stock.source().starts_with("Digitized"));
+    assert!(stock.source().contains("approximate"));
+    let FilmModel::Spectral(model) = stock.parameters().film() else {
+        panic!("HP5 Plus is spectral");
+    };
+    assert_eq!(model.emulsion(), Emulsion::Monochrome);
+    assert_eq!(model.process(), Process::Negative);
+    assert!(model.dye_density().is_none());
+    assert!(model.coupling().is_none());
+    let [red, green, blue] = model.sensitivities();
+    assert_eq!(red, green);
+    assert_eq!(green, blue);
+    assert!((trapezoid(model.wavelengths(), red) - 1.0).abs() < 1.0e-3);
+    let grain = stock.parameters().grain().unwrap();
+    assert!(grain.is_monochrome());
+    assert_eq!(grain.size_mm()[0], grain.size_mm()[1]);
+    assert_eq!(grain.size_mm()[1], grain.size_mm()[2]);
+}
+
+#[test]
+fn hp5_develops_every_color_to_a_neutral() {
+    // Saturated primaries, a skin tone, and grays, with grain and halation
+    // on. Silver has no color, so every output pixel has equal channels.
+    let parameters = Stock::load(hp5_path()).unwrap().into_parameters();
+    let (width, height) = (64u32, 48u32);
+    let colors = [
+        [0.6, 0.02, 0.02],
+        [0.02, 0.5, 0.03],
+        [0.02, 0.03, 0.7],
+        [0.35, 0.2, 0.12],
+        [0.18, 0.18, 0.18],
+        [4.0, 3.0, 2.0],
+    ];
+    let mut pixels = Vec::with_capacity((width * height * 3) as usize);
+    for index in 0..width * height {
+        pixels.extend(colors[(index / 7) as usize % colors.len()]);
+    }
+    let image = LinearImage::new(width, height, pixels).unwrap();
+    let developed = Pipeline::new(parameters).develop(&image);
+    for pixel in developed.pixels().as_chunks::<3>().0 {
+        assert_eq!(pixel[0], pixel[1], "{pixel:?}");
+        assert_eq!(pixel[1], pixel[2], "{pixel:?}");
+    }
+}
+
+#[test]
+fn hp5_sees_red_less_than_blue() {
+    // Panchromatic, with the red edge near 670 nm: deep red prints darker
+    // than an equally bright deep blue, as on real HP5 Plus.
+    let parameters = Stock::load(hp5_path()).unwrap().into_parameters();
+    let film = parameters.film();
+    let density = film.density(&[0.3, 0.0, 0.0, 0.0, 0.0, 0.3]);
+    assert!(density[0] < density[3], "{density:?}");
+    // All three layers carry the one silver density.
+    assert_eq!(density[0], density[1]);
+    assert_eq!(density[3], density[5]);
+}
+
+#[test]
+fn monochrome_stock_tables_are_checked() {
+    let hp5 = std::fs::read_to_string(hp5_path()).unwrap();
+    let curve = "log_exposure = [-2.0, 0.0]\ndensity = [0.0, 1.0]\n";
+
+    // Color-only tables do not belong on a monochrome stock.
+    for (field, table) in [
+        ("red", format!("[red]\n{curve}")),
+        (
+            "coupling",
+            "[coupling]\nmatrix = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]\n".to_string(),
+        ),
+        ("neutral_scale", "neutral_scale = true\n".to_string()),
+    ] {
+        let text = if table.starts_with('[') {
+            format!("{hp5}\n{table}")
+        } else {
+            hp5.replacen(
+                "model = \"spectral\"",
+                &format!("model = \"spectral\"\n{table}"),
+                1,
+            )
+        };
+        match load_text(&text).unwrap_err() {
+            StockError::WrongLayer {
+                emulsion,
+                field: got,
+            } => {
+                assert_eq!(emulsion, Emulsion::Monochrome);
+                assert_eq!(got, field);
+            }
+            other => panic!("{field}: {other}"),
+        }
+    }
+
+    // The silver curve is required.
+    let start = hp5.find("[silver]").unwrap();
+    let end = start + hp5[start..].find("\n\n").unwrap();
+    let missing = format!("{}{}", &hp5[..start], &hp5[end..]);
+    assert!(matches!(
+        load_text(&missing).unwrap_err(),
+        StockError::MissingLayer {
+            field: "silver",
+            ..
+        }
+    ));
+
+    // Silver grain has one table, not three.
+    let colored_grain = hp5.replace("[grain.silver]", "[grain.red]");
+    assert!(matches!(
+        load_text(&colored_grain).unwrap_err(),
+        StockError::WrongLayer {
+            field: "grain.red",
+            ..
+        }
+    ));
+
+    // A color stock cannot carry a silver layer, and a parametric stock
+    // has no emulsion key.
+    let colored = format!("{}\n[silver]\n{curve}", neutral_text());
+    assert!(matches!(
+        load_text(&colored).unwrap_err(),
+        StockError::NotParametric { .. } | StockError::WrongLayer { .. }
+    ));
+    let parametric = neutral_text().replace(
+        "model = \"parametric\"",
+        "model = \"parametric\"\nemulsion = \"monochrome\"",
+    );
+    assert!(matches!(
+        load_text(&parametric).unwrap_err(),
+        StockError::NotParametric { field: "emulsion" }
+    ));
+}
+
+#[test]
+fn monochrome_grain_is_the_same_in_every_channel() {
+    let layer = Granularity::new([(0.0, 10.0), (2.0, 18.0)]).unwrap();
+    let grain = Grain::monochrome(35.0, 9, layer, 0.006).unwrap();
+    assert!(grain.is_monochrome());
+    let (width, height) = (96u32, 64u32);
+    let mut density: Vec<f32> = (0..width * height)
+        .flat_map(|index| {
+            let level = 0.2 + 1.6 * (index % width) as f32 / width as f32;
+            [level; 3]
+        })
+        .collect();
+    let before = density.clone();
+    grain.apply(&mut density, width, height);
+    assert_ne!(density, before);
+    for pixel in density.as_chunks::<3>().0 {
+        assert_eq!(pixel[0], pixel[1]);
+        assert_eq!(pixel[1], pixel[2]);
+    }
+    // One clump size for all three channels.
+    assert!(matches!(
+        grain.with_size_mm([0.006, 0.006, 0.008]).unwrap_err(),
+        ModelError::GrainSize
+    ));
 }
 
 /// Standard deviation of developed luma over a flat middle gray.
