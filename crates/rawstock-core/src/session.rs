@@ -146,6 +146,10 @@ struct CloudField {
     frame_mm: u32,
     seed: u32,
     size_mm: [u32; 3],
+    monochrome: bool,
+    texture: crate::stock::GrainTexture,
+    correlation: u32,
+    clumping: u32,
     origin_x: u32,
     origin_y: u32,
     width: u32,
@@ -159,6 +163,10 @@ impl CloudField {
         self.frame_mm == grain.frame_mm().to_bits()
             && self.seed == grain.seed()
             && self.size_mm == grain.size_mm().map(f32::to_bits)
+            && self.monochrome == grain.is_monochrome()
+            && self.texture == grain.texture()
+            && self.correlation == grain.correlation().to_bits()
+            && self.clumping == grain.clumping().to_bits()
             && self.origin_x == region.origin_x
             && self.origin_y == region.origin_y
             && self.width == region.width
@@ -176,6 +184,10 @@ impl CloudField {
             frame_mm: grain.frame_mm().to_bits(),
             seed: grain.seed(),
             size_mm: grain.size_mm().map(f32::to_bits),
+            monochrome: grain.is_monochrome(),
+            texture: grain.texture(),
+            correlation: grain.correlation().to_bits(),
+            clumping: grain.clumping().to_bits(),
             origin_x: region.origin_x,
             origin_y: region.origin_y,
             width: region.width,
@@ -1220,7 +1232,6 @@ fn render_tail(
                 model.mix_field(
                     &mut grained,
                     &grain_field.as_ref().expect("cloud field").samples,
-                    frame_width,
                 );
                 grained
             }
@@ -1308,6 +1319,10 @@ fn grain_eq(left: Option<&Grain>, right: Option<&Grain>) -> bool {
             left.frame_mm() == right.frame_mm()
                 && left.seed() == right.seed()
                 && left.size_mm() == right.size_mm()
+                && left.is_monochrome() == right.is_monochrome()
+                && left.texture() == right.texture()
+                && left.correlation() == right.correlation()
+                && left.clumping() == right.clumping()
                 && left
                     .layers()
                     .iter()
@@ -1359,6 +1374,7 @@ fn crop_buffer(
 #[derive(Clone, PartialEq, Eq)]
 struct DyeKey {
     process: crate::stock::Process,
+    neutral_scale: bool,
     reference: Option<u32>,
     samples: Vec<u32>,
 }
@@ -1375,6 +1391,7 @@ impl DyeKey {
         }
         Some(Self {
             process: model.process(),
+            neutral_scale: model.neutral_scale().is_some(),
             reference: model.reference_log_exposure().map(f32::to_bits),
             samples,
         })

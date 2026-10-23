@@ -183,17 +183,22 @@ fn parametric_density_matches_with_and_without_coupling() {
 #[test]
 fn spectral_density_matches() {
     let Some(gpu) = gpu() else { return };
-    let parameters = bare("portra400");
-    let pipeline = GpuPipeline::new(gpu, &parameters);
     let mut input = scene_samples(65_536);
     // Neutrals take the flat-spectrum branch; values above 1 take the
     // scale extension.
     for gray in [0.0, 1.0e-3, 0.18, 1.0, 4.0] {
         input.extend([gray, gray, gray]);
     }
-    let cpu = parameters.film().density(&input);
-    let gpu = pollster::block_on(pipeline.run(&[Kernel::DensitySpectral], &input)).unwrap();
-    assert_close("portra density", &cpu, &gpu, |_| DENSITY_TOLERANCE);
+    // HP5 Plus is monochrome: the CPU integrates its one silver layer once.
+    for name in ["portra400", "ilford-hp5-plus"] {
+        let parameters = bare(name);
+        let pipeline = GpuPipeline::new(gpu, &parameters);
+        let cpu = parameters.film().density(&input);
+        let gpu = pollster::block_on(pipeline.run(&[Kernel::DensitySpectral], &input)).unwrap();
+        assert_close(&format!("{name} density"), &cpu, &gpu, |_| {
+            DENSITY_TOLERANCE
+        });
+    }
 }
 
 #[test]
@@ -283,7 +288,6 @@ fn grain_case(
 #[test]
 fn grain_matches() {
     let Some(gpu) = gpu() else { return };
-    let grain = stock("portra400").grain().unwrap().clone();
     let cases = [
         // A coarse preview: every cloud is smaller than a pixel.
         (
@@ -320,8 +324,33 @@ fn grain_matches() {
             },
         ),
     ];
-    for (label, region) in cases {
-        assert_grain(label, grain_case(gpu, &grain, region, 0.0));
+    // Portra and HP5 Plus are white grain, HP5 with soft clumps in all
+    // three channels. Dye clouds and silver clumps keep their own cases.
+    let portra = stock("portra400").grain().unwrap().clone();
+    let silver = stock("ilford-hp5-plus").grain().unwrap().clone();
+    let dye = Grain::new(portra.frame_mm(), portra.seed(), portra.layers().clone())
+        .unwrap()
+        .with_size_mm([0.014, 0.011, 0.009])
+        .unwrap();
+    let clumps = Grain::monochrome(
+        silver.frame_mm(),
+        silver.seed(),
+        silver.layers()[0].clone(),
+        0.006,
+    )
+    .unwrap();
+    for (name, grain) in [
+        ("portra400", &portra),
+        ("ilford-hp5-plus", &silver),
+        ("dye clouds", &dye),
+        ("silver clumps", &clumps),
+    ] {
+        for (label, region) in cases {
+            assert_grain(
+                &format!("{name} {label}"),
+                grain_case(gpu, grain, region, 0.0),
+            );
+        }
     }
 }
 
@@ -454,7 +483,13 @@ fn develop_matches_the_cpu_pipeline() {
         }
     }
     let image = LinearImage::new(width as u32, height as u32, pixels).unwrap();
-    for name in ["velvia", "neutral", "portra400", "velvia50-spectral"] {
+    for name in [
+        "velvia",
+        "neutral",
+        "portra400",
+        "velvia50-spectral",
+        "ilford-hp5-plus",
+    ] {
         let mut parameters = stock(name);
         parameters.set_exposure_ev(0.4).unwrap();
         let cpu = Pipeline::new(parameters.clone()).develop(&image);
@@ -517,7 +552,12 @@ fn sessions(gpu: &Gpu, name: &str) -> (PreviewSession, PreviewSession) {
 #[test]
 fn session_renders_match_the_cpu() {
     let Some(gpu) = gpu() else { return };
-    for name in ["velvia", "portra400", "velvia50-spectral"] {
+    for name in [
+        "velvia",
+        "portra400",
+        "velvia50-spectral",
+        "ilford-hp5-plus",
+    ] {
         let (mut cpu, mut on_gpu) = sessions(gpu, name);
         // A crop away from the corner, so halation pads on every side and
         // grain sits at a full-frame offset.

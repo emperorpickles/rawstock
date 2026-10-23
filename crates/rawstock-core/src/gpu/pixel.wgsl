@@ -20,6 +20,10 @@ struct Params {
     // xyz: neutral balance. w: 1 for a negative, -1 for a reversal stock.
     scan_balance: vec4<f32>,
     ap1_to_ap0: array<vec4<f32>, 3>,
+    // Red, green, and blue neutral scan curves in `knots`. A zero count
+    // means the constant `scan_balance.xyz` applies instead.
+    neutral_offset: vec4<u32>,
+    neutral_len: vec4<u32>,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -67,8 +71,11 @@ fn exp10(x: f32) -> f32 {
 
 // `Curve::eval`.
 fn curve_eval(curve: u32, value: f32) -> f32 {
-    let offset = params.curve_offset[curve];
-    let len = params.curve_len[curve];
+    return knots_eval(params.curve_offset[curve], params.curve_len[curve], value);
+}
+
+// `Curve::eval` on the `len` knots at `offset`.
+fn knots_eval(offset: u32, len: u32, value: f32) -> f32 {
     let first = knots[offset];
     let last = knots[offset + len - 1u];
     var x = value;
@@ -408,9 +415,18 @@ fn dye_scan(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroup
             spectral[9u * count + index],
         );
     }
-    store(pixel, (vec3<f32>(
+    let scanned = vec3<f32>(
         -log10(floor_exposure(rgb.x)),
         -log10(floor_exposure(rgb.y)),
         -log10(floor_exposure(rgb.z)),
-    ) - params.scan_balance.xyz) * params.scan_balance.w);
+    );
+    var balanced = scanned - params.scan_balance.xyz;
+    if params.neutral_len.x > 0u {
+        balanced = vec3<f32>(
+            knots_eval(params.neutral_offset.x, params.neutral_len.x, scanned.x),
+            knots_eval(params.neutral_offset.y, params.neutral_len.y, scanned.y),
+            knots_eval(params.neutral_offset.z, params.neutral_len.z, scanned.z),
+        );
+    }
+    store(pixel, balanced * params.scan_balance.w);
 }

@@ -1,12 +1,28 @@
-//! Scanner-filtered dye-cloud grain.
+//! Scanner-filtered film grain: dye clouds for color film, silver clumps
+//! for black and white.
 //!
 //! Real color-negative grain is a Poisson field of soft dye clouds in each
 //! emulsion layer. At a scan of Portra the clouds are a few pixels across,
 //! they overlap, and the three layers are read together, so the grain is
-//! mostly luminance with a fine chroma residual. This module is that field:
-//! the high-overlap limit of the Boolean model in Newson, Delon, and Galerne
-//! (Computer Graphics Forum 36(8), 2017), evaluated in millimetres, then
-//! filtered by a scanner aperture.
+//! mostly luminance with a fine chroma residual. Developed silver is
+//! different: opaque, hard-edged clumps of filament that overlap less, so a
+//! black and white scan is crisper and skewed toward dense specks. This
+//! module is both fields: shot noise in the spirit of the Boolean model in
+//! Newson, Delon, and Galerne (Computer Graphics Forum 36(8), 2017),
+//! evaluated in millimetres, then filtered by a scanner aperture.
+//!
+//! The field is calibrated against the 48 µm aperture that granularity
+//! tables are measured through, not against a pixel. A pixel's grain then
+//! follows from cloud size, the scanner, and the pitch: a fine scan sees more
+//! than the datasheet RMS, a small preview less, the way averaging an export
+//! down to that size does.
+//!
+//! A white texture replaces the clouds with grain finer than the scanner
+//! can resolve: white noise on the film, read through the scanner spot.
+//! Scans of real Portra 400 look like that once the scanner's own blur is
+//! divided out, and its layers are nearly independent. It is drawn the way
+//! sub-pixel clouds are, per pixel and then spread by the pixel aperture,
+//! so it shares their calibration, crop padding, and GPU path.
 //!
 //! The implementation is original. It does not copy darktable, spektrafilm,
 //! or the Newson reference renderer.
@@ -14,45 +30,89 @@
 use rayon::prelude::*;
 
 use crate::render::{Cancelled, DevelopControl};
+use crate::stock::{Grain, GrainTexture};
 use crate::workers::Workers;
 
-/// Gaussian dye-cloud field for one frame.
+/// Grain field for one frame.
 ///
-/// `size_mm` is the primary dye-cloud sigma of each layer, red, green, then
+/// `size_mm` is the primary cloud sigma of each layer, red, green, then
 /// blue. Shared clouds use the geometric mean, so a clump is the same shape
-/// in every layer. Each layer also keeps a small private field at its own
-/// size. That is the chroma.
+/// in every layer. Each color layer also keeps a small private field at its
+/// own size. That is the chroma.
+///
+/// A monochrome emulsion has one silver layer. It draws silver clumps from
+/// [`SILVER_KINDS`], and every process lands in all three channels, so the
+/// field is the same in each and the grain has no chroma.
+///
+/// [`GrainTexture::White`]: one shared white process carries `correlation`
+/// of each layer's white variance and a private one per layer the rest.
+/// With `clumping`, that share of the variance is soft shared clumps of
+/// the layers' `size_mm` instead; otherwise `size_mm` is unused.
 pub(crate) struct FilmGrain {
     frame_mm: f32,
     seed: u32,
     size_mm: [f32; 3],
+    monochrome: bool,
+    texture: GrainTexture,
+    correlation: f32,
+    clumping: f32,
 }
 
 impl FilmGrain {
-    pub(crate) fn new(frame_mm: f32, seed: u32, size_mm: [f32; 3]) -> Self {
+    pub(crate) fn of(grain: &Grain) -> Self {
+        Self {
+            frame_mm: grain.frame_mm(),
+            seed: grain.seed(),
+            size_mm: grain.size_mm(),
+            monochrome: grain.is_monochrome(),
+            texture: grain.texture(),
+            correlation: grain.correlation(),
+            clumping: grain.clumping(),
+        }
+    }
+
+    /// Cloud grain without a [`Grain`], for unit tests.
+    #[cfg(test)]
+    fn clouds(frame_mm: f32, seed: u32, size_mm: [f32; 3], monochrome: bool) -> Self {
         Self {
             frame_mm,
             seed,
             size_mm,
+            monochrome,
+            texture: GrainTexture::Clouds,
+            correlation: 0.0,
+            clumping: 0.0,
         }
     }
 
-    /// Zero-mean unit-variance grain for `plane`, one sample per density.
+    fn processes(&self) -> Vec<Process> {
+        match self.texture {
+            GrainTexture::Clouds => Process::table(self.size_mm, self.monochrome),
+            GrainTexture::White => Process::white(
+                self.correlation,
+                self.clumping,
+                self.size_mm,
+                self.monochrome,
+            ),
+        }
+    }
+
+    /// Zero-mean grain for `plane`, one sample per density, in units of the
+    /// field's standard deviation through the 48 µm aperture.
     ///
-    /// The pattern does not depend on the picture. RMS is applied later, per
-    /// pixel, so a hard edge does not grow extra grain. A crop uses the full
-    /// frame's pitch and is padded by the scanner kernel, so those pixels
-    /// match the full frame.
+    /// A pixel's own deviation is [`Self::pixel_ratio`]. The pattern does not
+    /// depend on the picture. RMS is applied later, per pixel, so a hard edge
+    /// does not grow extra grain. A crop uses the full frame's pitch and is
+    /// padded by the aperture kernel, so those pixels match the full frame.
     pub(crate) fn render(
         &self,
         plane: Plane,
         control: &mut dyn DevelopControl,
     ) -> Result<Vec<f32>, Cancelled> {
         let pitch = self.frame_mm / plane.frame_width as f32;
-        let processes = Process::table(self.size_mm);
-        let scanner = Scanner::at_pitch(pitch);
-        let blur = scanner.active() && processes.iter().all(|process| process.resolved(pitch));
-        let pad = if blur { scanner.pad() } else { 0 };
+        let processes = self.processes();
+        let aperture = Aperture::for_frame(&processes, pitch);
+        let pad = aperture.map_or(0, Aperture::pad);
         let origin_x = plane.origin_x as i32 - pad;
         let origin_y = plane.origin_y as i32 - pad;
         let padded_w = plane.width as usize + pad as usize * 2;
@@ -68,22 +128,16 @@ impl FilmGrain {
             pitch,
         };
         let mut mean = [0.0_f32; 3];
-        let mut variance = [0.0_f32; 3];
+        let mut reference = [0.0_f32; 3];
         for process in &processes {
-            let (process_mean, process_variance) = process.splat(
-                &mut field,
-                target,
-                self.seed,
-                blur.then_some(scanner),
-                control,
-            )?;
+            let splat = process.splat(&mut field, target, self.seed, aperture, control)?;
             for layer in 0..3 {
-                mean[layer] += process_mean[layer];
-                variance[layer] += process_variance[layer];
+                mean[layer] += splat.mean[layer];
+                reference[layer] += splat.reference[layer];
             }
         }
-        if blur {
-            scanner.blur(&mut field, padded_w, padded_h, control)?;
+        if let Some(aperture) = aperture {
+            aperture.blur(&mut field, padded_w, padded_h, control)?;
         }
         let mut out = vec![0.0_f32; plane.rows * plane.width as usize * 3];
         for y in 0..plane.rows {
@@ -95,7 +149,7 @@ impl FilmGrain {
             }
         }
         for (index, sample) in out.iter_mut().enumerate() {
-            let spread = variance[index % 3].sqrt();
+            let spread = reference[index % 3].sqrt();
             if spread == 0.0 {
                 *sample = 0.0;
             } else {
@@ -104,18 +158,48 @@ impl FilmGrain {
         }
         Ok(out)
     }
+
+    /// Standard deviation of one pixel of [`Self::render`] at
+    /// `frame_width`, per layer, as a multiple of the 48 µm reading.
+    ///
+    /// Above 1 when pixels are finer than the clouds' reach through that
+    /// aperture, below 1 for a small preview.
+    pub(crate) fn pixel_ratio(&self, frame_width: u32) -> [f32; 3] {
+        if frame_width == 0 {
+            return [0.0; 3];
+        }
+        let pitch = self.frame_mm / frame_width as f32;
+        let processes = self.processes();
+        let aperture = Aperture::for_frame(&processes, pitch);
+        let mut variance = [0.0_f32; 3];
+        let mut reference = [0.0_f32; 3];
+        for process in processes.iter().filter(|process| process.active()) {
+            let splat = process.constants(pitch, aperture);
+            for layer in 0..3 {
+                variance[layer] += splat.variance[layer];
+                reference[layer] += splat.reference[layer];
+            }
+        }
+        std::array::from_fn(|layer| {
+            if reference[layer] == 0.0 {
+                0.0
+            } else {
+                (variance[layer] / reference[layer]).sqrt()
+            }
+        })
+    }
 }
 
 /// What the GPU needs to evaluate [`FilmGrain::render`] for one frame width.
 #[cfg(feature = "gpu")]
 pub(crate) struct GpuPlan {
     pub pitch: f32,
-    /// Whether the scanner aperture blurs the field. Implies every process
-    /// is resolved.
+    /// Whether the aperture blurs the field: the scanner when every process
+    /// is resolved, a wider pixel aperture when some are not.
     pub blur: bool,
     /// Rows and columns of field computed past each crop edge for the blur.
     pub pad: u32,
-    /// Normalized scanner taps, `2 * pad + 1` of them, when `blur`.
+    /// Normalized aperture taps, `2 * pad + 1` of them, when `blur`.
     pub kernel: Vec<f32>,
     pub processes: Vec<GpuProcess>,
     /// Subtracted from the summed field, then divided by `spread`.
@@ -138,6 +222,8 @@ pub(crate) struct GpuProcess {
     pub seed: u32,
     pub layers: u32,
     pub resolved: bool,
+    /// [`Kernel::code`].
+    pub kernel: u32,
     /// The per-pixel draw when the process is not resolved.
     pub aggregate: Option<Aggregate>,
 }
@@ -146,17 +232,16 @@ pub(crate) struct GpuProcess {
 impl FilmGrain {
     pub(crate) fn gpu_plan(&self, frame_width: u32) -> GpuPlan {
         let pitch = self.frame_mm / frame_width as f32;
-        let processes = Process::table(self.size_mm);
-        let scanner = Scanner::at_pitch(pitch);
-        let blur = scanner.active() && processes.iter().all(|process| process.resolved(pitch));
+        let processes = self.processes();
+        let aperture = Aperture::for_frame(&processes, pitch);
         let mut mean = [0.0_f32; 3];
-        let mut variance = [0.0_f32; 3];
+        let mut reference = [0.0_f32; 3];
         let mut active = Vec::new();
         for process in processes.iter().filter(|process| process.active()) {
-            let splat = process.constants(pitch, blur.then_some(scanner));
+            let splat = process.constants(pitch, aperture);
             for layer in 0..3 {
                 mean[layer] += splat.mean[layer];
-                variance[layer] += splat.variance[layer];
+                reference[layer] += splat.reference[layer];
             }
             active.push(GpuProcess {
                 cell_mm: process.cell_mm,
@@ -169,22 +254,22 @@ impl FilmGrain {
                 seed: self.seed.wrapping_add(process.salt),
                 layers: u32::from(process.layers),
                 resolved: splat.resolved,
+                kernel: process.kernel.code(),
                 aggregate: (!splat.resolved).then(|| process.aggregate(splat.amplitude, pitch)),
             });
         }
-        let (pad, kernel) = if blur {
-            (scanner.pad() as u32, scanner.kernel())
-        } else {
-            (0, Vec::new())
+        let (pad, kernel) = match aperture {
+            Some(aperture) => (aperture.pad() as u32, aperture.kernel()),
+            None => (0, Vec::new()),
         };
         GpuPlan {
             pitch,
-            blur,
+            blur: aperture.is_some(),
             pad,
             kernel,
             processes: active,
             mean,
-            spread: variance.map(f32::sqrt),
+            spread: reference.map(f32::sqrt),
         }
     }
 }
@@ -199,13 +284,84 @@ pub(crate) struct Plane {
 }
 
 /// Pixel rectangle a cloud field is splatted into. Origins may be negative
-/// so the scanner kernel can read grains that sit just outside the crop.
+/// so the aperture kernel can read grains that sit just outside the crop.
 #[derive(Clone, Copy)]
 struct Target {
     width: usize,
     origin_x: i32,
     origin_y: i32,
     pitch: f32,
+}
+
+/// The profile of one cloud.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kernel {
+    /// A soft gaussian dye cloud.
+    Dye,
+    /// A silver clump: a flat-topped disk with a short rim, `(1 - q²)²` for
+    /// `q = d² / R²`, `R` being [`Kernel::SILVER_RADIUS`] sigmas. Its
+    /// equivalent gaussian sigma is within 0.5% of the cloud's sigma, so
+    /// `size_mm` means the same thing for both kernels.
+    Silver,
+}
+
+impl Kernel {
+    /// Silver clump radius, in sigmas.
+    const SILVER_RADIUS: f32 = 2.4;
+    /// [`Self::SILVER_RADIUS`] squared. WGSL uses the same literal.
+    const SILVER_R2: f32 = 5.76;
+
+    /// How far the profile reaches, in sigmas. A dye cloud's tail past 3.5
+    /// sigmas is about 0.2% of a gaussian.
+    fn support(self) -> f32 {
+        match self {
+            Self::Dye => 3.5,
+            Self::Silver => Self::SILVER_RADIUS,
+        }
+    }
+
+    /// `∫k / (amplitude · σ²)` over the plane, for axes whose product is σ².
+    fn mass(self) -> f32 {
+        match self {
+            Self::Dye => std::f32::consts::TAU,
+            // 2πR² ∫₀¹ (1 - t⁴)² t dt = 2πR² · 4/15.
+            Self::Silver => std::f32::consts::TAU * Self::SILVER_R2 * 4.0 / 15.0,
+        }
+    }
+
+    /// `∫k² / (amplitude² · σ²)` over the plane.
+    fn energy(self) -> f32 {
+        match self {
+            Self::Dye => std::f32::consts::PI,
+            // 2πR² ∫₀¹ (1 - t⁴)⁴ t dt = 2πR² · 64/315.
+            Self::Silver => std::f32::consts::TAU * Self::SILVER_R2 * 64.0 / 315.0,
+        }
+    }
+
+    /// Variance of the gaussian with this profile's mass and energy, as a
+    /// multiple of σ². 1 for a dye cloud.
+    fn sigma2_factor(self) -> f32 {
+        self.mass().powi(2) / (4.0 * std::f32::consts::PI * self.energy())
+    }
+
+    /// The silver profile at squared distance `d2`, in sigmas.
+    fn silver(d2: f32) -> f32 {
+        let q = d2 / Self::SILVER_R2;
+        if q >= 1.0 {
+            return 0.0;
+        }
+        let rim = 1.0 - q * q;
+        rim * rim
+    }
+
+    /// The GPU's process word for this kernel.
+    #[cfg(feature = "gpu")]
+    fn code(self) -> u32 {
+        match self {
+            Self::Dye => 0,
+            Self::Silver => 1,
+        }
+    }
 }
 
 /// One Poisson process. `layers` is a bitmask, red = 1, green = 2, blue = 4.
@@ -216,31 +372,94 @@ struct Process {
     sigma_lo: f32,
     sigma_hi: f32,
     aspect_max: f32,
+    /// This process's share of a layer's variance through the 48 µm
+    /// aperture.
     variance: f32,
     layers: u8,
+    kernel: Kernel,
 }
 
 impl Process {
-    fn table(size_mm: [f32; 3]) -> [Self; PROCESS_COUNT] {
+    /// With `monochrome`, silver clumps in every layer.
+    fn table(size_mm: [f32; 3], monochrome: bool) -> Vec<Self> {
         let shared = (size_mm[0] * size_mm[1] * size_mm[2]).cbrt();
-        std::array::from_fn(|index| {
-            let kind = &PROCESS_KINDS[index];
-            let size = if kind.layers == SHARED_LAYERS {
-                shared
-            } else {
-                size_mm[kind.layers.trailing_zeros() as usize]
-            };
-            Self {
-                cell_mm: kind.cell_over_size * size,
-                mu: kind.mu,
-                salt: kind.salt,
-                sigma_lo: kind.sigma_scale[0] * size,
-                sigma_hi: kind.sigma_scale[1] * size,
-                aspect_max: kind.aspect_max,
-                variance: kind.variance,
-                layers: kind.layers,
-            }
-        })
+        let kinds: &[ProcessKind] = if monochrome {
+            &SILVER_KINDS
+        } else {
+            &DYE_KINDS
+        };
+        kinds
+            .iter()
+            .map(|kind| {
+                let size = if kind.layers == SHARED_LAYERS {
+                    shared
+                } else {
+                    size_mm[kind.layers.trailing_zeros() as usize]
+                };
+                Self {
+                    cell_mm: kind.cell_over_size * size,
+                    mu: kind.mu,
+                    salt: kind.salt,
+                    sigma_lo: kind.sigma_scale[0] * size,
+                    sigma_hi: kind.sigma_scale[1] * size,
+                    aspect_max: kind.aspect_max,
+                    variance: kind.variance,
+                    layers: kind.layers,
+                    kernel: kind.kernel,
+                }
+            })
+            .collect()
+    }
+
+    /// [`GrainTexture::White`]: one shared process with `correlation` of
+    /// each layer's white variance and a private one per layer with the
+    /// rest, or a single shared process for monochrome. `clumping` of the
+    /// variance moves into shared gaussian clumps of the mean `size_mm`.
+    ///
+    /// The white processes are dense fields of [`WHITE_SIGMA_MM`] clouds, so
+    /// every pixel holds hundreds and draws the gaussian [`Aggregate`].
+    /// Variance per pixel then follows the box and scanner exactly as
+    /// sub-pixel dye clouds do, which is Selwyn's law for white grain.
+    fn white(correlation: f32, clumping: f32, size_mm: [f32; 3], monochrome: bool) -> Vec<Self> {
+        let white = 1.0 - clumping;
+        let process = |salt: u32, variance: f32, layers: u8| Self {
+            cell_mm: WHITE_SIGMA_MM,
+            mu: 1.0,
+            salt,
+            sigma_lo: WHITE_SIGMA_MM,
+            sigma_hi: WHITE_SIGMA_MM,
+            aspect_max: 1.0,
+            variance,
+            layers,
+            kernel: Kernel::Dye,
+        };
+        let mut table = if monochrome {
+            vec![process(0x3417_0301, white, SHARED_LAYERS)]
+        } else {
+            let private = white * (1.0 - correlation);
+            vec![
+                process(0x3417_0300, white * correlation, SHARED_LAYERS),
+                process(0x3417_0311, private, 0b001),
+                process(0x3417_0322, private, 0b010),
+                process(0x3417_0333, private, 0b100),
+            ]
+        };
+        if clumping > 0.0 {
+            let size = (size_mm[0] * size_mm[1] * size_mm[2]).cbrt();
+            let clump = &CLUMP_KIND;
+            table.push(Self {
+                cell_mm: clump.cell_over_size * size,
+                mu: clump.mu,
+                salt: clump.salt,
+                sigma_lo: clump.sigma_scale[0] * size,
+                sigma_hi: clump.sigma_scale[1] * size,
+                aspect_max: clump.aspect_max,
+                variance: clumping,
+                layers: SHARED_LAYERS,
+                kernel: clump.kernel,
+            });
+        }
+        table
     }
 
     fn resolved(&self, pitch: f32) -> bool {
@@ -254,49 +473,81 @@ impl Process {
 
     /// How far a cloud's kernel reaches from its center, in millimetres.
     fn reach_mm(&self) -> f32 {
-        SUPPORT_SIGMAS * self.sigma_hi * self.aspect_max.sqrt()
+        self.kernel.support() * self.sigma_hi * self.aspect_max.sqrt()
     }
 
-    /// Per-cloud amplitude and the field's analytic mean and variance at
-    /// `pitch`. Shared by the CPU splat and the GPU upload.
-    fn constants(&self, pitch: f32, scanner: Option<Scanner>) -> Splat {
+    /// Variance of one pixel at `pitch` over variance through the 48 µm
+    /// aperture, for this process's clouds.
+    ///
+    /// A pixel averages the scanned film over its area: each cloud is
+    /// blurred by the scanner, then by the pixel's box. The aperture reads
+    /// the film directly. A cloud's mass goes as σ², so sizes weigh by σ⁴.
+    /// Aspect is left out: both sides see the same ellipses.
+    fn pixel_share(&self, pitch: f32) -> f32 {
+        const STEPS: usize = 32;
+        let factor = f64::from(self.kernel.sigma2_factor());
+        let scanner2 = f64::from(Aperture::SCANNER_MM).powi(2);
+        // A box of the 48 µm circle's area.
+        let side = f64::from(crate::stock::Grain::APERTURE_MM) * std::f64::consts::PI.sqrt() / 2.0;
+        let pitch = f64::from(pitch);
+        let lo = f64::from(self.sigma_lo);
+        let ratio = f64::from(self.sigma_hi) / lo;
+        let mut pixel = 0.0;
+        let mut reference = 0.0;
+        for step in 0..STEPS {
+            let unit = (step as f64 + 0.5) / STEPS as f64;
+            let sigma = lo * ratio.powf(unit);
+            let sigma2 = factor * sigma * sigma;
+            let weight = sigma.powi(4);
+            pixel += weight * box_energy(pitch, (sigma2 + scanner2).sqrt()).powi(2);
+            reference += weight * box_energy(side, sigma2.sqrt()).powi(2);
+        }
+        (pixel / reference) as f32
+    }
+
+    /// Per-cloud amplitude, the field's analytic mean, its variance at
+    /// `pitch` after `aperture`, and its 48 µm variance. Shared by the CPU
+    /// splat and the GPU upload.
+    fn constants(&self, pitch: f32, aperture: Option<Aperture>) -> Splat {
         let resolved = self.resolved(pitch);
         let sigma2 = log_moment(self.sigma_lo, self.sigma_hi, 2);
         let sigma4 = log_moment(self.sigma_lo, self.sigma_hi, 4);
         let (strength_mean, strength_second) = strength_moments();
         let lambda = self.mu / (self.cell_mm * self.cell_mm);
+        let variance = self.variance * self.pixel_share(pitch);
+        // What the aperture leaves of the drawn field's variance. Resolved
+        // clouds widen; per-pixel draws are white, so the taps decide.
+        let kept = aperture.map_or(1.0, |aperture| {
+            if resolved {
+                aperture.cloud_scale(self.kernel.sigma2_factor() * sigma2)
+            } else {
+                aperture.white_scale()
+            }
+        });
+        let drawn = variance / kept;
         let amplitude = if resolved {
-            (self.variance / (lambda * strength_second * std::f32::consts::PI * sigma2)).sqrt()
+            (drawn / (lambda * strength_second * self.kernel.energy() * sigma2)).sqrt()
         } else {
-            let pixel_area = pitch * pitch;
-            (self.variance * pixel_area
-                / (lambda
-                    * strength_second
-                    * 4.0
-                    * std::f32::consts::PI
-                    * std::f32::consts::PI
-                    * sigma4))
+            (drawn * pitch * pitch
+                / (lambda * strength_second * self.kernel.mass().powi(2) * sigma4))
                 .sqrt()
         };
-        let mean_density = lambda * amplitude * strength_mean * 2.0 * std::f32::consts::PI * sigma2;
-        let mut variance = self.variance;
-        if resolved && let Some(scanner) = scanner {
-            variance *= scanner.variance_scale(sigma2);
-        }
-        let mut mean = [0.0_f32; 3];
-        let mut layer_variance = [0.0_f32; 3];
-        for layer in 0..3 {
-            if self.layers & (1 << layer) != 0 {
-                mean[layer] = mean_density;
-                layer_variance[layer] = variance;
-            }
-        }
-        Splat {
+        let mean_density = lambda * amplitude * strength_mean * self.kernel.mass() * sigma2;
+        let mut splat = Splat {
             resolved,
             amplitude,
-            mean,
-            variance: layer_variance,
+            mean: [0.0; 3],
+            variance: [0.0; 3],
+            reference: [0.0; 3],
+        };
+        for layer in 0..3 {
+            if self.layers & (1 << layer) != 0 {
+                splat.mean[layer] = mean_density;
+                splat.variance[layer] = variance;
+                splat.reference[layer] = self.variance;
+            }
         }
+        splat
     }
 
     /// Per-pixel distribution of this process when its clouds are smaller
@@ -305,13 +556,13 @@ impl Process {
     /// Each sub-pixel cloud lands whole in the pixel that holds its center,
     /// so where a cloud sits inside the pixel does not matter. A pixel's sum
     /// is a compound Poisson: `N` clouds, `N ~ Poisson(λ · pitch²)`, each
-    /// adding `amplitude · strength · 2πσ² / pitch²`.
+    /// adding `amplitude · strength · mass · σ² / pitch²`.
     fn aggregate(&self, amplitude: f32, pitch: f32) -> Aggregate {
         let clouds = f64::from(self.mu) * f64::from(pitch / self.cell_mm).powi(2);
         let (strength_mean, strength_second) = strength_moments();
         let sigma2 = f64::from(log_moment(self.sigma_lo, self.sigma_hi, 2));
         let sigma4 = f64::from(log_moment(self.sigma_lo, self.sigma_hi, 4));
-        let scale = f64::from(amplitude) * std::f64::consts::TAU / f64::from(pitch).powi(2);
+        let scale = f64::from(amplitude) * f64::from(self.kernel.mass()) / f64::from(pitch).powi(2);
         let mass_mean = scale * f64::from(strength_mean) * sigma2;
         let mass_second = scale * scale * f64::from(strength_second) * sigma4;
         let mass_spread = (mass_second - mass_mean * mass_mean).max(0.0).sqrt();
@@ -348,31 +599,29 @@ impl Process {
         field: &mut [f64],
         target: Target,
         seed: u32,
-        scanner: Option<Scanner>,
+        aperture: Option<Aperture>,
         control: &mut dyn DevelopControl,
-    ) -> Result<([f32; 3], [f32; 3]), Cancelled> {
+    ) -> Result<Splat, Cancelled> {
         if !self.active() {
-            return Ok(([0.0; 3], [0.0; 3]));
+            return Ok(Splat::default());
         }
         let pitch = target.pitch;
-        let Splat {
-            resolved,
-            amplitude,
-            mean,
-            variance: layer_variance,
-        } = self.constants(pitch, scanner);
-        if !resolved {
-            let seed = seed.wrapping_add(self.salt);
-            self.aggregate(amplitude, pitch)
-                .fill(field, target, seed, self.layers, control)?;
-            return Ok((mean, layer_variance));
-        }
-
+        let splat = self.constants(pitch, aperture);
         let seed = seed.wrapping_add(self.salt);
-        Band::split(field, target, control, |band| {
-            self.splat_band(band, target, seed, amplitude);
-        })?;
-        Ok((mean, layer_variance))
+        if splat.resolved {
+            Band::split(field, target, control, |band| {
+                self.splat_band(band, target, seed, splat.amplitude);
+            })?;
+        } else {
+            self.aggregate(splat.amplitude, pitch).fill(
+                field,
+                target,
+                seed,
+                self.layers,
+                control,
+            )?;
+        }
+        Ok(splat)
     }
 
     /// Every cloud that reaches `band`'s rows, painted into them.
@@ -411,10 +660,10 @@ impl Process {
                     let aspect = log_lerp(1.0, self.aspect_max, ua);
                     let axis = aspect.sqrt();
                     let (sin, cos) = (ut * std::f32::consts::TAU).sin_cos();
-                    paint_gaussian(
+                    paint_cloud(
                         &mut band,
                         target,
-                        Gaussian {
+                        Cloud {
                             x_mm,
                             y_mm,
                             sx: sigma / axis,
@@ -423,6 +672,7 @@ impl Process {
                             cos,
                             amplitude,
                             layers: self.layers,
+                            kernel: self.kernel,
                         },
                     );
                 }
@@ -483,11 +733,15 @@ impl Band<'_> {
 }
 
 /// What one process contributes at a given pitch.
+#[derive(Default)]
 struct Splat {
     resolved: bool,
     amplitude: f32,
     mean: [f32; 3],
+    /// Per-pixel variance after the aperture.
     variance: [f32; 3],
+    /// Variance through the 48 µm aperture.
+    reference: [f32; 3],
 }
 
 /// One unresolved process, drawn per pixel instead of per cloud.
@@ -500,7 +754,9 @@ struct Splat {
 ///
 /// The cost is per pixel, not per cloud, so a preview no longer draws every
 /// cloud in the frame. The draws hash the pixel's full-frame position, so a
-/// crop at the same pitch matches the full frame.
+/// crop at the same pitch matches the full frame. The pixel aperture then
+/// spreads each pixel's mass over its neighbors, as a cloud that straddles
+/// a pixel edge does.
 pub(crate) struct Aggregate {
     pub cdf: Vec<f32>,
     pub mass_mean: f32,
@@ -566,17 +822,18 @@ struct ProcessKind {
     sigma_scale: [f32; 2],
     aspect_max: f32,
     layers: u8,
+    kernel: Kernel,
 }
 
-const PROCESS_COUNT: usize = 6;
 const SHARED_LAYERS: u8 = 0b111;
 
-/// Fine shared clouds carry the grain. A little mid and coarse structure
-/// keeps it from reading as filtered noise. The private remainder is chroma.
+/// Color film. Fine shared clouds carry the grain. A little mid and coarse
+/// structure keeps it from reading as filtered noise. The private remainder
+/// is chroma.
 ///
 /// `cell_over_size` and `mu` are chosen so a point is covered by several
 /// clouds. Variances on one layer sum to 1.
-const PROCESS_KINDS: [ProcessKind; PROCESS_COUNT] = [
+const DYE_KINDS: [ProcessKind; 6] = [
     ProcessKind {
         cell_over_size: 0.95,
         mu: 1.23,
@@ -585,6 +842,7 @@ const PROCESS_KINDS: [ProcessKind; PROCESS_COUNT] = [
         sigma_scale: [0.80, 1.15],
         aspect_max: 1.55,
         layers: SHARED_LAYERS,
+        kernel: Kernel::Dye,
     },
     ProcessKind {
         cell_over_size: 2.0,
@@ -594,6 +852,7 @@ const PROCESS_KINDS: [ProcessKind; PROCESS_COUNT] = [
         sigma_scale: [1.70, 2.50],
         aspect_max: 1.65,
         layers: SHARED_LAYERS,
+        kernel: Kernel::Dye,
     },
     ProcessKind {
         cell_over_size: 4.0,
@@ -603,6 +862,7 @@ const PROCESS_KINDS: [ProcessKind; PROCESS_COUNT] = [
         sigma_scale: [3.20, 4.60],
         aspect_max: 1.70,
         layers: SHARED_LAYERS,
+        kernel: Kernel::Dye,
     },
     ProcessKind {
         cell_over_size: 0.85,
@@ -612,6 +872,7 @@ const PROCESS_KINDS: [ProcessKind; PROCESS_COUNT] = [
         sigma_scale: [0.85, 1.25],
         aspect_max: 1.50,
         layers: 0b001,
+        kernel: Kernel::Dye,
     },
     ProcessKind {
         cell_over_size: 0.85,
@@ -621,6 +882,7 @@ const PROCESS_KINDS: [ProcessKind; PROCESS_COUNT] = [
         sigma_scale: [0.85, 1.25],
         aspect_max: 1.50,
         layers: 0b010,
+        kernel: Kernel::Dye,
     },
     ProcessKind {
         cell_over_size: 0.85,
@@ -630,17 +892,71 @@ const PROCESS_KINDS: [ProcessKind; PROCESS_COUNT] = [
         sigma_scale: [0.85, 1.25],
         aspect_max: 1.50,
         layers: 0b100,
+        kernel: Kernel::Dye,
     },
 ];
+
+/// Black and white film. Developed silver is opaque clumps, not dye clouds:
+/// hard-edged, irregular, and sparse enough that a point sees only a couple
+/// of them, so the field leans toward dense specks. Larger aggregates of
+/// clumps give the grain its tooth, and a faint soft mottle stays from the
+/// emulsion's uneven development. Variances sum to 1.
+const SILVER_KINDS: [ProcessKind; 3] = [
+    ProcessKind {
+        cell_over_size: 2.6,
+        mu: 1.0,
+        salt: 0x5117_0201,
+        variance: 0.75,
+        sigma_scale: [0.70, 1.35],
+        aspect_max: 2.2,
+        layers: SHARED_LAYERS,
+        kernel: Kernel::Silver,
+    },
+    ProcessKind {
+        cell_over_size: 4.2,
+        mu: 1.0,
+        salt: 0x5117_0202,
+        variance: 0.20,
+        sigma_scale: [1.60, 2.60],
+        aspect_max: 1.9,
+        layers: SHARED_LAYERS,
+        kernel: Kernel::Silver,
+    },
+    ProcessKind {
+        cell_over_size: 4.0,
+        mu: 1.02,
+        salt: 0x5117_0203,
+        variance: 0.05,
+        sigma_scale: [3.20, 4.60],
+        aspect_max: 1.70,
+        layers: SHARED_LAYERS,
+        kernel: Kernel::Dye,
+    },
+];
+
+/// Soft clumps of [`GrainTexture::White`] with clumping: the fine shared
+/// dye process's shape, so a point sees several and the field stays near
+/// gaussian, as HP5 scans are. `variance` is set by the stock.
+const CLUMP_KIND: ProcessKind = ProcessKind {
+    cell_over_size: 0.95,
+    mu: 1.23,
+    salt: 0xC1A3_0302,
+    variance: 0.0,
+    sigma_scale: [0.85, 1.15],
+    aspect_max: 1.5,
+    layers: SHARED_LAYERS,
+    kernel: Kernel::Dye,
+};
+
+/// Cloud sigma and cell of [`GrainTexture::White`], in millimetres. Small
+/// enough that a pixel of a 15000 px frame still holds over 64 clouds, so
+/// the count is always gaussian and the field is white at any pitch.
+const WHITE_SIGMA_MM: f32 = 0.0001;
 
 /// Below this many pixels of sigma, the photosite is the aperture: the whole
 /// cloud lands in the pixel that contains its center, and the process is
 /// drawn per pixel by [`Aggregate`].
 const RESOLVED_SIGMA_PX: f32 = 0.75;
-
-/// Kernel support, in sigmas. The tail past this is about 0.2% of a gaussian.
-const SUPPORT_SIGMAS: f32 = 3.5;
-const SUPPORT_D2: f32 = SUPPORT_SIGMAS * SUPPORT_SIGMAS;
 
 /// Per-cloud strength. A narrow range keeps the overlap high.
 const STRENGTH_LO: f32 = 0.72;
@@ -665,6 +981,48 @@ fn log_moment(lo: f32, hi: f32, power: u32) -> f32 {
 
 fn log_lerp(lo: f32, hi: f32, unit: f32) -> f32 {
     lo * (hi / lo).powf(unit)
+}
+
+/// `∫ (g ∗ u)²` along one axis, where `g` is a unit-mass gaussian of
+/// deviation `sigma` and `u` the unit-mass box of `width`: the energy one
+/// cloud leaves after averaging over that box. The square of this is the 2D
+/// figure for a square box.
+fn box_energy(width: f64, sigma: f64) -> f64 {
+    if sigma <= 0.0 {
+        return 1.0 / width;
+    }
+    let ratio = width / (2.0 * sigma);
+    if ratio < 1.0e-3 {
+        // The box is a point: the gaussian's own energy, less a sliver.
+        return (1.0 - ratio * ratio / 6.0) / (2.0 * std::f64::consts::PI.sqrt() * sigma);
+    }
+    let edge = 2.0 * sigma / std::f64::consts::PI.sqrt() * (1.0 - (-ratio * ratio).exp());
+    (width * erf(ratio) - edge) / (width * width)
+}
+
+/// The error function. A Taylor series below 3, an asymptotic tail above,
+/// both well under 1e-9 here. Only the calibration uses it.
+fn erf(x: f64) -> f64 {
+    if x < 0.0 {
+        return -erf(-x);
+    }
+    if x < 3.0 {
+        let mut term = x;
+        let mut sum = x;
+        for n in 1..80 {
+            term *= -x * x / n as f64;
+            let next = term / (2 * n + 1) as f64;
+            sum += next;
+            if next.abs() < 1.0e-17 {
+                break;
+            }
+        }
+        return 2.0 / std::f64::consts::PI.sqrt() * sum;
+    }
+    let inv2 = 1.0 / (x * x);
+    let tail = (-x * x).exp() / (x * std::f64::consts::PI.sqrt())
+        * (1.0 - 0.5 * inv2 + 0.75 * inv2 * inv2 - 1.875 * inv2 * inv2 * inv2);
+    1.0 - tail
 }
 
 struct CellDraw {
@@ -701,7 +1059,7 @@ impl CellDraw {
     }
 }
 
-struct Gaussian {
+struct Cloud {
     x_mm: f32,
     y_mm: f32,
     sx: f32,
@@ -710,14 +1068,16 @@ struct Gaussian {
     cos: f32,
     amplitude: f32,
     layers: u8,
+    kernel: Kernel,
 }
 
 /// Paint `cloud` into the rows of `band`.
 ///
-/// Along a row the exponent is quadratic in x, so the gaussian steps by a
-/// ratio that itself steps by a constant factor: two `exp` per row and one
-/// per cloud instead of one per pixel.
-fn paint_gaussian(band: &mut Band<'_>, target: Target, cloud: Gaussian) {
+/// Along a row a gaussian's exponent is quadratic in x, so the dye profile
+/// steps by a ratio that itself steps by a constant factor: two `exp` per
+/// row and one per cloud instead of one per pixel. The silver profile is a
+/// polynomial in the distance already computed for the support test.
+fn paint_cloud(band: &mut Band<'_>, target: Target, cloud: Cloud) {
     let Target {
         width,
         origin_x,
@@ -732,7 +1092,9 @@ fn paint_gaussian(band: &mut Band<'_>, target: Target, cloud: Gaussian) {
     if sx <= 0.0 || sy <= 0.0 {
         return;
     }
-    let rad = SUPPORT_SIGMAS * sx.max(sy);
+    let support = cloud.kernel.support();
+    let support_d2 = support * support;
+    let rad = support * sx.max(sy);
     let last_row = band.first_row + band.rows - 1;
     // The row walk starts at the cloud's own left edge, clipped or not, so a
     // pixel's weight does not depend on where the frame or a crop begins.
@@ -766,8 +1128,12 @@ fn paint_gaussian(band: &mut Band<'_>, target: Target, cloud: Gaussian) {
                 let xr = dx * cos + dy * sin;
                 let yr = -dx * sin + dy * cos;
                 let d2 = xr * inv_sx * xr * inv_sx + yr * inv_sy * yr * inv_sy;
-                if d2 < SUPPORT_D2 {
-                    let value = f64::from(weight);
+                if d2 < support_d2 {
+                    let value = match cloud.kernel {
+                        Kernel::Dye => weight,
+                        Kernel::Silver => cloud.amplitude * Kernel::silver(d2),
+                    };
+                    let value = f64::from(value);
                     let index = (row + x as usize) * 3;
                     for layer in 0..3 {
                         if cloud.layers & (1 << layer) != 0 {
@@ -782,59 +1148,132 @@ fn paint_gaussian(band: &mut Band<'_>, target: Target, cloud: Gaussian) {
     }
 }
 
-/// Scanner aperture. Sigma is a fixed length on the film, so a finer scan
-/// does not invent a harder grain and a coarse preview does not blur twice.
+/// The blur on the summed field.
+///
+/// When every cloud is resolved this is the scanner. Sigma is a fixed
+/// length on the film, so a finer scan does not invent a harder grain and a
+/// coarse preview does not blur twice. When some clouds are drawn per pixel,
+/// it is the pixel's own spread: a cloud whose center sits in one pixel
+/// still reaches its neighbors, so a preview keeps the neighbor correlation
+/// an export shrunk to that size has, instead of reading as white noise.
 #[derive(Clone, Copy)]
-struct Scanner {
-    sigma_px: f32,
+enum Aperture {
+    /// A gaussian scanner spot of `sigma_px`.
+    Scanner { sigma_px: f32, pitch: f32 },
+    /// Where a scanned cloud of deviation `spread_px`, centered uniformly
+    /// in a pixel, lands: that gaussian, averaged over the source pixel and
+    /// binned into whole pixels.
+    Pixel { spread_px: f32, pitch: f32 },
 }
 
-impl Scanner {
+impl Aperture {
     /// About 6 µm, a tight scan of a 35 mm frame. Smaller than a Portra dye
     /// cloud, large enough to take the pixel grid out of a resolved cloud.
-    const SIGMA_MM: f32 = 0.006;
+    const SCANNER_MM: f32 = 0.006;
 
-    fn at_pitch(pitch: f32) -> Self {
-        Self {
-            sigma_px: Self::SIGMA_MM / pitch,
+    /// A scanner spot narrower than this is nearly the identity.
+    const MIN_SIGMA_PX: f32 = 0.40;
+
+    /// A pixel spread that keeps more than this of the mass at home is
+    /// nearly the identity too.
+    const MAX_CENTER_TAP: f32 = 0.995;
+
+    fn for_frame(processes: &[Process], pitch: f32) -> Option<Self> {
+        let scanner2 = Self::SCANNER_MM * Self::SCANNER_MM;
+        let mut spread = 0.0_f32;
+        let mut weight = 0.0_f32;
+        for process in processes
+            .iter()
+            .filter(|process| process.active() && !process.resolved(pitch))
+        {
+            let share = process.variance * process.pixel_share(pitch);
+            let sigma2 =
+                process.kernel.sigma2_factor() * log_moment(process.sigma_lo, process.sigma_hi, 2);
+            spread += share * (sigma2 + scanner2);
+            weight += share;
         }
-    }
-
-    fn active(self) -> bool {
-        self.sigma_px >= 0.40
+        if weight > 0.0 {
+            let aperture = Self::Pixel {
+                spread_px: (spread / weight).sqrt() / pitch,
+                pitch,
+            };
+            let center = aperture.kernel()[aperture.pad() as usize];
+            return (center < Self::MAX_CENTER_TAP).then_some(aperture);
+        }
+        let sigma_px = Self::SCANNER_MM / pitch;
+        (sigma_px >= Self::MIN_SIGMA_PX).then_some(Self::Scanner { sigma_px, pitch })
     }
 
     fn pad(self) -> i32 {
-        if self.active() {
-            (self.sigma_px * 3.0).ceil() as i32
-        } else {
-            0
+        match self {
+            Self::Scanner { sigma_px, .. } => (sigma_px * 3.0).ceil() as i32,
+            Self::Pixel { spread_px, .. } => (spread_px * 3.0).ceil() as i32 + 1,
         }
     }
 
-    /// How much of a gaussian cloud's variance survives this aperture.
+    /// Variance of the taps, in square pixels.
+    fn variance_px2(self) -> f32 {
+        match self {
+            Self::Scanner { sigma_px, .. } => sigma_px * sigma_px,
+            Self::Pixel { .. } => {
+                let radius = self.pad();
+                self.kernel()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, tap)| tap * (index as i32 - radius).pow(2) as f32)
+                    .sum()
+            }
+        }
+    }
+
+    /// How much of a resolved cloud field's variance survives this blur.
     ///
-    /// `sigma2` is `E[σ²]` of that cloud in millimetres. An isotropic blur
-    /// multiplies `∫k²` by `σ² / (σ² + s²)`.
-    fn variance_scale(self, sigma2_mm: f32) -> f32 {
-        if !self.active() || sigma2_mm <= 0.0 {
+    /// `sigma2_mm` is `E[σ²]` of the clouds' equivalent gaussian. An
+    /// isotropic blur multiplies `∫k²` by `σ² / (σ² + s²)`.
+    fn cloud_scale(self, sigma2_mm: f32) -> f32 {
+        if sigma2_mm <= 0.0 {
             return 1.0;
         }
-        let scanner2 = Self::SIGMA_MM * Self::SIGMA_MM;
-        sigma2_mm / (sigma2_mm + scanner2)
+        let pitch = match self {
+            Self::Scanner { pitch, .. } | Self::Pixel { pitch, .. } => pitch,
+        };
+        let blur2_mm = self.variance_px2() * pitch * pitch;
+        sigma2_mm / (sigma2_mm + blur2_mm)
     }
 
-    /// Normalized Gaussian taps, `2 * pad + 1` of them.
+    /// How much of a white field's variance survives this blur: the sum of
+    /// squared taps, once per axis.
+    fn white_scale(self) -> f32 {
+        let taps: f32 = self.kernel().iter().map(|tap| tap * tap).sum();
+        taps * taps
+    }
+
+    /// Normalized taps, `2 * pad + 1` of them.
     fn kernel(self) -> Vec<f32> {
         let radius = self.pad();
-        let sigma = self.sigma_px;
-        let mut kernel = Vec::with_capacity(radius as usize * 2 + 1);
-        let mut weight = 0.0_f32;
-        for offset in -radius..=radius {
-            let tap = (-0.5 * (offset as f32 / sigma).powi(2)).exp();
-            kernel.push(tap);
-            weight += tap;
-        }
+        let mut kernel: Vec<f32> = match self {
+            Self::Scanner { sigma_px, .. } => (-radius..=radius)
+                .map(|offset| (-0.5 * (offset as f32 / sigma_px).powi(2)).exp())
+                .collect(),
+            Self::Pixel { spread_px, .. } => {
+                // The mass in pixel j is the second difference of
+                // F(t) = tΦ(t) + φ(t), the integral of the normal CDF.
+                let scale = 1.0 / f64::from(spread_px);
+                let integral = |t: f64| {
+                    let cdf = 0.5 * (1.0 + erf(t / std::f64::consts::SQRT_2));
+                    let pdf = (-0.5 * t * t).exp() / (2.0 * std::f64::consts::PI).sqrt();
+                    t * cdf + pdf
+                };
+                (-radius..=radius)
+                    .map(|offset| {
+                        let at = f64::from(offset) * scale;
+                        let mass = integral(at + scale) - 2.0 * integral(at) + integral(at - scale);
+                        (mass / scale).max(0.0) as f32
+                    })
+                    .collect()
+            }
+        };
+        let weight: f32 = kernel.iter().sum();
         for tap in &mut kernel {
             *tap /= weight;
         }
@@ -927,7 +1366,7 @@ mod tests {
 
     #[test]
     fn aggregate_matches_the_compound_poisson_moments() {
-        let process = &Process::table([0.010; 3])[0];
+        let process = &Process::table([0.010; 3], false)[0];
         let samples = 400_000;
         // A few clouds per pixel draws the count from the table. Hundreds is
         // gaussian.
@@ -938,7 +1377,8 @@ mod tests {
             assert_eq!(!aggregate.cdf.is_empty(), table, "pitch {pitch}");
             let clouds = f64::from(process.mu) * f64::from(pitch / process.cell_mm).powi(2);
             let (strength_mean, strength_second) = strength_moments();
-            let scale = f64::from(amplitude) * std::f64::consts::TAU / f64::from(pitch).powi(2);
+            let scale =
+                f64::from(amplitude) * f64::from(process.kernel.mass()) / f64::from(pitch).powi(2);
             let expect_mean = clouds
                 * scale
                 * f64::from(strength_mean)
@@ -963,38 +1403,116 @@ mod tests {
 
     #[test]
     fn unresolved_crop_matches_the_full_frame() {
-        let grain = FilmGrain::new(35.0, 11, [0.018, 0.013, 0.010]);
-        let frame_width = 360;
-        let full = grain
-            .render(
-                Plane {
-                    width: frame_width,
-                    rows: 240,
-                    origin_x: 0,
-                    origin_y: 0,
-                    frame_width,
-                },
-                &mut NopControl,
-            )
-            .unwrap();
-        let (x, y, width, rows) = (97_u32, 61_usize, 40_u32, 30_usize);
-        let crop = grain
-            .render(
-                Plane {
-                    width,
-                    rows,
-                    origin_x: x,
-                    origin_y: y as u32,
-                    frame_width,
-                },
-                &mut NopControl,
-            )
-            .unwrap();
-        for row in 0..rows {
-            let src = ((y + row) * frame_width as usize + x as usize) * 3;
-            let dst = row * width as usize * 3;
-            let count = width as usize * 3;
-            assert_eq!(crop[dst..dst + count], full[src..src + count], "row {row}");
+        for monochrome in [false, true] {
+            let grain = FilmGrain::clouds(35.0, 11, [0.018, 0.013, 0.010], monochrome);
+            let frame_width = 360;
+            let full = grain
+                .render(
+                    Plane {
+                        width: frame_width,
+                        rows: 240,
+                        origin_x: 0,
+                        origin_y: 0,
+                        frame_width,
+                    },
+                    &mut NopControl,
+                )
+                .unwrap();
+            let (x, y, width, rows) = (97_u32, 61_usize, 40_u32, 30_usize);
+            let crop = grain
+                .render(
+                    Plane {
+                        width,
+                        rows,
+                        origin_x: x,
+                        origin_y: y as u32,
+                        frame_width,
+                    },
+                    &mut NopControl,
+                )
+                .unwrap();
+            for row in 0..rows {
+                let src = ((y + row) * frame_width as usize + x as usize) * 3;
+                let dst = row * width as usize * 3;
+                let count = width as usize * 3;
+                assert_eq!(crop[dst..dst + count], full[src..src + count], "row {row}");
+            }
         }
+    }
+
+    #[test]
+    fn erf_matches_known_values() {
+        for (x, expect) in [
+            (0.0, 0.0),
+            (0.1, 0.112_462_916_018_284_9),
+            (0.5, 0.520_499_877_813_046_5),
+            (1.0, 0.842_700_792_949_714_9),
+            (2.0, 0.995_322_265_018_952_7),
+            (2.9, 0.999_958_902_121_900_6),
+            (3.5, 0.999_999_256_901_627_7),
+        ] {
+            assert!((erf(x) - expect).abs() < 1.0e-9, "erf({x}) = {}", erf(x));
+        }
+    }
+
+    #[test]
+    fn box_energy_has_the_point_and_wide_limits() {
+        let sigma = 0.01;
+        let point = 1.0 / (2.0 * std::f64::consts::PI.sqrt() * sigma);
+        assert!((box_energy(1.0e-6, sigma) / point - 1.0).abs() < 1.0e-6);
+        assert!((box_energy(0.004, sigma) / point - 1.0).abs() < 0.01);
+        // A box far wider than the cloud keeps its whole mass: 1 / width.
+        let wide = 10.0;
+        assert!((box_energy(wide, sigma) * wide - 1.0).abs() < 0.01);
+        // The series and the closed form meet.
+        let edge = 2.0 * sigma * 1.0e-3;
+        let below = box_energy(edge * 0.999, sigma);
+        let above = box_energy(edge * 1.001, sigma);
+        assert!((below / above - 1.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn silver_kernel_moments_match_the_profile() {
+        // Integrate the profile on a fine grid in sigma units.
+        let step = 0.01_f64;
+        let reach = f64::from(Kernel::SILVER_RADIUS);
+        let mut mass = 0.0;
+        let mut energy = 0.0;
+        let cells = (reach / step).ceil() as i32;
+        for y in -cells..=cells {
+            for x in -cells..=cells {
+                let (dx, dy) = ((f64::from(x) + 0.5) * step, (f64::from(y) + 0.5) * step);
+                let value = f64::from(Kernel::silver((dx * dx + dy * dy) as f32));
+                mass += value * step * step;
+                energy += value * value * step * step;
+            }
+        }
+        assert!((mass / f64::from(Kernel::Silver.mass()) - 1.0).abs() < 0.005);
+        assert!((energy / f64::from(Kernel::Silver.energy()) - 1.0).abs() < 0.005);
+        assert!((Kernel::Silver.sigma2_factor() - 1.0).abs() < 0.01);
+        assert!((Kernel::Dye.sigma2_factor() - 1.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn a_pixel_sees_more_grain_than_the_aperture_and_a_preview_less() {
+        let grain = FilmGrain::clouds(35.0, 3, [0.014, 0.011, 0.009], false);
+        // 5.7 µm pixels: finer than the clouds' reach through 48 µm.
+        let fine = grain.pixel_ratio(6160);
+        // 49 µm pixels: about the aperture itself.
+        let aperture = grain.pixel_ratio(714);
+        // 0.35 mm pixels average many apertures.
+        let coarse = grain.pixel_ratio(100);
+        for layer in 0..3 {
+            assert!(fine[layer] > 1.1, "fine {fine:?}");
+            assert!(
+                (aperture[layer] - 1.0).abs() < 0.12,
+                "aperture {aperture:?}"
+            );
+            assert!(coarse[layer] < 0.2, "coarse {coarse:?}");
+        }
+        // Smaller clouds read stronger at a fine pitch for the same RMS.
+        let small = FilmGrain::clouds(35.0, 3, [0.006; 3], true).pixel_ratio(6160);
+        let large = FilmGrain::clouds(35.0, 3, [0.012; 3], true).pixel_ratio(6160);
+        assert!(small[0] > large[0] * 1.2, "small {small:?} large {large:?}");
     }
 }

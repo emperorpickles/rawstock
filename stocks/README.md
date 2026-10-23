@@ -45,9 +45,15 @@ density = [0.15, 0.30]        # density, must not decrease
 # an RMS-granularity-versus-density table: density may not decrease, rms may.
 # rms is the Kodak number, 1000 times the density standard deviation through
 # a 48 µm aperture (read Sigma D on a Vision3 sheet and multiply by 1000).
+# texture = "white" draws grain that is white down to the scanner instead
+# of resolved dye clouds; correlation (0 to 1, color stocks) is how much of
+# it the layers share, and clumping (0 up to 1) moves that share of the
+# variance into soft clumps of size_mm.
 # [grain]
 # frame_mm = 35
 # seed = 1
+# texture = "white"               # optional; "clouds" is the default
+# correlation = 0.2               # optional; white texture only
 # [grain.red]                     # green and blue use the same keys
 # density = [0.0, 1.0, 2.0]
 # rms = [3.0, 5.0, 4.0]
@@ -129,6 +135,43 @@ the print stage the negated slide density, so print log-exposure becomes
 for viewing the slide (identity shows it as it is). `[print]` itself
 always rises. A parametric stock is always a negative and rejects the key.
 
+`neutral_scale = true` is an optional spectral key that needs
+`[dye_density]`. Without it, the scan is balanced at
+`reference_log_exposure` only. With it, gray exposures across the curves are
+scanned and each channel's scanned density is mapped onto the mean of the
+three, so every gray prints neutral, like a scanner's per-channel curves.
+Colors pass through the same three curves.
+
+`emulsion = "monochrome"` is an optional spectral key for black and white
+film. The default is `color`. A monochrome stock has one silver layer: one
+`[sensitivity]` entry, `silver`, a single `[silver]` curve in place of
+`[red]`, `[green]`, and `[blue]`, and `[grain.silver]` in place of the three
+grain layers. Core copies that layer into all three channels, so the print
+stage and the GPU run unchanged and every color develops to a neutral gray.
+Silver grain puts every cloud in all three channels, so it has no chroma.
+`[print]` inverts the silver density as usual; `[print_dye_density]` is
+allowed, for a toned paper. Dye curves, scan responses, coupling,
+`reference_log_exposure`, `neutral_scale`, and `process` are rejected, and a
+parametric stock rejects the `emulsion` key.
+
+```toml
+model = "spectral"
+emulsion = "monochrome"
+
+[sensitivity]
+silver = [0.0, 0.05, 0.0]
+
+[silver]
+log_exposure = [-3.0, 0.0]
+density = [0.0, 1.7]
+
+[grain]
+[grain.silver]
+density = [0.0, 1.0, 2.0]
+rms = [8.0, 15.0, 14.0]
+size_mm = 0.006               # silver clump sigma; one size for the layer
+```
+
 `[grain]` and `[halation]` are optional schema 1 tables. Leaving them out
 is the same file older stocks already use, so `schema_version` stays 1.
 `[grain]` holds one RMS-granularity-versus-density table per layer, the
@@ -141,7 +184,11 @@ Poisson field of overlapping dye clouds, placed in millimetres on
 instead of revealing a finer noise. Layers share some clouds and keep some
 of their own. Optional `size_mm` is that layer's primary dye-cloud sigma, in
 millimetres; omitted layers use the built-in sizes, with red coarser
-than blue.
+than blue. `texture = "white"` swaps the clouds for grain that is white down
+to the scanner, which is what V550 scans of Portra 400 and HP5 Plus show.
+`correlation` sets how much of it the layers share (default 0.2), and
+`clumping` puts that share of the variance into soft clumps of `size_mm`
+(HP5 Plus uses 0.7 at 0.011 mm).
 `[halation]` is a threshold on the peak scene-linear channel, a blur whose
 sigma is `radius` times the shorter side, and a red-weighted add-back.
 
@@ -222,14 +269,56 @@ few trace points at D-min (they rise by up to 0.035, digitizing noise) and
 extends each sensitivity trace's end slope, floored three decades below the
 peak, instead of clamping to the lowest traced value.
 
-The scan curve and grain are an **approximate aesthetic tuning**. The scan
-curve is identity through the midtones with a gentle shoulder past density
-2.2, and `print_exposure` puts the clear base at white. The grain table is
-the parametric Velvia's, carried over unchanged; Fujifilm's quoted RMS
-granularity of 9 agrees with its peak. There is no halation and no
-interlayer coupling: the saturation comes from the datasheet curves and
-dyes alone. Grays are balanced at middle gray; the datasheet curves leave
-deep shadows warm and the brightest highlights slightly cool.
+The rest is an **approximate tuning**:
+
+- `exposure_ev` is placed for rawstock's camera decode, where Fuji RAFs put
+  the metered middle gray near scene-linear 0.08, not the datasheet's 0.18.
+  It matches the parametric Velvia's brightness.
+- `neutral_scale` keeps grays neutral across the scale. The datasheet red
+  layer has less contrast, so a single balance point left shadows warm and
+  highlights cyan.
+- `[coupling]` stands in for Velvia's interlayer saturation. Each row sums
+  to 1, so neutrals are unchanged.
+- The scan curve is identity through the midtones with a gentle shoulder
+  past density 2.2, and `print_exposure` puts the clear base at white.
+- The grain table is the parametric Velvia's, carried over unchanged.
+  Fujifilm's quoted RMS granularity of 9 agrees with its peak.
+
+There is no halation.
+
+## Ilford HP5 Plus
+
+[ilford-hp5-plus.stock.toml](ilford-hp5-plus.stock.toml) is the first black
+and white stock, a monochrome spectral negative. Ilford publishes HP5
+Plus's spectral sensitivity and characteristic curve only as figures, so
+`lab/ilford_bw.py` holds readings of the two charts in the November 2018
+HP5 PLUS technical information sheet, traced from the chart images and
+calibrated to their ticks and grid, and writes the file from them.
+
+- **Sensitivity.** The wedge spectrogram to tungsten (2850 K): native blue
+  from 356 nm, a dip at 505 nm, the green peak at 575 nm, and a red edge
+  at 655 nm, so deep reds print darker than the eye sees them. Its height
+  is read as 3 decades of log sensitivity, the usual spectrograph wedge,
+  and the tungsten spectrum is divided out. That scale is an assumption:
+  the chart does not state it.
+- **Curve.** The ILFOTEC HC 1+31 curve, net of its 0.18 base plus fog: a
+  short toe and a straight line at gradient 0.64. The chart's exposure
+  axis is relative, so the ISO speed point (net 0.10) is placed at
+  `log10(0.8 / 400)` lux seconds.
+- **Print.** Kodak Professional Polymax Fine-Art paper, grade 1, from the
+  paper white. That curve is measured: the MIT-licensed `KODAK_POLYMAX`
+  module in [spectral_film_lut](https://github.com/JanLohse/spectral_film_lut).
+  Grade 1 suits a camera file, which has no lens flare to lift the shadows.
+- **Placement.** `exposure_ev` puts the camera's metered middle gray
+  (scene-linear about 0.08) on the ISO middle-gray log exposure, and
+  `print_exposure` prints it at an 18 % reflector's density.
+- **Grain and halation** are an approximate aesthetic tuning. Silver grain
+  is about Tri-X's strength, rises with density, and has a 6 µm clump sigma.
+  Halation is a faint neutral glow.
+
+FP4 Plus, the Delta films, and Pan F Plus can be added the same way: a new
+entry in the script's `FILMS` table. Ilford, HP5, and Polymax are
+trademarks of their owners.
 
 ## Velvia
 

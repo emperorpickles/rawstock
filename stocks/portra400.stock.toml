@@ -12,7 +12,7 @@
 # an approximate aesthetic tuning added by hand.
 
 schema_version = 1
-revision = 3
+revision = 5
 name = "Kodak Portra 400"
 source = "spectral_film_lut, digitized from Kodak publication E-4050 (KODAK PROFESSIONAL PORTRA 400 Film) and the KODAK PROFESSIONAL PORTRA ENDURA paper datasheet. Grain and halation are an approximate aesthetic tuning on top of those curves."
 license = "MIT"
@@ -74,29 +74,31 @@ density = [0, 0.003936, 0.009497, 0.024748, 0.055539, 0.107649, 0.175723, 0.2528
 log_exposure = [-2.9904, -2.2949, -2.0481, -1.891, -1.7676, -1.6907, -1.5801, -1.4599, -1.3702, -1.2853, -1.2019, -1.1026, -1.0288, -0.9006, -0.7853, -0.6635, -0.5449, -0.4519, -0.3269, -0.1587]
 density = [0, 0.0113, 0.0742, 0.1888, 0.3405, 0.4793, 0.7407, 1.0893, 1.3878, 1.6363, 1.8607, 2.0624, 2.1689, 2.2996, 2.3771, 2.4319, 2.4836, 2.5175, 2.5352, 2.5675]
 
-# Approximate aesthetic tuning, not a published granularity table. The shape
-# follows the Vision3 250D (5207) RMS tables spectral_film_lut carries for
-# this film: rms rises through the midtones, eases toward D-max, and the
-# blue record is the grainiest. Density is the dye amount above D-min. The
-# print curve multiplies negative grain by the paper's contrast, about 2.5,
-# so these values sit near 5207's and well under the earlier hand table.
-# size_mm is the primary dye-cloud sigma, cyan (red record) coarsest.
-# rms is 1000 times the density standard deviation through a 48 µm aperture.
+# Approximate, measured on three of Caleb's Portra 400 negatives scanned on an
+# Epson V550 (6400 ppi, gamma 2.2), not a Kodak granularity table. With the
+# scanner's blur divided out, the grain is white on the film up to about
+# 30 cycles/mm and the layers are nearly independent (correlation 0 to
+# 0.2), so it is drawn as white grain read through the scanner spot. The
+# scans give 48 µm rms of about R 8, G 9, B 17 in thin areas and R 5,
+# G 6, B 13 at mid density, so grain falls with density here, as Portra's
+# grainy shadows suggest. Density is the dye amount above D-min and maps
+# to the scans only roughly. rms is 1000 times the density standard
+# deviation through a 48 µm aperture; a 6000 px frame reads about 1.9
+# times that per pixel.
 [grain]
 frame_mm = 35
 seed = 400
+texture = "white"
+correlation = 0.2
 [grain.red]
 density = [0.0, 0.3, 0.7, 1.1, 1.5, 2.0, 2.6]
-rms = [4, 5, 7, 8, 7, 6, 5]
-size_mm = 0.014
+rms = [8.5, 7.5, 5.5, 5, 5, 4.5, 4]
 [grain.green]
 density = [0.0, 0.3, 0.7, 1.1, 1.5, 2.0, 2.6]
-rms = [4, 5, 8, 9, 8, 7, 6]
-size_mm = 0.011
+rms = [9.5, 9, 6.5, 6, 6, 5.5, 5]
 [grain.blue]
 density = [0.0, 0.3, 0.7, 1.1, 1.5, 2.0, 2.6]
-rms = [7, 8, 10, 12, 11, 10, 9]
-size_mm = 0.009
+rms = [17, 17, 15, 13, 12, 11, 10]
 
 # Approximate aesthetic tuning. Portra has an anti-halation layer, so this is
 # only a faint red fringe on highlights well above middle gray. Threshold is
