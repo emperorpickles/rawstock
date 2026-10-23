@@ -14,7 +14,7 @@ use rawstock_core::render::Stage;
 use crate::contract::{
     AppError, CacheEvictedEvent, CacheReadyEvent, CacheReason, CancelReason, CancelledEvent,
     ContractEvent, DoneEvent, EditSettings, ExportOptions, FailedEvent, ImageInfo, JobKind,
-    JobStarted, ProgressEvent, SaveResult, ThumbnailReadyEvent, settings_hash,
+    JobStarted, ProgressEvent, SaveResult, ThumbnailReadyEvent, file_label, settings_hash,
 };
 use crate::export_dest::{self, ExportAction};
 use crate::frame::{self, placeholder, stub_size};
@@ -96,8 +96,7 @@ impl ContractStub {
     fn ticks(&self, job: &Job) -> bool {
         match job.kind {
             JobKind::Thumbnails => !self.external_thumbnails,
-            JobKind::Preview | JobKind::Full => !self.external_develops,
-            JobKind::Export => true,
+            JobKind::Preview | JobKind::Full | JobKind::Export => !self.external_develops,
         }
     }
 
@@ -132,6 +131,46 @@ impl ContractStub {
             return Vec::new();
         }
         self.finish_with(job_id, Some((width, height)), Some(packed))
+    }
+
+    /// Finish an export whose JPEG is in `partial`. The partial becomes the
+    /// destination only while the job is live, under the board's lock, so
+    /// a cancel never leaves a finished file behind.
+    pub fn finish_export(
+        &mut self,
+        job_id: u64,
+        partial: &std::path::Path,
+        width: u32,
+        height: u32,
+    ) -> Vec<ContractEvent> {
+        let destination = match self.jobs.get(&job_id) {
+            Some(job) if job.kind == JobKind::Export && self.job_live(job_id) => {
+                job.output_path.clone()
+            }
+            _ => None,
+        };
+        let Some(destination) = destination else {
+            let _ = std::fs::remove_file(partial);
+            return Vec::new();
+        };
+        if let Err(error) = std::fs::rename(partial, &destination) {
+            let _ = std::fs::remove_file(partial);
+            let name = file_label(std::path::Path::new(&destination));
+            return self
+                .fail_job(
+                    job_id,
+                    AppError::internal(format!(
+                        "{name} could not be written ({error}). The RAW photo is not changed."
+                    )),
+                )
+                .unwrap_or_default();
+        }
+        self.finish_with(job_id, Some((width, height)), None)
+    }
+
+    /// Destination of an export job.
+    pub fn output_path(&self, job_id: u64) -> Option<String> {
+        self.jobs.get(&job_id)?.output_path.clone()
     }
 
     /// Path of an opened image, for the renderer.
@@ -299,9 +338,9 @@ impl ContractStub {
     /// Queue a full-frame JPEG export of `settings`.
     ///
     /// Crop, straighten, and rotation travel on `settings` and are part of
-    /// the settings hash. The develop service is still a placeholder: this
-    /// checks the destination and reports progress, and it does not decode,
-    /// render, or write pixels. A partial file is removed on cancel.
+    /// the settings hash. This checks the destination; the develop thread
+    /// writes the JPEG through [`Self::finish_export`]. A partial file is
+    /// removed on cancel.
     pub fn export_image(
         &mut self,
         image_id: &str,
@@ -637,9 +676,13 @@ impl ContractStub {
         let long_edge = job.long_edge;
         let salt = u8::try_from(id % 64).unwrap_or(0) + u8::from(job.compare) * 40;
         let (width, height) = size.unwrap_or_else(|| stub_size(long_edge));
-        let packed = frame.unwrap_or_else(|| placeholder(width, height, salt));
-        // An export is a file, not a preview bitmap. The placeholder frame
-        // stays out of the take_frame map so the UI cannot save the screen.
+        // An export is a file, not a preview bitmap. No frame is kept for
+        // take_frame, so the UI cannot save the screen.
+        let packed = if kind == JobKind::Export {
+            Vec::new()
+        } else {
+            frame.unwrap_or_else(|| placeholder(width, height, salt))
+        };
         if kind != JobKind::Thumbnails && kind != JobKind::Export {
             self.pending_frames.insert((id, None), packed.clone());
         }
@@ -1229,6 +1272,45 @@ mod tests {
         assert_eq!(std::fs::read(&raw).unwrap(), b"raw-bytes");
         assert_eq!(std::fs::read(&sidecar).unwrap(), b"side");
         assert!(stub.take_frame(job.job_id, None).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_live_export_renames_its_partial_and_a_cancelled_one_leaves_nothing() {
+        let dir = temp_dir("finish");
+        let raw = dir.join("frame.RAF");
+        std::fs::write(&raw, b"raw-bytes").unwrap();
+        let mut info = photo("frame");
+        info.path = raw.display().to_string();
+        let mut stub = ContractStub::default();
+        stub.develop_elsewhere();
+        stub.insert_image(info);
+        let jpeg = dir.join("frame.jpg");
+        let options = ExportOptions {
+            format: "jpeg".to_string(),
+            quality: 92,
+            path: jpeg.display().to_string(),
+            overwrite: false,
+        };
+        let partial = export_dest::partial_path(&jpeg);
+
+        let (first, _) = stub.export_image("frame", &settings(2), &options).unwrap();
+        let (second, _) = stub.export_image("frame", &settings(2), &options).unwrap();
+        assert!(!stub.has_running());
+        std::fs::write(&partial, b"jpeg").unwrap();
+        let events = stub.finish_export(first.job_id, &partial, 4, 3);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ContractEvent::Done(done) if done.job_id == first.job_id && (done.width, done.height) == (4, 3)
+        )));
+        assert_eq!(std::fs::read(&jpeg).unwrap(), b"jpeg");
+        assert!(!partial.exists());
+
+        stub.cancel(second.job_id);
+        std::fs::write(&partial, b"late").unwrap();
+        assert!(stub.finish_export(second.job_id, &partial, 4, 3).is_empty());
+        assert!(!partial.exists());
+        assert_eq!(std::fs::read(&jpeg).unwrap(), b"jpeg");
         let _ = std::fs::remove_dir_all(dir);
     }
 

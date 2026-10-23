@@ -448,18 +448,8 @@ impl SrgbImage {
                 let samples = quantize_u8(&self.pixels);
                 let (width, height, samples) =
                     orientation.apply_rgb(self.width, self.height, &samples);
-                let mut buffer = Vec::new();
-                let mut encoder = JpegEncoder::new_with_quality(&mut buffer, 90);
-                encoder.set_icc_profile(profile).map_err(ExportError::Icc)?;
-                encoder
-                    .write_image(&samples, width, height, ExtendedColorType::Rgb8)
-                    .map_err(|source| ExportError::Encode {
-                        path: path.display().to_string(),
-                        source,
-                    })?;
-                // Pixels are already upright. The tag stays 1 so a viewer does
-                // not rotate them a second time.
-                let stamped = ExifOrientation::stamp(&buffer);
+                let stamped =
+                    Jpeg::encode(&samples, width, height, 90).map_err(|error| error.at(path))?;
                 writer
                     .write_all(&stamped)
                     .map_err(|source| ExportError::Write {
@@ -693,6 +683,47 @@ impl OutputFormat {
             Some(Self::Tiff16)
         } else {
             None
+        }
+    }
+}
+
+/// Upright 8-bit sRGB samples encoded as a JPEG file's bytes.
+pub struct Jpeg;
+
+impl Jpeg {
+    /// `samples` are RGB8, already rotated. The sRGB ICC profile is
+    /// embedded and the EXIF orientation is 1, so a viewer does not rotate
+    /// them a second time. `quality` is 1 to 100.
+    pub fn encode(
+        samples: &[u8],
+        width: u32,
+        height: u32,
+        quality: u8,
+    ) -> Result<Vec<u8>, ExportError> {
+        let mut buffer = Vec::new();
+        let mut encoder = JpegEncoder::new_with_quality(&mut buffer, quality.clamp(1, 100));
+        encoder
+            .set_icc_profile(icc::srgb_profile())
+            .map_err(ExportError::Icc)?;
+        encoder
+            .write_image(samples, width, height, ExtendedColorType::Rgb8)
+            .map_err(|source| ExportError::Encode {
+                path: String::new(),
+                source,
+            })?;
+        Ok(ExifOrientation::stamp(&buffer))
+    }
+}
+
+impl ExportError {
+    /// Name `path` on an encode error raised before the file was known.
+    fn at(self, path: &Path) -> Self {
+        match self {
+            Self::Encode { source, .. } => Self::Encode {
+                path: path.display().to_string(),
+                source,
+            },
+            other => other,
         }
     }
 }
