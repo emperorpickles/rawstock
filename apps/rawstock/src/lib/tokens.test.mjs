@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { PreviewSchedule } from "./preview.ts";
+import { PreviewInbox, PreviewSchedule } from "./preview.ts";
 import { Preferences } from "./preferences/settings.ts";
 
 test("theme defaults to warm and survives a json round trip", () => {
@@ -42,6 +42,18 @@ test("applying a theme sets data-theme and leaves the surround neutral", () => {
   assert.equal(root.dataset.theme, "neutral");
   assert.equal(root.style.props["--surround"], "#7a7a7a");
   assert.equal(root.style.props["--surround-ink"], "#141414");
+});
+
+test("a preview result that arrives before the job id is kept and applied", () => {
+  const inbox = new PreviewInbox();
+  inbox.expect();
+  assert.equal(inbox.receive({ jobId: 4, kind: "done" }), "early");
+  assert.equal(inbox.receive({ jobId: 3, kind: "done" }), "early");
+  const { matched, stale } = inbox.note(4);
+  assert.equal(matched.jobId, 4);
+  assert.deepEqual(stale.map((notice) => notice.jobId), [3]);
+  assert.equal(inbox.receive({ jobId: 4, kind: "failed" }), "current");
+  assert.equal(inbox.receive({ jobId: 3, kind: "done" }), "stale");
 });
 
 test("a drag asks for 720 and a release asks for the screen, with no queue", () => {

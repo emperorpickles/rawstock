@@ -34,17 +34,16 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
 - Ilford HP5 Plus, the first black and white stock (#76):
   `emulsion = "monochrome"` (one silver layer, silver grain, CPU and GPU),
   curves digitized from Ilford's datasheet charts by `lab/ilford_bw.py`.
+- 1.0 app adjust panel (#39, #86): exposure, print, dye, contrast, grain,
+  and halation, as-shot white balance, scan look, and crop, straighten, and
+  rotate. Warm and neutral themes. A zoomed drag develops the full frame
+  once on release, and preview events that beat the command are buffered.
 
 ## In flight
 
-- **#39** — 1.0 app adjust panel (`agent: grok`). Exposure, print, dye,
-  contrast, grain, and halation sliders, as-shot white balance, scan look,
-  and crop, straighten, and rotate. Edits go through the sidecar and
-  `develop_preview`. Warm and neutral themes. Depends on #37, which is on
-  `main`.
-- **#41** — 1.0 JPEG export dialog (`agent: grok`, draft on
-  `grok/export-dialog`, builds on #39). Quality, save path, overwrite
-  confirmation, and cancel. The develop service still does not write pixels.
+- **#41** — 1.0 JPEG export dialog (`agent: grok`, `grok/export-dialog`,
+  builds on #86). Quality, save path, overwrite confirmation, and cancel.
+  The develop service still does not write pixels.
 - **#17** — Provia simulation fit (`agent: grok`, `stage: holding`).
   Waiting on more Provia RAF+JPEG pairs from Caleb. Pairs already in hand
   are held out. Do not commit them.
@@ -78,6 +77,13 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   with layer `correlation` and soft `clumping`, measured on V550 scans of
   Portra 400 and HP5 Plus; Portra, the Velvias, and HP5 use it. Portra
   grain is about 8× faster.
+- **#40** — 1.0 app review view (`agent: claude`, `stage: ready`). Fit
+  shows the proxy; 100% and 200% pan one `develop_full` per settings state
+  as a client texture (`get_region` past 128 MB or under memory pressure),
+  with no develop while panning. Split with a keyboard divider, A/B (`\`),
+  and a clipping overlay (`J`). Logic in `apps/rawstock/src/lib/review/`.
+  The backend still returns the stub's placeholder frames until the real
+  develop service lands.
 - **#52, #53** — 1.0 app presets and export queue (`agent: claude`,
   `stage: holding`) until #39 and #41 land.
 
