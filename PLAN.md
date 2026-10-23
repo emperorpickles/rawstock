@@ -29,6 +29,9 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
 - Chromatic aberration correction for X-Trans and Bayer: red/blue
   registration (#62) and a blue/purple defringe, behind one switch in
   core, the CLI (`--no-ca-correction`) and the tuner (#71).
+- Ilford HP5 Plus, the first black and white stock (#76):
+  `emulsion = "monochrome"` (one silver layer, silver grain, CPU and GPU),
+  curves digitized from Ilford's datasheet charts by `lab/ilford_bw.py`.
 
 ## In flight
 
@@ -55,10 +58,6 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   Exposure placed for camera files, a new spectral `neutral_scale` key
   (per-channel neutral scan balance, CPU and GPU), and an approximate
   saturation coupling.
-- **#76** — Ilford HP5 Plus, the first black and white stock (`agent:
-  claude`, `stage: ready`, waiting on Caleb's look review). Adds
-  `emulsion = "monochrome"` (one silver layer and silver grain, CPU and
-  GPU) and `lab/ilford_bw.py` for further Ilford films.
 - **#52, #53** — 1.0 app presets and export queue (`agent: claude`,
   `stage: holding`) until #39 and #41 land.
 
