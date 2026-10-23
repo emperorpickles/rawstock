@@ -79,7 +79,7 @@ mod tests {
     fn repo_stocks_load_with_a_revision() {
         let stocks = list().expect("stocks");
         let portra = stocks.iter().find(|stock| stock.id == "portra400").unwrap();
-        assert_eq!(portra.revision, 3);
+        assert_eq!(portra.revision, 4);
         assert_eq!(portra.category, StockCategory::ColorNegative);
         assert_eq!(portra.model, "spectral");
         let velvia = stocks.iter().find(|stock| stock.id == "velvia").unwrap();

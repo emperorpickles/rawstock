@@ -1,0 +1,64 @@
+# Ilford HP5 Plus, schema 1 monochrome spectral stock.
+# Written by lab/ilford_bw.py. The sensitivity and characteristic
+# curve are digitized from the figures in Ilford's HP5 PLUS technical information, Nov 2018:
+# the wedge spectrogram to tungsten (2850 K) and the
+# ILFOTEC HC 1+31, 6.5 min at 20 C curve. Reading the spectrogram as
+# 3 decades of log sensitivity and placing the curve by ISO
+# speed are assumptions; see the script. Grain and halation are an
+# approximate aesthetic tuning.
+#
+# The print is Kodak Polymax Fine-Art paper, grade 1, measured,
+# from the MIT-licensed KODAK_POLYMAX module in Jan Lohse,
+# spectral_film_lut (https://github.com/JanLohse/spectral_film_lut).
+
+schema_version = 1
+revision = 3
+name = "Ilford HP5 Plus"
+source = "Digitized from the figures in Ilford HP5 PLUS technical information, Nov 2018 (wedge spectrogram to tungsten 2850 K, characteristic curve in ILFOTEC HC 1+31, 6.5 min at 20 C). The spectrogram is read as 3 decades of log sensitivity with the tungsten source divided out, and the curve is placed by ISO speed: approximate. Grain and halation are an approximate aesthetic tuning. Print curve: Kodak Professional Polymax Fine-Art paper grade 1 from spectral_film_lut (MIT, Jan Lohse)."
+license = "MIT"
+model = "spectral"
+emulsion = "monochrome"
+
+# Stops that place the camera's metered middle gray (scene-linear
+# about 0.08) on log10(12.5 / ISO).
+exposure_ev = -1.356144
+# Prints that middle gray at an 18 % reflector's density.
+print_exposure = 2.175325
+
+wavelength_nm = [380, 390, 400, 410, 420, 430, 440, 450, 460, 470, 480, 490, 500, 510, 520, 530, 540, 550, 560, 570, 580, 590, 600, 610, 620, 630, 640, 650, 660, 670, 680, 690, 700, 710, 720, 730, 740, 750, 760, 770, 780]
+
+# The datasheet spectrogram as equal-energy sensitivity, integral 1.
+[sensitivity]
+silver = [0.001271, 0.002901, 0.004754, 0.005584, 0.005781, 0.006049, 0.005966, 0.005543, 0.005019, 0.004425, 0.003668, 0.002958, 0.002319, 0.002251, 0.002523, 0.003045, 0.003695, 0.004351, 0.004972, 0.005073, 0.004621, 0.003506, 0.002669, 0.002456, 0.002714, 0.002281, 0.000151, 0.000011, 0.000006, 0.000006, 0.000006, 0.000006, 0.000006, 0.000006, 0.000006, 0.000006, 0.000006, 0.000006, 0.000006, 0.000006, 0.000006]
+
+# The datasheet curve, net of base + fog. The ISO speed point
+# (net 0.10) is placed at log10(0.8 / ISO) lux seconds.
+[silver]
+log_exposure = [-3.799, -3.299, -3.099, -2.999, -2.899, -2.799, -2.699, -2.599, -2.499, -2.399, -2.299, -2.199, -2.099, -1.999, -1.899, -1.799, -1.599, -1.399, -1.199, -0.999, -0.799, -0.599, -0.399, -0.199, 0.001, 0.201, 0.301]
+density = [0, 0, 0.015, 0.03, 0.05, 0.07, 0.1, 0.14, 0.18, 0.22, 0.28, 0.34, 0.4, 0.47, 0.54, 0.61, 0.73, 0.87, 1, 1.13, 1.25, 1.38, 1.5, 1.63, 1.76, 1.88, 1.94]
+
+# Kodak Polymax Fine-Art, grade 1, from the paper white.
+[print]
+log_exposure = [0.203, 0.3303, 0.5525, 0.697, 0.7725, 0.8243, 0.8675, 0.9365, 1.0325, 1.1587, 1.3129, 1.4521, 1.5707, 1.6926, 1.7983, 1.9159, 2.0044, 2.0874, 2.1273, 2.1737, 2.2719, 2.3927, 2.507, 2.7939]
+density = [0, 0.0011, 0.0033, 0.0108, 0.0195, 0.0378, 0.0637, 0.1187, 0.2385, 0.4187, 0.6454, 0.8526, 1.0447, 1.2529, 1.4677, 1.7504, 1.962, 2.1249, 2.1799, 2.2177, 2.2555, 2.2598, 2.2598, 2.2598]
+
+# Approximate aesthetic tuning, not a published granularity table.
+# Silver grain: one layer of hard-edged silver clumps, the same in
+# every channel. rms is 1000 times the density standard deviation
+# through a 48 um aperture, and rises with density. A 6160 px frame
+# reads about 1.5 times that per pixel with 6 um clumps.
+[grain]
+frame_mm = 35
+seed = 5
+[grain.silver]
+density = [0, 0.3, 0.7, 1.1, 1.5, 2]
+rms = [5.3, 7.2, 9.2, 9.9, 9.9, 9.2]
+size_mm = 0.006
+
+# Approximate. A faint neutral glow: the anti-halation dye clears in
+# processing. The film integrates all three channels, so equal
+# weights keep it gray.
+[halation]
+threshold = 0.25
+radius = 0.008
+weight = [0.04, 0.04, 0.04]

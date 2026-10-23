@@ -37,8 +37,8 @@ exists only because that integral is slow on the CPU.
   uploaded once per device, on the first spectral stock.
 - `crates/rawstock-core/src/gpu/halation.wgsl`: threshold, the three Kovesi
   box passes, and the add-back.
-- `crates/rawstock-core/src/gpu/grain.wgsl`: the dye-cloud field, the
-  scanner blur, and the RMS mix.
+- `crates/rawstock-core/src/gpu/grain.wgsl`: the dye-cloud and silver
+  field, the aperture blur, and the RMS mix.
 - `crates/rawstock-core/src/gpu/tests.rs`: the parity tests.
 
 Buffers use the CPU layout: interleaved RGB, one `f32` per sample. A frame
@@ -72,7 +72,9 @@ can be fetched directly and the clouds are the CPU's clouds:
   uploaded.
 
 Only the Gaussian's `exp`, `sin`, and `cos`, the `f32` sum, and its order
-differ.
+differ. A silver clump's profile is a polynomial, so it differs only in the
+sum. The profile is a per-process word in the upload, and the tile store
+holds one process at a time, so the stored clouds need no profile field.
 
 A process whose clouds are smaller than a pixel is not gathered. Each
 sample draws its sum directly, as `Aggregate::sample` does on the CPU: the
@@ -81,7 +83,9 @@ cloud count from the same uploaded CDF table, compared against the same
 and `cos` are the only difference.
 
 Chunks are whole rows. Each chunk's field is evaluated on a band padded by
-the scanner kernel's reach, so the blur never clamps at a band edge for a
+the aperture kernel's reach (the scanner, or the pixel aperture when some
+clouds are drawn per pixel; its taps are computed on the CPU), so the blur
+never clamps at a band edge for a
 pixel that is kept, and chunking does not change the result.
 
 The field is the slow part. Gathered per sample, each pixel would redraw

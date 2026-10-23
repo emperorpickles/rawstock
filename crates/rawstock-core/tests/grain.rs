@@ -49,71 +49,160 @@ fn mean_density_is_preserved() {
         (mean - density0).abs() < (8.0 * stderr).max(0.02),
         "mean {mean} density {density0} stderr {stderr}"
     );
-    let expected = 1000.0 / 1000.0;
+    // rms 1000 is a 48 µm deviation of 1. A pixel reads the pixel ratio.
+    let expected = grain.pixel_ratio(width)[1];
     assert!(
-        (std - expected).abs() < 0.08,
+        (std / expected - 1.0).abs() < 0.08,
         "std {std} expected {expected}"
     );
 }
 
 #[test]
 fn grain_statistics_scale_with_resolution() {
-    // frame_mm = 4 makes the 48 µm aperture 1.536 px at width 128 and 3.072 px
-    // at width 256, so both images are in the "aperture covers a pixel" regime.
-    let narrow = grain(4.0, 3, 1000.0);
-    let wide_width = 256_u32;
-    let narrow_width = 128_u32;
-    assert!(
-        (narrow.cell_px(wide_width) / narrow.cell_px(narrow_width) - 2.0).abs() < 1.0e-5,
-        "cell size did not double with width"
-    );
-    assert!(
-        (narrow.cell_px(narrow_width) - Grain::APERTURE_MM / 4.0 * narrow_width as f32).abs()
-            < 1.0e-4
-    );
-
+    // A 4 mm frame at 128 and 256 px: pixels of 31 and 16 µm.
+    let small = grain(4.0, 3, 1000.0);
     let height = 96_u32;
-    let std_narrow = field_std(&narrow, narrow_width, height);
-    let std_wide = field_std(&narrow, wide_width, height);
-    // Specified: above one pixel per aperture, density std stays at rms/1000.
-    assert!((std_narrow - 1.0).abs() < 0.08, "narrow std {std_narrow}");
-    assert!((std_wide - 1.0).abs() < 0.08, "wide std {std_wide}");
-    assert!(
-        (std_wide / std_narrow - 1.0).abs() < 0.08,
-        "std ratio {} was not invariant",
-        std_wide / std_narrow
-    );
+    for width in [128_u32, 256] {
+        let std = field_std(&small, width, height);
+        let expect = small.pixel_ratio(width)[1];
+        assert!(
+            (std / expect - 1.0).abs() < 0.08,
+            "width {width}: std {std} expected {expect}"
+        );
+        // The aperture is not a flat cell. Adjacent samples must not repeat.
+        assert!(
+            equal_neighbor_fraction(&small, width, height) < 0.01,
+            "width {width} has flat runs"
+        );
+        assert_eq!(leading_run(&small, width, height), 1);
+    }
 
-    // The aperture is not a flat cell. Adjacent samples must not repeat.
+    // Finer pixels see more grain, and the 48 µm figure sits in between:
+    // a pixel of about the aperture reads close to rms.
+    let ratio = |width: u32| small.pixel_ratio(width)[1];
+    assert!(ratio(256) > ratio(128));
+    let aperture_width = (4.0 / Grain::APERTURE_MM).round() as u32;
     assert!(
-        equal_neighbor_fraction(&narrow, narrow_width, height) < 0.01,
-        "narrow frame still has flat runs"
+        (ratio(aperture_width) - 1.0).abs() < 0.15,
+        "a 48 µm pixel reads {} of rms",
+        ratio(aperture_width)
     );
+    // Far coarser than the aperture, deviation falls nearly as the pixel
+    // side; the coarsest clouds still straddle pixel edges.
+    let full = grain(Grain::FRAME_MM, 5, 1000.0);
+    let fall = full.pixel_ratio(160)[1] / full.pixel_ratio(80)[1];
     assert!(
-        equal_neighbor_fraction(&narrow, wide_width, height) < 0.01,
-        "wide frame still has flat runs"
+        (1.75..2.05).contains(&fall),
+        "deviation ratio {fall} for a 2x pixel"
     );
-    assert_eq!(leading_run(&narrow, narrow_width, height), 1);
-    assert_eq!(leading_run(&narrow, wide_width, height), 1);
-
-    // Coarser than the aperture: one pixel covers several cells, and the
-    // density std scales with sqrt(cell_px), which is sqrt(width).
-    let fine_frame = grain(Grain::FRAME_MM, 5, 1000.0);
-    let low = 80_u32;
-    let high = 160_u32;
-    assert!(fine_frame.cell_px(high) < 1.0);
-    let std_low = field_std(&fine_frame, low, 60);
-    let std_high = field_std(&fine_frame, high, 60);
-    let expect = (fine_frame.cell_px(high) / fine_frame.cell_px(low)).sqrt();
+    let std_low = field_std(&full, 80, 60);
+    let std_high = field_std(&full, 160, 60);
     assert!(
-        (std_high / std_low - expect).abs() < 0.06,
-        "sub-pixel std ratio {} expected {expect}",
+        (std_high / std_low / fall - 1.0).abs() < 0.06,
+        "sub-pixel std ratio {} expected {fall}",
         std_high / std_low
     );
-    assert!(
-        (std_low - fine_frame.cell_px(low).sqrt()).abs() < 0.05,
-        "sub-pixel std {std_low}"
-    );
+}
+
+#[test]
+fn a_preview_matches_the_export_shrunk_to_its_size() {
+    // A 6 mm strip of a 35 mm frame: 1056 px at the full width, then a
+    // quarter of that, each pixel the mean of a 4×4 block.
+    for monochrome in [false, true] {
+        let layer = flat(1000.0);
+        let grain = if monochrome {
+            Grain::monochrome(Grain::FRAME_MM, 7, layer, 0.006).unwrap()
+        } else {
+            Grain::new(Grain::FRAME_MM, 7, [layer.clone(), layer.clone(), layer]).unwrap()
+        };
+        let (frame, width, height, k) = (6160_u32, 1056_u32, 256_u32, 4_usize);
+        let render = |frame_width: u32, width: u32, height: u32| {
+            let mut density = vec![1.0_f32; width as usize * height as usize * 3];
+            grain
+                .apply_region(
+                    &mut density,
+                    GrainRegion {
+                        width,
+                        height,
+                        origin_x: frame_width / 4,
+                        origin_y: frame_width / 8,
+                        frame_width,
+                    },
+                    &mut NopControl,
+                )
+                .unwrap();
+            density
+        };
+        let full = render(frame, width, height);
+        let (sw, sh) = (width as usize / k, height as usize / k);
+        let mut shrunk = vec![0.0_f32; sw * sh * 3];
+        for y in 0..sh {
+            for x in 0..sw {
+                for c in 0..3 {
+                    let mut sum = 0.0;
+                    for j in 0..k {
+                        for i in 0..k {
+                            sum += full[((y * k + j) * width as usize + x * k + i) * 3 + c];
+                        }
+                    }
+                    shrunk[(y * sw + x) * 3 + c] = sum / (k * k) as f32;
+                }
+            }
+        }
+        let preview = render(frame / k as u32, sw as u32, sh as u32);
+        let (_, std_shrunk) = mean_std(&shrunk);
+        let (_, std_preview) = mean_std(&preview);
+        assert!(
+            (std_preview / std_shrunk - 1.0).abs() < 0.1,
+            "monochrome {monochrome}: preview std {std_preview}, shrunk {std_shrunk}"
+        );
+        let lag_shrunk = mean_acf(&shrunk, sw as u32, 1);
+        let lag_preview = mean_acf(&preview, sw as u32, 1);
+        assert!(
+            (lag_preview - lag_shrunk).abs() < 0.15,
+            "monochrome {monochrome}: preview lag-1 {lag_preview}, shrunk {lag_shrunk}"
+        );
+    }
+}
+
+#[test]
+fn silver_grain_is_skewed_toward_dense_specks() {
+    let layer = flat(1000.0);
+    let silver = Grain::monochrome(Grain::FRAME_MM, 9, layer.clone(), 0.006).unwrap();
+    let dye = Grain::new(Grain::FRAME_MM, 9, [layer.clone(), layer.clone(), layer])
+        .unwrap()
+        .with_size_mm([0.006; 3])
+        .unwrap();
+    let skew = |grain: &Grain| {
+        let mut density = vec![1.0_f32; 400 * 300 * 3];
+        grain
+            .apply_region(
+                &mut density,
+                GrainRegion {
+                    width: 400,
+                    height: 300,
+                    origin_x: 2000,
+                    origin_y: 1500,
+                    frame_width: 6160,
+                },
+                &mut NopControl,
+            )
+            .unwrap();
+        let green: Vec<f64> = density
+            .iter()
+            .skip(1)
+            .step_by(3)
+            .map(|v| f64::from(*v))
+            .collect();
+        let n = green.len() as f64;
+        let mean = green.iter().sum::<f64>() / n;
+        let var = green.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n;
+        green.iter().map(|v| (v - mean).powi(3)).sum::<f64>() / n / var.powf(1.5)
+    };
+    let silver_skew = skew(&silver);
+    let dye_skew = skew(&dye);
+    assert!(silver_skew > 0.4, "silver skew {silver_skew}");
+    assert!(dye_skew < 0.35, "dye skew {dye_skew}");
 }
 
 #[test]
@@ -337,8 +426,13 @@ fn resolved_clouds_stay_soft_and_a_crop_matches() {
         "neighbor roughness {rough:?} is still a hard pixel step"
     );
     let std = channel_std(&density);
+    let expect = grain.pixel_ratio(6160);
     for (channel, value) in std.iter().enumerate() {
-        assert!((value - 1.0).abs() < 0.08, "channel {channel} std {value}");
+        assert!(
+            (value / expect[channel] - 1.0).abs() < 0.08,
+            "channel {channel} std {value} expected {}",
+            expect[channel]
+        );
     }
     assert!(equal_neighbor_fraction_of(&density, width) < 0.01);
 

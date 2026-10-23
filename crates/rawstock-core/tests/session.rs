@@ -394,6 +394,7 @@ fn shipped_stocks_round_trip() {
         "portra400.stock.toml",
         "velvia.stock.toml",
         "velvia50-spectral.stock.toml",
+        "ilford-hp5-plus.stock.toml",
     ] {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../../stocks/{name}"));
         let stock = Stock::load(&path).unwrap();
@@ -521,6 +522,7 @@ fn assert_same_parameters(left: &Parameters, right: &Parameters) {
         (Some(a), Some(b)) => {
             assert_eq!(a.frame_mm().to_bits(), b.frame_mm().to_bits());
             assert_eq!(a.seed(), b.seed());
+            assert_eq!(a.is_monochrome(), b.is_monochrome());
             for (left, right) in a.size_mm().into_iter().zip(b.size_mm()) {
                 assert_eq!(left.to_bits(), right.to_bits());
             }

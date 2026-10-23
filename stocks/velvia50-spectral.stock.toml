@@ -8,25 +8,41 @@
 # in-camera JPEGs, so the two can be compared. Velvia is a slide film: its
 # density falls as exposure rises, and the developed dyes are the image.
 #
-# The scan curve and the grain table are an approximate aesthetic tuning,
-# not measurements. Velvia is a Fujifilm trademark.
+# The exposure placement, neutral scan balance, interlayer coupling, scan
+# curve, and grain table are an approximate tuning, not measurements.
+# Velvia is a Fujifilm trademark.
 
 schema_version = 1
-revision = 1
+revision = 3
 name = "Fuji Velvia 50 (spectral)"
-source = "spectral_film_lut FUJI_VELVIA_50, digitized from the Fujifilm Fujichrome Velvia 50 datasheet. The scan curve and grain are an approximate aesthetic tuning on top of those curves."
+source = "spectral_film_lut FUJI_VELVIA_50, digitized from the Fujifilm Fujichrome Velvia 50 datasheet. Exposure placement, neutral scan balance, coupling, scan curve, and grain are an approximate tuning on top of those curves."
 license = "MIT"
 model = "spectral"
 process = "reversal"
+# Approximate tuning. The datasheet red layer has lower contrast than green
+# and blue, so one balance point leaves shadows warm and highlights cyan.
+# Like a scanner's per-channel curves, this keeps every gray neutral.
+neutral_scale = true
 
-# Stops that place scene-linear 0.18 on log10(12.5 / ISO).
-exposure_ev = 0.473931
+# Approximate placement for rawstock's camera decode. The datasheet puts
+# scene-linear 0.18 on log10(12.5 / ISO), which is 0.47 stops. Fuji RAFs
+# decode with the camera's metered middle gray near 0.08, about 1.33 stops
+# lower, so the slide was underexposed. This matches the parametric
+# Velvia's placement: scene 0.08 prints as display middle gray.
+exposure_ev = 1.80
 # Puts the scanned clear base (D-min) at white.
 print_exposure = -0.169247
 # The spectral scan balances this log exposure to neutral.
 reference_log_exposure = -0.602060
 
 wavelength_nm = [380, 390, 400, 410, 420, 430, 440, 450, 460, 470, 480, 490, 500, 510, 520, 530, 540, 550, 560, 570, 580, 590, 600, 610, 620, 630, 640, 650, 660, 670, 680, 690, 700, 710, 720, 730, 740, 750, 760, 770, 780]
+
+# Approximate aesthetic tuning. Velvia's saturation comes largely from
+# interlayer (interimage) effects, which the datasheet curves do not carry.
+# Each row sums to 1, so a neutral log exposure is unchanged; a colored
+# exposure is pushed away from gray.
+[coupling]
+matrix = [[1.4, -0.2, -0.2], [-0.2, 1.4, -0.2], [-0.2, -0.2, 1.4]]
 
 [sensitivity]
 red = [0.000024, 0.000024, 0.000024, 0.000024, 0.000024, 0.000024, 0.000024, 0.000024, 0.000024, 0.000024, 0.000024, 0.000024, 0.000024, 0.000024, 0.000024, 0.000024, 0.000025, 0.000065, 0.00017, 0.000442, 0.001149, 0.002926, 0.004423, 0.00514, 0.006415, 0.010137, 0.017919, 0.023468, 0.015447, 0.005588, 0.003374, 0.001798, 0.000667, 0.000248, 0.000092, 0.000034, 0.000024, 0.000024, 0.000024, 0.000024, 0.000024]
@@ -61,21 +77,26 @@ density = [-1, 0, 1, 2.2, 2.75, 3.15]
 # Carried over from velvia.stock.toml (#20): an approximate aesthetic tuning,
 # not a published granularity table. Velvia 50 is a very fine-grained slide
 # film, about a third of Portra 400's rms, with 6–10 µm dye clouds. Fujifilm
-# quotes RMS granularity 9 for Velvia 50, in line with the peak here. Density
-# above 2.6 (deep shadows on a slide) holds the last rms. rms is 1000 times
-# the density standard deviation through a 48 µm aperture.
+# quotes RMS granularity 9 for Velvia 50; with these small clouds that reads
+# too coarse at 100%, so the peak here sits lower. Density above 2.6 (deep
+# shadows on a slide) holds the last rms. rms is 1000 times the density
+# standard deviation through a 48 µm aperture.
+# Since #79 the grain field is calibrated through that aperture, so a
+# pixel reads more than rms when the clouds are finer than its reach. These
+# values are the earlier per-pixel tuning divided by that ratio at a 6160 px
+# frame, so a 100% export keeps its look and a preview matches it.
 [grain]
 frame_mm = 35
 seed = 50
 [grain.red]
 density = [0.15, 0.40, 0.80, 1.20, 1.70, 2.20, 2.60]
-rms = [4, 5, 7, 8, 7, 6, 5]
+rms = [2.8, 3.5, 4.8, 5.5, 4.8, 4.2, 3.5]
 size_mm = 0.010
 [grain.green]
 density = [0.15, 0.40, 0.80, 1.20, 1.70, 2.20, 2.60]
-rms = [4, 6, 8, 9, 8, 7, 5]
+rms = [2.8, 4.1, 5.5, 6.2, 5.5, 4.8, 3.4]
 size_mm = 0.0075
 [grain.blue]
 density = [0.15, 0.40, 0.80, 1.20, 1.70, 2.20, 2.60]
-rms = [5, 7, 9, 10, 9, 8, 6]
+rms = [3.4, 4.8, 6.2, 6.9, 6.2, 5.5, 4.1]
 size_mm = 0.006

@@ -138,6 +138,7 @@ struct FieldKey {
     frame_mm: u32,
     seed: u32,
     size_mm: [u32; 3],
+    monochrome: bool,
     region: [u32; 5],
     rows: u64,
 }
@@ -148,6 +149,7 @@ impl FieldKey {
             frame_mm: grain.frame_mm().to_bits(),
             seed: grain.seed(),
             size_mm: grain.size_mm().map(f32::to_bits),
+            monochrome: grain.is_monochrome(),
             region: [
                 region.width,
                 region.height,
@@ -434,6 +436,10 @@ struct StageParams {
     spectral: [u32; 4],
     scan_balance: [f32; 4],
     ap1_to_ap0: [[f32; 4]; 3],
+    /// Knot offsets and counts of the red, green, and blue neutral scan
+    /// curves. A zero count means the constant `scan_balance` applies.
+    neutral_offset: [u32; 4],
+    neutral_len: [u32; 4],
 }
 
 /// The film pipeline on a [`Gpu`], for one set of [`Parameters`].
@@ -495,6 +501,8 @@ impl GpuPipeline {
             spectral: [0; 4],
             scan_balance: [0.0; 4],
             ap1_to_ap0: [[0.0; 4]; 3],
+            neutral_offset: [0; 4],
+            neutral_len: [0; 4],
         };
         let device = &gpu.inner.device;
         let mut sequence = vec![Kernel::Exposure];
@@ -518,6 +526,12 @@ impl GpuPipeline {
                         }
                         let balance = scan.balance;
                         params.scan_balance = [balance[0], balance[1], balance[2], scan.sign];
+                        if let Some(curves) = scan.neutral {
+                            for (channel, curve) in curves.iter().enumerate() {
+                                params.neutral_offset[channel] = knots.len() as u32;
+                                params.neutral_len[channel] = append_curve(&mut knots, curve);
+                            }
+                        }
                     }
                     None => values.resize(count * 10, 0.0),
                 }
@@ -988,8 +1002,13 @@ struct GrainUpload {
 
 impl GrainUpload {
     fn new(gpu: &Inner, grain: &Grain, region: GrainRegion) -> Self {
-        let plan = crate::grain::FilmGrain::new(grain.frame_mm(), grain.seed(), grain.size_mm())
-            .gpu_plan(region.frame_width);
+        let plan = crate::grain::FilmGrain::new(
+            grain.frame_mm(),
+            grain.seed(),
+            grain.size_mm(),
+            grain.is_monochrome(),
+        )
+        .gpu_plan(region.frame_width);
         // Process records first, then each unresolved process's count table.
         let mut tables = Vec::new();
         let mut cdf_offset = (plan.processes.len() * PROCESS_WORDS) as u32;
@@ -1020,7 +1039,7 @@ impl GrainUpload {
                 f32::from_bits(cdf_len),
                 mass_mean,
                 mass_spread,
-                0.0,
+                f32::from_bits(process.kernel),
                 0.0,
             ]);
             cdf_offset += cdf_len;
@@ -1043,12 +1062,7 @@ impl GrainUpload {
         let params = GrainParams {
             band: [0, 0, pad, region.width],
             origin: [0, 0, plan.processes.len() as i32, i32::from(plan.blur)],
-            scalars: [
-                plan.pitch,
-                grain.cell_px(region.frame_width).min(1.0).sqrt() / 1000.0,
-                0.0,
-                0.0,
-            ],
+            scalars: [plan.pitch, 1.0 / 1000.0, 0.0, 0.0],
             mean: [plan.mean[0], plan.mean[1], plan.mean[2], 0.0],
             spread: [plan.spread[0], plan.spread[1], plan.spread[2], 0.0],
             counts: [0, kernel_offset, 0, 0],
@@ -1070,7 +1084,7 @@ impl GrainUpload {
         }
     }
 
-    /// Field and scanner blur, unless `band` holds a cached field, then the
+    /// Field and aperture blur, unless `band` holds a cached field, then the
     /// mix, for one chunk of whole rows.
     fn apply(
         &self,

@@ -31,6 +31,9 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   core, the CLI (`--no-ca-correction`) and the tuner (#71).
 - 1.0 app open, filmstrip, and `.rawstock.toml` sidecars (#37): files and
   folders, capture order, per-image undo, and autosave beside the RAW.
+- Ilford HP5 Plus, the first black and white stock (#76):
+  `emulsion = "monochrome"` (one silver layer, silver grain, CPU and GPU),
+  curves digitized from Ilford's datasheet charts by `lab/ilford_bw.py`.
 
 ## In flight
 
@@ -52,6 +55,16 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   with a Status M scan, the Portra Endura paper curve and dyes, and grain
   retuned for the paper's contrast. Adds `[scan_response]` and
   `[print_dye_density]` to schema 1, CPU and GPU.
+- **#73** — Spectral Velvia brought in line with the parametric one
+  (`agent: claude`, `stage: ready`, waiting on Caleb's look review).
+  Exposure placed for camera files, a new spectral `neutral_scale` key
+  (per-channel neutral scan balance, CPU and GPU), and an approximate
+  saturation coupling.
+- **#79** — Scale-correct grain and silver grain (`agent: claude`, `stage:
+  ready`, waiting on Caleb's look review). The field is calibrated through
+  the 48 µm aperture, so a preview matches the export shrunk to its size;
+  stock RMS rescaled so 100% exports keep their look. Monochrome stocks
+  draw hard-edged, skewed silver clumps (CPU and GPU).
 - **#52, #53** — 1.0 app presets and export queue (`agent: claude`,
   `stage: holding`) until #39 and #41 land.
 
