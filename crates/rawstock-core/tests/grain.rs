@@ -605,6 +605,197 @@ fn dye_cloud_size_scales_with_the_frame() {
     );
 }
 
+#[test]
+fn white_grain_follows_selwyn_at_every_pitch() {
+    let white = grain(Grain::FRAME_MM, 21, 1000.0)
+        .with_white_texture(0.2)
+        .unwrap();
+    // A square pixel of the 48 µm circle's area reads the datasheet figure,
+    // less what the 6 µm scanner spot carries across its edges: about 16%,
+    // since the pixel is only seven spots wide.
+    let aperture_width = (Grain::FRAME_MM / (Grain::APERTURE_MM * 0.886)).round() as u32;
+    let ratio = white.pixel_ratio(aperture_width)[1];
+    assert!((0.8..0.9).contains(&ratio), "48 µm pixel reads {ratio}");
+    // Far coarser than the scanner spot, white grain falls as the pixel side.
+    let fall = white.pixel_ratio(200)[1] / white.pixel_ratio(100)[1];
+    assert!((1.9..2.05).contains(&fall), "2x pixel ratio {fall}");
+    // At a full-size export the scanner keeps neighbors correlated, and the
+    // rendered field has the deviation the ratio promises.
+    for width in [6000_u32, 1500] {
+        let mut density = vec![1.0_f32; 512 * 128 * 3];
+        white
+            .apply_region(
+                &mut density,
+                GrainRegion {
+                    width: 512,
+                    height: 128,
+                    origin_x: 100,
+                    origin_y: 100,
+                    frame_width: width,
+                },
+                &mut NopControl,
+            )
+            .unwrap();
+        let std = mean_std(&density).1;
+        let expect = white.pixel_ratio(width)[1];
+        assert!(
+            (std / expect - 1.0).abs() < 0.05,
+            "width {width}: std {std} expected {expect}"
+        );
+        let lag = mean_acf(&density, 512, 1);
+        if width == 6000 {
+            assert!((0.6..0.9).contains(&lag), "6000 px lag-1 {lag}");
+        } else {
+            assert!(lag < 0.25, "1500 px lag-1 {lag}");
+        }
+    }
+}
+
+#[test]
+fn white_grain_previews_match_the_shrunk_export() {
+    let layer = flat(1000.0);
+    let color = Grain::new(
+        Grain::FRAME_MM,
+        7,
+        [layer.clone(), layer.clone(), layer.clone()],
+    )
+    .unwrap()
+    .with_white_texture(0.2)
+    .unwrap();
+    let silver = Grain::monochrome(Grain::FRAME_MM, 7, layer, 0.011)
+        .unwrap()
+        .with_white_texture(0.0)
+        .unwrap()
+        .with_clumping(0.7)
+        .unwrap();
+    for (name, grain) in [("color", color), ("clumped silver", silver)] {
+        let (frame, width, height, k) = (6000_u32, 1024_u32, 256_u32, 4_usize);
+        let render = |frame_width: u32, width: u32, height: u32| {
+            let mut density = vec![1.0_f32; width as usize * height as usize * 3];
+            grain
+                .apply_region(
+                    &mut density,
+                    GrainRegion {
+                        width,
+                        height,
+                        origin_x: frame_width / 4,
+                        origin_y: frame_width / 8,
+                        frame_width,
+                    },
+                    &mut NopControl,
+                )
+                .unwrap();
+            density
+        };
+        let full = render(frame, width, height);
+        let (sw, sh) = (width as usize / k, height as usize / k);
+        let mut shrunk = vec![0.0_f32; sw * sh * 3];
+        for y in 0..sh {
+            for x in 0..sw {
+                for c in 0..3 {
+                    let mut sum = 0.0;
+                    for j in 0..k {
+                        for i in 0..k {
+                            sum += full[((y * k + j) * width as usize + x * k + i) * 3 + c];
+                        }
+                    }
+                    shrunk[(y * sw + x) * 3 + c] = sum / (k * k) as f32;
+                }
+            }
+        }
+        let preview = render(frame / k as u32, sw as u32, sh as u32);
+        let (_, std_shrunk) = mean_std(&shrunk);
+        let (_, std_preview) = mean_std(&preview);
+        assert!(
+            (std_preview / std_shrunk - 1.0).abs() < 0.1,
+            "{name}: preview std {std_preview}, shrunk {std_shrunk}"
+        );
+        let lag_shrunk = mean_acf(&shrunk, sw as u32, 1);
+        let lag_preview = mean_acf(&preview, sw as u32, 1);
+        assert!(
+            (lag_preview - lag_shrunk).abs() < 0.12,
+            "{name}: preview lag-1 {lag_preview}, shrunk {lag_shrunk}"
+        );
+    }
+}
+
+#[test]
+fn white_grain_layers_share_the_set_correlation() {
+    for correlation in [0.0_f32, 0.2, 0.8] {
+        let white = grain(Grain::FRAME_MM, 31, 1000.0)
+            .with_white_texture(correlation)
+            .unwrap();
+        let density = develop_field(&white, 384, 256);
+        let measured = channel_correlation(&density);
+        assert!(
+            (measured - correlation).abs() < 0.05,
+            "set {correlation}, measured {measured}"
+        );
+    }
+    let silver = Grain::monochrome(Grain::FRAME_MM, 31, flat(1000.0), 0.006)
+        .unwrap()
+        .with_white_texture(0.2)
+        .unwrap();
+    assert_eq!(silver.correlation(), 1.0);
+    let density = develop_field(&silver, 128, 64);
+    for pixel in density.as_chunks::<3>().0 {
+        assert_eq!(pixel[0], pixel[1]);
+        assert_eq!(pixel[1], pixel[2]);
+    }
+}
+
+#[test]
+fn white_grain_crop_matches_the_full_frame() {
+    let white = grain(4.0, 17, 1000.0)
+        .with_white_texture(0.2)
+        .unwrap()
+        .with_clumping(0.5)
+        .unwrap()
+        .with_size_mm([0.011; 3])
+        .unwrap();
+    let (width, height) = (400_u32, 120_u32);
+    let full = develop_field(&white, width, height);
+    let (x0, y0, cw, ch) = (137_u32, 41_u32, 90_u32, 50_u32);
+    let mut crop = vec![1.0_f32; cw as usize * ch as usize * 3];
+    white
+        .apply_region(
+            &mut crop,
+            GrainRegion {
+                width: cw,
+                height: ch,
+                origin_x: x0,
+                origin_y: y0,
+                frame_width: width,
+            },
+            &mut NopControl,
+        )
+        .unwrap();
+    for y in 0..ch as usize {
+        for x in 0..cw as usize * 3 {
+            let a = crop[y * cw as usize * 3 + x];
+            let b = full[((y0 as usize + y) * width as usize + x0 as usize) * 3 + x];
+            assert!((a - b).abs() < 1e-4, "({x}, {y}): crop {a} full {b}");
+        }
+    }
+}
+
+#[test]
+fn bad_white_grain_parameters_are_rejected() {
+    let base = grain(Grain::FRAME_MM, 1, 10.0);
+    for correlation in [-0.1_f32, 1.1, f32::NAN] {
+        assert!(matches!(
+            base.clone().with_white_texture(correlation),
+            Err(ModelError::GrainCorrelation)
+        ));
+    }
+    for share in [-0.1_f32, 1.0, f32::NAN] {
+        assert!(matches!(
+            base.clone().with_clumping(share),
+            Err(ModelError::GrainClumping)
+        ));
+    }
+}
+
 fn field_std(grain: &Grain, width: u32, height: u32) -> f32 {
     let mut density = vec![1.0_f32; width as usize * height as usize * 3];
     grain.apply(&mut density, width, height);

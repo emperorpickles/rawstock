@@ -94,6 +94,8 @@ class Film:
     # (net density, Kodak-style rms) knots, and the clump sigma in mm.
     grain: list[tuple[float, float]]
     grain_size_mm: float
+    # Share of the 48 um variance in the soft clumps; the rest is white.
+    grain_clumping: float
     seed: int
     # Faint neutral halation: threshold, radius, weight.
     halation: tuple[float, float, float] | None
@@ -190,19 +192,21 @@ FILMS = {
         ],
         developer="ILFOTEC HC 1+31, 6.5 min at 20 C",
         paper_grade=1,
-        # Approximate. Silver granularity rises with density. HP5 Plus is a
-        # traditional cubic-grain 400 film, close to Tri-X in grain. Tuned by
-        # eye on 100% exports of a 6160 px frame, where a pixel reads about
-        # 1.5 times the 48 um figure for 6 um clumps.
+        # Approximate. Measured on two V550 scans of Caleb's HP5 Plus
+        # negatives (3200 ppi, gamma 2.2): a white floor plus soft clumps
+        # about 11 um across that carry about 70% of the variance. Sky at
+        # about 1.3 net density reads rms 18 to 23; the thin end keeps the
+        # earlier shape.
         grain=[
-            (0.0, 5.3),
-            (0.3, 7.2),
-            (0.7, 9.2),
-            (1.1, 9.9),
-            (1.5, 9.9),
-            (2.0, 9.2),
+            (0.0, 10.5),
+            (0.3, 14.5),
+            (0.7, 18.5),
+            (1.1, 19.5),
+            (1.5, 19.5),
+            (2.0, 18.5),
         ],
-        grain_size_mm=0.006,
+        grain_size_mm=0.011,
+        grain_clumping=0.7,
         seed=5,
         # Approximate. The 35 mm base has an anti-halation dye that clears in
         # processing, so only a faint glow.
@@ -327,7 +331,7 @@ def write(film: Film, paper: list[tuple[float, float]], grade: int) -> str:
         "# spectral_film_lut (https://github.com/JanLohse/spectral_film_lut).",
         "",
         "schema_version = 1",
-        "revision = 3",
+        "revision = 4",
         f'name = "{film.name}"',
         (
             f'source = "Digitized from the figures in Ilford {film.datasheet} '
@@ -365,14 +369,19 @@ def write(film: Film, paper: list[tuple[float, float]], grade: int) -> str:
         f"log_exposure = {array([x for x, _ in paper])}",
         f"density = {array([y for _, y in paper])}",
         "",
-        "# Approximate aesthetic tuning, not a published granularity table.",
-        "# Silver grain: one layer of hard-edged silver clumps, the same in",
-        "# every channel. rms is 1000 times the density standard deviation",
-        "# through a 48 um aperture, and rises with density. A 6160 px frame",
-        "# reads about 1.5 times that per pixel with 6 um clumps.",
+        "# Approximate, measured on two of Caleb's HP5 Plus negatives scanned on an",
+        "# Epson V550 (3200 ppi, gamma 2.2), not an Ilford granularity table. With",
+        "# the scanner's blur divided out, the grain is a white floor plus soft",
+        "# clumps about 11 µm across that carry about 70% of the variance through",
+        "# a 48 µm aperture. Smooth sky at about 1.3 net density reads rms 18 to",
+        "# 23. Thinner densities had picture texture in every patch, so the lower",
+        "# end keeps the earlier shape. size_mm is the clump sigma. rms is 1000",
+        "# times the density standard deviation through a 48 µm aperture.",
         "[grain]",
         "frame_mm = 35",
         f"seed = {film.seed}",
+        'texture = "white"',
+        f"clumping = {fmt(film.grain_clumping)}",
         "[grain.silver]",
         f"density = {array([x for x, _ in film.grain])}",
         f"rms = {array([y for _, y in film.grain])}",

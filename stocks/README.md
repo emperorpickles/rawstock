@@ -45,9 +45,15 @@ density = [0.15, 0.30]        # density, must not decrease
 # an RMS-granularity-versus-density table: density may not decrease, rms may.
 # rms is the Kodak number, 1000 times the density standard deviation through
 # a 48 µm aperture (read Sigma D on a Vision3 sheet and multiply by 1000).
+# texture = "white" draws grain that is white down to the scanner instead
+# of resolved dye clouds; correlation (0 to 1, color stocks) is how much of
+# it the layers share, and clumping (0 up to 1) moves that share of the
+# variance into soft clumps of size_mm.
 # [grain]
 # frame_mm = 35
 # seed = 1
+# texture = "white"               # optional; "clouds" is the default
+# correlation = 0.2               # optional; white texture only
 # [grain.red]                     # green and blue use the same keys
 # density = [0.0, 1.0, 2.0]
 # rms = [3.0, 5.0, 4.0]
@@ -178,7 +184,11 @@ Poisson field of overlapping dye clouds, placed in millimetres on
 instead of revealing a finer noise. Layers share some clouds and keep some
 of their own. Optional `size_mm` is that layer's primary dye-cloud sigma, in
 millimetres; omitted layers use the built-in sizes, with red coarser
-than blue.
+than blue. `texture = "white"` swaps the clouds for grain that is white down
+to the scanner, which is what V550 scans of Portra 400 and HP5 Plus show.
+`correlation` sets how much of it the layers share (default 0.2), and
+`clumping` puts that share of the variance into soft clumps of `size_mm`
+(HP5 Plus uses 0.7 at 0.011 mm).
 `[halation]` is a threshold on the peak scene-linear channel, a blur whose
 sigma is `radius` times the shorter side, and a red-weighted add-back.
 

@@ -63,6 +63,11 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   the 48 µm aperture, so a preview matches the export shrunk to its size;
   stock RMS rescaled so 100% exports keep their look. Monochrome stocks
   draw hard-edged, skewed silver clumps (CPU and GPU).
+- **#81** — White grain from film scans (`agent: claude`, `stage: ready`,
+  stacked on #79, waiting on Caleb's look review). `texture = "white"`
+  with layer `correlation` and soft `clumping`, measured on V550 scans of
+  Portra 400 and HP5 Plus; Portra, the Velvias, and HP5 use it. Portra
+  grain is about 8× faster.
 - **#52, #53** — 1.0 app presets and export queue (`agent: claude`,
   `stage: holding`) until #39 and #41 land.
 

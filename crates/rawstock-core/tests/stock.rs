@@ -6,7 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use rawstock_core::color::LinearImage;
 use rawstock_core::render::{Parameters, Pipeline};
 use rawstock_core::stock::{
-    Emulsion, FilmModel, Grain, Granularity, ModelError, Process, Stock, StockError, StockModel,
+    Emulsion, FilmModel, Grain, GrainTexture, Granularity, ModelError, Process, Stock, StockError,
+    StockModel,
 };
 
 fn neutral_path() -> PathBuf {
@@ -248,6 +249,72 @@ fn grain_size_is_optional_per_layer() {
 }
 
 #[test]
+fn white_grain_texture_loads_and_round_trips() {
+    let text = (neutral_text() + GRAIN_AND_HALATION).replace(
+        "seed = 7\n",
+        "seed = 7\ntexture = \"white\"\ncorrelation = 0.3\nclumping = 0.25\n",
+    );
+    let stock = load_text(&text).unwrap();
+    let grain = stock.parameters().grain().unwrap();
+    assert_eq!(grain.texture(), GrainTexture::White);
+    assert!((grain.correlation() - 0.3).abs() < 1.0e-6);
+    assert!((grain.clumping() - 0.25).abs() < 1.0e-6);
+    let reread = load_text(&stock.to_toml()).unwrap();
+    let again = reread.parameters().grain().unwrap();
+    assert_eq!(again.texture(), GrainTexture::White);
+    assert_eq!(again.correlation(), grain.correlation());
+    assert_eq!(again.clumping(), grain.clumping());
+
+    // Without a correlation, white grain takes the measured default.
+    let text = (neutral_text() + GRAIN_AND_HALATION)
+        .replace("seed = 7\n", "seed = 7\ntexture = \"white\"\n");
+    let grain = load_text(&text)
+        .unwrap()
+        .parameters()
+        .grain()
+        .unwrap()
+        .clone();
+    assert_eq!(grain.correlation(), Grain::WHITE_CORRELATION);
+    assert_eq!(grain.clumping(), 0.0);
+
+    // Clouds are still the default and write no texture.
+    let stock = load_text(&(neutral_text() + GRAIN_AND_HALATION)).unwrap();
+    assert_eq!(
+        stock.parameters().grain().unwrap().texture(),
+        GrainTexture::Clouds
+    );
+    assert!(!stock.to_toml().contains("texture"));
+}
+
+#[test]
+fn white_grain_keys_need_the_white_texture() {
+    for (key, expected) in [
+        ("correlation = 0.2", "correlation"),
+        ("clumping = 0.2", "clumping"),
+    ] {
+        let text = (neutral_text() + GRAIN_AND_HALATION)
+            .replace("seed = 7\n", &format!("seed = 7\n{key}\n"));
+        let err = load_text(&text).unwrap_err();
+        let matched = match expected {
+            "correlation" => matches!(err, StockError::GrainCorrelation),
+            _ => matches!(err, StockError::GrainClumping),
+        };
+        assert!(matched, "{key}: {err:?}");
+    }
+    let text = (neutral_text() + GRAIN_AND_HALATION).replace(
+        "seed = 7\n",
+        "seed = 7\ntexture = \"white\"\ncorrelation = 1.5\n",
+    );
+    assert!(matches!(
+        load_text(&text).unwrap_err(),
+        StockError::Model(ModelError::GrainCorrelation)
+    ));
+    let text = (neutral_text() + GRAIN_AND_HALATION)
+        .replace("seed = 7\n", "seed = 7\ntexture = \"speckle\"\n");
+    assert!(load_text(&text).is_err());
+}
+
+#[test]
 fn rejects_a_falling_granularity_density() {
     let text = (neutral_text() + GRAIN_AND_HALATION).replace(
         "density = [0.0, 1.0, 2.0]\nrms = [2.0, 5.0, 3.5]",
@@ -408,8 +475,8 @@ fn velvia_is_a_parametric_approximation_with_fine_grain() {
         source.contains("not a 3d lut"),
         "source should say this is not a LUT: {source}"
     );
-    // Velvia 50 is a finer film than Portra 400: smaller dye clouds, and a
-    // developed middle gray shows well under Portra's luma noise. The two
+    // Velvia 50 is a finer film than Portra 400: a developed middle gray
+    // shows well under Portra's luma noise. Both are white grain. The two
     // print their density through curves of different contrast, so the
     // comparison is on the developed image, not on the rms tables.
     let grain = stock.parameters().grain().expect("velvia has grain");
@@ -419,8 +486,9 @@ fn velvia_is_a_parametric_approximation_with_fine_grain() {
     let portra_grain = portra.parameters().grain().unwrap();
     for layer in 0..3 {
         assert!(grain.layers()[layer].eval(1.2) > 0.0);
-        assert!(grain.size_mm()[layer] < portra_grain.size_mm()[layer]);
     }
+    assert_eq!(grain.texture(), GrainTexture::White);
+    assert_eq!(portra_grain.texture(), GrainTexture::White);
     let velvia_noise = gray_luma_noise(stock.parameters());
     let portra_noise = gray_luma_noise(portra.parameters());
     assert!(
@@ -669,6 +737,9 @@ fn hp5_is_one_silver_layer() {
     assert!((trapezoid(model.wavelengths(), red) - 1.0).abs() < 1.0e-3);
     let grain = stock.parameters().grain().unwrap();
     assert!(grain.is_monochrome());
+    assert_eq!(grain.texture(), GrainTexture::White);
+    assert_eq!(grain.correlation(), 1.0);
+    assert!(grain.clumping() > 0.0);
     assert_eq!(grain.size_mm()[0], grain.size_mm()[1]);
     assert_eq!(grain.size_mm()[1], grain.size_mm()[2]);
 }
