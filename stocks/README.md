@@ -129,6 +129,13 @@ the print stage the negated slide density, so print log-exposure becomes
 for viewing the slide (identity shows it as it is). `[print]` itself
 always rises. A parametric stock is always a negative and rejects the key.
 
+`neutral_scale = true` is an optional spectral key that needs
+`[dye_density]`. Without it, the scan is balanced at
+`reference_log_exposure` only. With it, gray exposures across the curves are
+scanned and each channel's scanned density is mapped onto the mean of the
+three, so every gray prints neutral, like a scanner's per-channel curves.
+Colors pass through the same three curves.
+
 `[grain]` and `[halation]` are optional schema 1 tables. Leaving them out
 is the same file older stocks already use, so `schema_version` stays 1.
 `[grain]` holds one RMS-granularity-versus-density table per layer, the
@@ -222,14 +229,22 @@ few trace points at D-min (they rise by up to 0.035, digitizing noise) and
 extends each sensitivity trace's end slope, floored three decades below the
 peak, instead of clamping to the lowest traced value.
 
-The scan curve and grain are an **approximate aesthetic tuning**. The scan
-curve is identity through the midtones with a gentle shoulder past density
-2.2, and `print_exposure` puts the clear base at white. The grain table is
-the parametric Velvia's, carried over unchanged; Fujifilm's quoted RMS
-granularity of 9 agrees with its peak. There is no halation and no
-interlayer coupling: the saturation comes from the datasheet curves and
-dyes alone. Grays are balanced at middle gray; the datasheet curves leave
-deep shadows warm and the brightest highlights slightly cool.
+The rest is an **approximate tuning**:
+
+- `exposure_ev` is placed for rawstock's camera decode, where Fuji RAFs put
+  the metered middle gray near scene-linear 0.08, not the datasheet's 0.18.
+  It matches the parametric Velvia's brightness.
+- `neutral_scale` keeps grays neutral across the scale. The datasheet red
+  layer has less contrast, so a single balance point left shadows warm and
+  highlights cyan.
+- `[coupling]` stands in for Velvia's interlayer saturation. Each row sums
+  to 1, so neutrals are unchanged.
+- The scan curve is identity through the midtones with a gentle shoulder
+  past density 2.2, and `print_exposure` puts the clear base at white.
+- The grain table is the parametric Velvia's, carried over unchanged.
+  Fujifilm's quoted RMS granularity of 9 agrees with its peak.
+
+There is no halation.
 
 ## Velvia
 
