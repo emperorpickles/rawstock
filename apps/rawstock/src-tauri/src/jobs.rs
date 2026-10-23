@@ -66,6 +66,9 @@ pub struct ContractStub {
     /// Thumbnail jobs are rendered by [`crate::thumbnails::Thumbnailer`]
     /// and reported through [`Self::deliver_thumbnail`], not by `tick`.
     external_thumbnails: bool,
+    /// Preview and full develops run in [`crate::develop::Developer`] and
+    /// finish through [`Self::finish_develop`], not by `tick`.
+    external_develops: bool,
 }
 
 impl ContractStub {
@@ -84,8 +87,50 @@ impl ContractStub {
         self.external_thumbnails = true;
     }
 
+    /// Hand preview and full develops to the real develop thread.
+    pub fn develop_elsewhere(&mut self) {
+        self.external_develops = true;
+    }
+
     fn ticks(&self, job: &Job) -> bool {
-        !(self.external_thumbnails && job.kind == JobKind::Thumbnails)
+        match job.kind {
+            JobKind::Thumbnails => !self.external_thumbnails,
+            JobKind::Preview | JobKind::Full => !self.external_develops,
+            JobKind::Export => true,
+        }
+    }
+
+    /// Whether a running job should keep going. Same rule as
+    /// [`Self::thumbnail_check`], for any kind.
+    pub fn job_check(&mut self, job_id: u64) -> (bool, Vec<ContractEvent>) {
+        self.thumbnail_check(job_id)
+    }
+
+    /// `true` while `job_id` runs with no cancel request. Read-only, for the
+    /// develop's per-row cancel check.
+    pub fn job_live(&self, job_id: u64) -> bool {
+        self.jobs
+            .get(&job_id)
+            .is_some_and(|job| !job.terminal && job.cancel.is_none())
+    }
+
+    /// Finish a preview or full develop with its real frame. A full frame
+    /// also becomes the pan cache.
+    pub fn finish_develop(
+        &mut self,
+        job_id: u64,
+        packed: Vec<u8>,
+        width: u32,
+        height: u32,
+    ) -> Vec<ContractEvent> {
+        if self
+            .jobs
+            .get(&job_id)
+            .is_none_or(|job| !matches!(job.kind, JobKind::Preview | JobKind::Full))
+        {
+            return Vec::new();
+        }
+        self.finish_with(job_id, Some((width, height)), Some(packed))
     }
 
     /// Path of an opened image, for the renderer.
@@ -537,11 +582,21 @@ impl ContractStub {
     }
 
     fn finish_done(&mut self, id: u64) -> Vec<ContractEvent> {
-        self.finish_sized(id, None)
+        self.finish_with(id, None, None)
     }
 
-    /// `size` is the real frame size. `None` reports the stub bitmap's.
     fn finish_sized(&mut self, id: u64, size: Option<(u32, u32)>) -> Vec<ContractEvent> {
+        self.finish_with(id, size, None)
+    }
+
+    /// `size` and `frame` are the real develop's. `None` uses the stub
+    /// bitmap.
+    fn finish_with(
+        &mut self,
+        id: u64,
+        size: Option<(u32, u32)>,
+        frame: Option<Vec<u8>>,
+    ) -> Vec<ContractEvent> {
         let Some(job) = self.jobs.get_mut(&id) else {
             return Vec::new();
         };
@@ -556,7 +611,7 @@ impl ContractStub {
         let long_edge = job.long_edge;
         let salt = u8::try_from(id % 64).unwrap_or(0) + u8::from(job.compare) * 40;
         let (width, height) = size.unwrap_or_else(|| stub_size(long_edge));
-        let packed = placeholder(width, height, salt);
+        let packed = frame.unwrap_or_else(|| placeholder(width, height, salt));
         if kind != JobKind::Thumbnails {
             self.pending_frames.insert((id, None), packed.clone());
         }

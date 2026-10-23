@@ -7,8 +7,9 @@ file associations. The Svelte UI in this directory is not the tuner in
 
 The develop commands in `src-tauri` are the typed contract from issue #36.
 They assign job ids, enforce the cancellation rules, and emit progress and
-cache events. They do not decode a RAW file or run the film pipeline. That
-service is still to be wired. There is no onboarding sample.
+cache events. Previews and full frames run the real `rawstock-core` develop
+(`develop.rs`, GPU with a CPU fallback), and stock thumbnails run in
+`thumbnails.rs`. Export is still a stub. There is no onboarding sample.
 
 Edits are written to `<file>.rawstock.toml` next to the photo. The RAW file
 is never written, renamed, or touched. A sidecar that cannot be parsed is

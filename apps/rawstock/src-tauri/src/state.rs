@@ -5,6 +5,7 @@ use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 
+use crate::develop::Developer;
 use crate::jobs::ContractStub;
 use crate::recent::RecentFiles;
 use crate::settings::SettingsStore;
@@ -26,6 +27,8 @@ pub struct AppState {
     pub wake: Mutex<Option<mpsc::Sender<()>>>,
     /// Real stock thumbnails. Set once the app has started.
     pub thumbnailer: Mutex<Option<Thumbnailer>>,
+    /// The real preview and full develop. Set once the app has started.
+    pub developer: Mutex<Option<Developer>>,
 }
 
 impl AppState {
@@ -43,6 +46,7 @@ impl AppState {
             menu_paths: Mutex::new(Vec::new()),
             wake: Mutex::new(None),
             thumbnailer: Mutex::new(None),
+            developer: Mutex::new(None),
         }
     }
 }

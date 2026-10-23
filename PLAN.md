@@ -36,6 +36,10 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   navigable, applied with undo. Thumbnails are the first real film
   renders in `apps/rawstock` (`thumbnails.rs`: one quick decode per photo,
   grain and halation off). Other develops are still the contract stub.
+- 1.0 app real develop (#87): `develop.rs` replaces the stub for previews
+  and full frames with a `PreviewSession` (quick X-Trans open, Markesteijn
+  in the background, GPU with CPU fallback), cancelled between rows via
+  the job board. Export is still the stub.
 - Unsigned alpha bundles of the 1.0 app (#93): `.github/workflows/alpha.yml`
   on a `v*` tag or by hand drafts a release with a Windows NSIS installer,
   a universal macOS `.dmg`, and checksums. Stocks ship inside the bundle.
