@@ -7,7 +7,7 @@
 
   import { appError, defaultSettings } from "./lib/contract";
   import type { EditSettings, ImageInfo, StockSummary } from "./lib/contract";
-  import { Delivery, JobTracker } from "./lib/delivery";
+  import { JobTracker } from "./lib/delivery";
   import {
     Autosave,
     EditHistory,
@@ -18,13 +18,13 @@
     versionWarning,
   } from "./lib/edits";
   import Filmstrip from "./lib/Filmstrip.svelte";
-  import { FrameBuffer } from "./lib/frame";
-  import type { PackedFrame } from "./lib/frame";
   import About from "./lib/help/About.svelte";
   import Licenses from "./lib/help/Licenses.svelte";
   import { Report } from "./lib/help/report";
   import type { AppInfo } from "./lib/help/report";
   import { Host } from "./lib/host";
+  import { ReviewController } from "./lib/review/review";
+  import type { Rect, ReviewView, Zoom } from "./lib/review/review";
   import Onboarding from "./lib/onboarding/Onboarding.svelte";
   import Preferences from "./lib/preferences/Preferences.svelte";
   import { Preferences as Prefs } from "./lib/preferences/settings";
@@ -69,8 +69,9 @@
   let errors = $state<string[]>([]);
   let notice = $state("Ready");
   let progress = $state("");
-  let zoom = $state<"fit" | 1 | 2>("fit");
+  let zoom = $state<Zoom>("fit");
   let compare = $state(false);
+  let split = $state(false);
   let clipping = $state(false);
   let dropActive = $state(false);
   let exportOpen = $state(false);
@@ -83,13 +84,7 @@
   let appSettings = $state<AppSettings>(Prefs.defaults());
   let appInfo = $state<AppInfo | null>(null);
   let quality = $state(90);
-  let frame = $state<PackedFrame | null>(null);
-  let frameMode = $state<"texture" | "region" | "empty">("empty");
-  let memoryPressure = $state(false);
-  let fullJob = $state<number | null>(null);
-  let cacheHash = $state("");
-  let cacheWidth = $state(0);
-  let cacheHeight = $state(0);
+  let review = $state<ReviewView | null>(null);
   let exportDialog = $state<HTMLDialogElement | null>(null);
   let resetting = $state(false);
   let closing = false;
@@ -120,6 +115,39 @@
     return `The stock "${settings.stock.id}" is not installed. Choose another stock. The photo was not changed.`;
   });
   const adjustmentsDisabled = $derived(!selected || selectedImage?.error != null);
+
+  // Fit shows the proxy; 100% and 200% pan one full develop per settings state.
+  const reviewer = host
+    ? new ReviewController(host, {
+        onview: (next) => {
+          review = next;
+        },
+        onerror: (error) => {
+          errors = [error.message];
+        },
+        onjob: (imageId, kind, jobId) => jobs.note(imageId, kind, jobId),
+      })
+    : null;
+
+  $effect(() => {
+    reviewer?.setZoom(zoom);
+  });
+
+  $effect(() => {
+    reviewer?.setCompare(compare || split);
+  });
+
+  // Settled settings reach the review view after a short pause, so a burst
+  // of edits develops once.
+  $effect(() => {
+    const next = settings;
+    const imageId = selected;
+    if (!reviewer || !imageId || selectedImage?.error) {
+      return;
+    }
+    const timer = setTimeout(() => reviewer.update(next), 150);
+    return () => clearTimeout(timer);
+  });
 
   $effect(() => {
     syncDialog(exportDialog, exportOpen);
@@ -192,43 +220,42 @@
           }
         }),
         host.onDone((event) => {
+          if (event.kind === "preview" || event.kind === "full") {
+            reviewer?.done(event);
+          }
           if (!jobs.current(event.imageId, event.kind, event.jobId)) {
             return;
           }
           progress = "";
-          if (event.kind === "full") {
-            fullJob = event.jobId;
-          }
           if (event.kind === "export") {
             notice = "Export is not written in this build.";
           }
         }),
         host.onCancelled((event) => {
+          if (event.kind === "preview" || event.kind === "full") {
+            reviewer?.cancelled(event);
+          }
           if (jobs.current(event.imageId, event.kind, event.jobId)) {
             progress = "";
           }
         }),
         host.onFailed((event) => {
+          if (event.kind === "preview" || event.kind === "full") {
+            // The review view reports its own failures.
+            if (jobs.current(event.imageId, event.kind, event.jobId)) {
+              progress = "";
+            }
+            reviewer?.failed(event);
+            return;
+          }
           if (!jobs.current(event.imageId, event.kind, event.jobId)) {
             return;
           }
           progress = "";
           errors = [event.error.message];
         }),
-        host.onCacheReady((event) => void adoptCache(event.imageId, event.settingsHash, event.width, event.height)),
-        host.onCacheEvicted((event) => {
-          if (event.reason === "settingsChanged") {
-            return;
-          }
-          if (event.imageId === selected) {
-            frame = null;
-            frameMode = selected ? "empty" : "empty";
-          }
-          if (event.reason === "memoryBudget") {
-            memoryPressure = true;
-            void developFull();
-          }
-        }),
+        host.onCacheReady((event) => reviewer?.cacheReady(event)),
+        host.onCacheEvicted((event) => reviewer?.cacheEvicted(event)),
         host.onThumbnail(() => {
           notice = "Stock thumbnails are not drawn in this build.";
         }),
@@ -369,9 +396,11 @@
       autosave.block(info.imageId, info.sidecar.status === "invalid");
       selected = info.imageId;
       settings = current;
-      frame = null;
-      frameMode = "empty";
-      fullJob = null;
+      if (!info.error) {
+        reviewer?.open(info.imageId, current, { width: info.width, height: info.height });
+      } else {
+        reviewer?.close();
+      }
       notice = info.fileName;
       if (Host.available()) {
         await getCurrentWindow().setTitle(`${info.fileName} - rawstock`);
@@ -493,8 +522,7 @@
           errors = [appError(error).message];
         }
         selected = "";
-        frame = null;
-        frameMode = "empty";
+        reviewer?.close();
         notice = "Ready";
         if (Host.available()) {
           await getCurrentWindow().setTitle("rawstock");
@@ -624,60 +652,8 @@
     }
   }
 
-  async function developFull() {
-    if (!host || !selected) {
-      return;
-    }
-    try {
-      const started = await host.developFull(selected, settings);
-      jobs.note(selected, "full", started.jobId);
-      fullJob = started.jobId;
-    } catch (error) {
-      errors = [appError(error).message];
-    }
-  }
-
-  async function adoptCache(imageId: string, settingsHash: string, width: number, height: number) {
-    if (!host || imageId !== selected || fullJob === null) {
-      return;
-    }
-    cacheHash = settingsHash;
-    cacheWidth = width;
-    cacheHeight = height;
-    const choice = Delivery.choose(width, height, memoryPressure);
-    try {
-      if (choice === "texture") {
-        const bytes = await host.takeFrame(fullJob);
-        frame = FrameBuffer.decode(bytes);
-        frameMode = "texture";
-        return;
-      }
-      frameMode = "region";
-      await loadRegion({ x: 0, y: 0, width: Math.min(width, 48), height: Math.min(height, 32) });
-    } catch (error) {
-      errors = [appError(error).message];
-    }
-  }
-
-  async function loadRegion(rect: { x: number; y: number; width: number; height: number }) {
-    if (!host || !selected || !cacheHash || frameMode !== "region") {
-      return;
-    }
-    const bytes = await host.getRegion({
-      imageId: selected,
-      settingsHash: cacheHash,
-      x: rect.x,
-      y: rect.y,
-      width: rect.width,
-      height: rect.height,
-    });
-    frame = FrameBuffer.decode(bytes);
-  }
-
-  function viewChanged(rect: { x: number; y: number; width: number; height: number }) {
-    void loadRegion(rect).catch((error: unknown) => {
-      errors = [appError(error).message];
-    });
+  function viewChanged(rect: Rect) {
+    reviewer?.view(rect);
   }
 </script>
 
@@ -690,8 +666,9 @@
     <button type="button" aria-pressed={zoom === "fit"} aria-keyshortcuts="{modLabel}+0" onclick={() => (zoom = "fit")}>Fit</button>
     <button type="button" aria-pressed={zoom === 1} aria-keyshortcuts="{modLabel}+1" onclick={() => (zoom = 1)}>100%</button>
     <button type="button" aria-pressed={zoom === 2} aria-keyshortcuts="{modLabel}+2" onclick={() => (zoom = 2)}>200%</button>
-    <button type="button" aria-pressed={compare} onclick={() => (compare = !compare)}>Before/After</button>
-    <button type="button" aria-pressed={clipping} onclick={() => (clipping = !clipping)}>Clipping</button>
+    <button type="button" aria-pressed={split} onclick={() => (split = !split)}>Split</button>
+    <button type="button" aria-pressed={compare} aria-keyshortcuts={"\\"} onclick={() => (compare = !compare)}>Before/After</button>
+    <button type="button" aria-pressed={clipping} aria-keyshortcuts="J" onclick={() => (clipping = !clipping)}>Clipping</button>
   </header>
 
   {#if errors.length}
@@ -722,16 +699,19 @@
   <div class="workspace">
     <Filmstrip images={images} selected={selected} onselect={(id) => void activate(id)} />
     <Viewer
-      {frame}
-      mode={selected && frame && !openProblem ? frameMode : "empty"}
+      view={review}
+      active={selected !== "" && !openProblem}
       {zoom}
+      {split}
+      showBefore={compare}
+      {clipping}
       fileName={selectedImage?.fileName ?? ""}
       problem={openProblem}
       {dropActive}
-      imageWidth={cacheWidth}
-      imageHeight={cacheHeight}
       onopen={() => void perform("open")}
-      onview={viewChanged}
+      onzoom={(next) => (zoom = next)}
+      onregion={viewChanged}
+      onsize={(edge) => reviewer?.setLongEdge(edge)}
     />
     <SidePanel
       {stocks}
@@ -746,7 +726,7 @@
 
   <footer class="status" aria-live="polite">
     <span>{progress || notice}</span>
-    {#if compare}<span>Before</span>{/if}
+    {#if compare}<span>Before</span>{:else if split}<span>Split</span>{/if}
     {#if clipping}<span>Clipping</span>{/if}
   </footer>
 </div>
