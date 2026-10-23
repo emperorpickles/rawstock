@@ -59,6 +59,11 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   claude`, `stage: ready`, waiting on Caleb's look review). Adds
   `emulsion = "monochrome"` (one silver layer and silver grain, CPU and
   GPU) and `lab/ilford_bw.py` for further Ilford films.
+- **#79** — Scale-correct grain and silver grain (`agent: claude`, `stage:
+  ready`, waiting on Caleb's look review; stacked on #78). The field is
+  calibrated through the 48 µm aperture, so a preview matches the export
+  shrunk to its size; stock RMS rescaled so 100% exports keep their look.
+  Monochrome stocks draw hard-edged, skewed silver clumps (CPU and GPU).
 - **#52, #53** — 1.0 app presets and export queue (`agent: claude`,
   `stage: holding`) until #39 and #41 land.
 

@@ -7,7 +7,7 @@
 # rawstock's stock fitter from scene-linear ACEScg.
 
 schema_version = 1
-revision = 1
+revision = 2
 name = "Velvia"
 source = "Approximate parametric fit to Fujifilm X-T2 in-camera Velvia JPEGs. DR100, Color 0, Highlight Tone 0, Shadow Tone 0, Sharpness Normal, Noise Reduction 0, White Balance Auto. Grain Effect was Weak on the camera and the fit was made with grain off. Grain is an approximate aesthetic tuning for a fine-grained ISO 50 slide film, not a Fujifilm granularity table. Not a Fujifilm datasheet, not a 3D LUT, and not a measurement of the reversal film."
 license = "CC0-1.0"
@@ -42,18 +42,22 @@ matrix = [[1.3803774, -0.13388038, -0.0027565509], [0.010332672, 1.224131, 0.001
 # Same Vision3-style shape (rises through the midtones, then falls) with
 # blue the grainiest, as with Portra. rms is 1000 times the density
 # standard deviation through a 48 µm aperture.
+# Since #79 the grain field is calibrated through that aperture, so a
+# pixel reads more than rms when the clouds are finer than its reach. These
+# values are the earlier per-pixel tuning divided by that ratio at a 6160 px
+# frame, so a 100% export keeps its look and a preview matches it.
 [grain]
 frame_mm = 35
 seed = 50
 [grain.red]
 density = [0.15, 0.40, 0.80, 1.20, 1.70, 2.20, 2.60]
-rms = [4, 5, 7, 8, 7, 6, 5]
+rms = [2.8, 3.5, 4.8, 5.5, 4.8, 4.2, 3.5]
 size_mm = 0.010
 [grain.green]
 density = [0.15, 0.40, 0.80, 1.20, 1.70, 2.20, 2.60]
-rms = [4, 6, 8, 9, 8, 7, 5]
+rms = [2.8, 4.1, 5.5, 6.2, 5.5, 4.8, 3.4]
 size_mm = 0.0075
 [grain.blue]
 density = [0.15, 0.40, 0.80, 1.20, 1.70, 2.20, 2.60]
-rms = [5, 7, 9, 10, 9, 8, 6]
+rms = [3.4, 4.8, 6.2, 6.9, 6.2, 5.5, 4.1]
 size_mm = 0.006

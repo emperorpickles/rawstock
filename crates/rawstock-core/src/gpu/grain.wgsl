@@ -8,7 +8,7 @@
 // Gaussian itself (`exp`, `sin`, `cos`) and the summation order differ.
 //
 // One dispatch covers one chunk of whole rows. The field is evaluated on that
-// band plus `pad` rows and columns on each side, so the scanner blur never
+// band plus `pad` rows and columns on each side, so the aperture blur never
 // reads past the band for a pixel that is kept.
 
 struct Params {
@@ -16,13 +16,13 @@ struct Params {
     // w: crop width.
     band: vec4<u32>,
     // x, y: the band's top-left pixel in the frame, padding included (may
-    // be negative). z: process count. w: 1 when the scanner blurs.
+    // be negative). z: process count. w: 1 when the aperture blurs.
     origin: vec4<i32>,
     // x: millimetres per pixel, y: the mix scale.
     scalars: vec4<f32>,
     mean: vec4<f32>,
     spread: vec4<f32>,
-    // x: pixels in the chunk, y: where the scanner taps start in `tables`.
+    // x: pixels in the chunk, y: where the aperture taps start in `tables`.
     counts: vec4<u32>,
     // Red, green, and blue granularity curves in `tables`.
     rms_offset: vec4<u32>,
@@ -36,10 +36,15 @@ struct Params {
 @group(0) @binding(2) var<storage, read_write> field: array<f32>;
 @group(0) @binding(3) var<storage, read_write> scratch: array<f32>;
 // Process records of 16 words from 0, then the count tables of unresolved
-// processes, then the scanner taps, then the granularity curves.
+// processes, then the aperture taps, then the granularity curves.
 @group(0) @binding(4) var<storage, read> tables: array<f32>;
 
-const SUPPORT_D2: f32 = 12.25;
+// `Kernel` in `grain.rs`: a dye cloud reaches 3.5 sigmas, a silver clump
+// `SILVER_RADIUS`.
+const KERNEL_SILVER: u32 = 1u;
+const DYE_SUPPORT: f32 = 3.5;
+const SILVER_RADIUS: f32 = 2.4;
+const SILVER_R2: f32 = 5.76;
 const STRENGTH_LO: f32 = 0.72;
 const STRENGTH_HI: f32 = 1.0;
 const TAU: f32 = 6.28318530717958648;
@@ -79,6 +84,7 @@ struct Process {
     cdf_len: u32,
     mass_mean: f32,
     mass_spread: f32,
+    kernel: u32,
 }
 
 fn process(index: u32) -> Process {
@@ -98,6 +104,7 @@ fn process(index: u32) -> Process {
         bitcast<u32>(tables[base + 11u]),
         tables[base + 12u],
         tables[base + 13u],
+        bitcast<u32>(tables[base + 14u]),
     );
 }
 
@@ -146,7 +153,7 @@ fn layer_mask(layers: u32) -> vec3<f32> {
     return vec3<f32>(f32(layers & 1u), f32((layers >> 1u) & 1u), f32((layers >> 2u) & 1u));
 }
 
-// One resolved cloud, as `paint_gaussian` sees it. The center is in band
+// One resolved cloud, as `paint_cloud` sees it. The center is in band
 // pixels, as the CPU computes it, and the axes are in pixels.
 struct Cloud {
     x: f32,
@@ -184,13 +191,20 @@ fn cloud(p: Process, at: vec2<i32>, drawn: u32, k: u32) -> Cloud {
     );
 }
 
-// The pixels `paint_gaussian` visits for `c`, clipped to the band: x0, y0,
+fn support(kernel: u32) -> f32 {
+    if kernel == KERNEL_SILVER {
+        return SILVER_RADIUS;
+    }
+    return DYE_SUPPORT;
+}
+
+// The pixels `paint_cloud` visits for `c`, clipped to the band: x0, y0,
 // x1, y1. Empty when x0 > x1 or y0 > y1.
-fn footprint(c: Cloud) -> vec4<i32> {
+fn footprint(c: Cloud, kernel: u32) -> vec4<i32> {
     if c.sx <= 0.0 || c.sy <= 0.0 {
         return vec4<i32>(0, 0, -1, -1);
     }
-    let rad = 3.5 * max(c.sx, c.sy);
+    let rad = support(kernel) * max(c.sx, c.sy);
     return vec4<i32>(
         max(i32(ceil(c.x - rad - 0.5)), 0),
         max(i32(ceil(c.y - rad - 0.5)), 0),
@@ -200,19 +214,19 @@ fn footprint(c: Cloud) -> vec4<i32> {
 }
 
 // Whether `c` paints any pixel of the tile from `lo` to `hi`.
-fn touches(c: Cloud, lo: vec2<i32>, hi: vec2<i32>) -> bool {
-    let box = footprint(c);
+fn touches(c: Cloud, kernel: u32, lo: vec2<i32>, hi: vec2<i32>) -> bool {
+    let box = footprint(c, kernel);
     return box.x <= box.z && box.y <= box.w
         && box.x <= hi.x && box.z >= lo.x && box.y <= hi.y && box.w >= lo.y;
 }
 
 // What `c` adds at band pixel `pixel`, a pixel inside the band.
 //
-// The CPU also clips to `footprint`, the square of half-side 3.5 times the
-// longer axis. The 3.5-sigma ellipse sits inside that square, and the band
-// clip cannot exclude a pixel inside the band, so the ellipse test alone
-// decides.
-fn shade(c: Cloud, pixel: vec2<i32>) -> f32 {
+// The CPU also clips to `footprint`, the square of half-side `support`
+// times the longer axis. The support ellipse sits inside that square, and
+// the band clip cannot exclude a pixel inside the band, so the ellipse test
+// alone decides.
+fn shade(c: Cloud, kernel: u32, pixel: vec2<i32>) -> f32 {
     if c.sx <= 0.0 || c.sy <= 0.0 {
         return 0.0;
     }
@@ -223,8 +237,18 @@ fn shade(c: Cloud, pixel: vec2<i32>) -> f32 {
     let inv_sx = 1.0 / c.sx;
     let inv_sy = 1.0 / c.sy;
     let d2 = xr * inv_sx * xr * inv_sx + yr * inv_sy * yr * inv_sy;
-    if d2 >= SUPPORT_D2 {
+    let reach = support(kernel);
+    if d2 >= reach * reach {
         return 0.0;
+    }
+    if kernel == KERNEL_SILVER {
+        // `Kernel::silver`.
+        let q = d2 / SILVER_R2;
+        if q >= 1.0 {
+            return 0.0;
+        }
+        let rim = 1.0 - q * q;
+        return c.amplitude * (rim * rim);
     }
     return c.amplitude * exp(-0.5 * d2);
 }
@@ -234,7 +258,7 @@ fn cell_sum(p: Process, at: vec2<i32>, pixel: vec2<i32>) -> f32 {
     let drawn = poisson(at, p.seed, p.limit);
     var sum = 0.0;
     for (var k = 0u; k < drawn.x; k++) {
-        sum += shade(cloud(p, at, drawn.y, k), pixel);
+        sum += shade(cloud(p, at, drawn.y, k), p.kernel, pixel);
     }
     return sum;
 }
@@ -288,10 +312,10 @@ fn window_cell(index: u32) -> vec2<i32> {
 }
 
 // The sum of every stored cloud at `pixel`.
-fn stored_sum(pixel: vec2<i32>, count: u32) -> f32 {
+fn stored_sum(pixel: vec2<i32>, count: u32, kernel: u32) -> f32 {
     var sum = 0.0;
     for (var i = 0u; i < count; i++) {
-        sum += shade(clouds[i], pixel);
+        sum += shade(clouds[i], kernel, pixel);
     }
     return sum;
 }
@@ -330,7 +354,7 @@ fn grain_field(
             if cell_index < cells {
                 drawn = poisson(at, p.seed, p.limit);
                 for (var k = 0u; k < drawn.x; k++) {
-                    if touches(cloud(p, at, drawn.y, k), lo, hi) {
+                    if touches(cloud(p, at, drawn.y, k), p.kernel, lo, hi) {
                         reaching += 1u;
                     }
                 }
@@ -351,7 +375,7 @@ fn grain_field(
             if held + total > CAPACITY {
                 // The store is full: sum it, then start it over.
                 if inside {
-                    sum += stored_sum(pixel, held);
+                    sum += stored_sum(pixel, held, p.kernel);
                 }
                 workgroupBarrier();
                 if lane == 0u {
@@ -374,7 +398,7 @@ fn grain_field(
                     var slot = start + slots[lane];
                     for (var k = 0u; k < drawn.x; k++) {
                         let c = cloud(p, at, drawn.y, k);
-                        if touches(c, lo, hi) {
+                        if touches(c, p.kernel, lo, hi) {
                             clouds[slot] = c;
                             slot += 1u;
                         }
@@ -388,7 +412,7 @@ fn grain_field(
         }
         let held = workgroupUniformLoad(&stored);
         if inside {
-            sum += stored_sum(pixel, held);
+            sum += stored_sum(pixel, held, p.kernel);
         }
         // The next process reuses the store.
         workgroupBarrier();
@@ -406,7 +430,7 @@ fn tap(offset: u32) -> f32 {
     return tables[params.counts.y + offset];
 }
 
-// `Scanner::blur`, horizontal: `field` into `scratch`, edges clamped.
+// `Aperture::blur`, horizontal: `field` into `scratch`, edges clamped.
 @compute @workgroup_size(16, 16)
 fn scan_horizontal(@builtin(global_invocation_id) id: vec3<u32>) {
     let width = params.band.x;
@@ -426,7 +450,7 @@ fn scan_horizontal(@builtin(global_invocation_id) id: vec3<u32>) {
     scratch[dst + 2u] = acc.z;
 }
 
-// `Scanner::blur`, vertical: `scratch` back into `field`.
+// `Aperture::blur`, vertical: `scratch` back into `field`.
 @compute @workgroup_size(16, 16)
 fn scan_vertical(@builtin(global_invocation_id) id: vec3<u32>) {
     let width = params.band.x;
