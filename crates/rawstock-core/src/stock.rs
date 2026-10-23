@@ -65,6 +65,10 @@ pub struct Parametric {
 /// With [`Self::with_print_dyes`] the print stage forms each paper density
 /// from its own dye spectrum and views the print under D65, instead of
 /// treating the three print densities as ideal ACEScg dyes.
+///
+/// With [`Self::with_neutral_scale`] the scan is balanced at every gray
+/// level, not only at `reference_log_exposure`: each channel gets its own
+/// tone curve, the way a scanner neutralizes a slide.
 #[derive(Debug, Clone)]
 pub struct Spectral {
     wavelengths: Vec<f32>,
@@ -80,6 +84,9 @@ pub struct Spectral {
     print_dyes: Option<PrintDyes>,
     /// Subtracted from the scanned density so `reference_log_exposure` prints neutral.
     scan_balance: [f32; 3],
+    /// Per-channel scanned density → neutral density, when the whole gray
+    /// scale is balanced. Replaces `scan_balance`.
+    neutral_scale: Option<[Curve; 3]>,
     reference_log_exposure: Option<f32>,
     curves: [Curve; 3],
     coupling: Option<[[f32; 3]; 3]>,
@@ -208,6 +215,10 @@ pub enum ModelError {
     /// Scan responses were set without dye curves to read.
     #[error("scan responses are only valid with dye density curves")]
     ScanWithoutDye,
+
+    /// A neutral scale was asked for without dye curves to scan.
+    #[error("a neutral scale is only valid with dye density curves")]
+    NeutralWithoutDye,
 
     /// A print dye-density sample was negative, non-finite, or the wrong length.
     #[error(
@@ -469,6 +480,7 @@ impl Spectral {
             scan_responses: None,
             print_dyes: None,
             scan_balance: [0.0; 3],
+            neutral_scale: None,
             reference_log_exposure,
             curves,
             coupling,
@@ -512,8 +524,82 @@ impl Spectral {
         Ok(self)
     }
 
+    /// Balance the scan at every gray level, not only at the reference.
+    ///
+    /// The stock must have dye curves. Gray exposures across the curves are
+    /// scanned, and each channel's scanned density is mapped onto the mean
+    /// of the three, so any neutral prints neutral. Colors pass through the
+    /// same three per-channel curves, as on a scanner.
+    pub fn with_neutral_scale(mut self) -> Result<Self, ModelError> {
+        if self.dye_density.is_none() {
+            return Err(ModelError::NeutralWithoutDye);
+        }
+        self.neutral_scale = Some(self.neutral_curves());
+        Ok(self)
+    }
+
+    /// The per-channel neutral curves, when the whole scale is balanced.
+    pub fn neutral_scale(&self) -> Option<&[Curve; 3]> {
+        self.neutral_scale.as_ref()
+    }
+
+    /// Scanned density → mean scanned density, per channel, over the grays.
+    ///
+    /// Sampled across the union of the three curves' log exposure. Knots
+    /// where a channel's density no longer changes (a curve's flat end) are
+    /// dropped. Two knots far outside the scanned range continue the end
+    /// offsets at slope 1, so colors beyond the grays keep their spacing.
+    fn neutral_curves(&self) -> [Curve; 3] {
+        const SAMPLES: usize = 256;
+        const STEP: f32 = 1.0e-4;
+        const REACH: f32 = 20.0;
+        let low = self
+            .curves
+            .iter()
+            .map(|curve| curve.log_h[0])
+            .fold(f32::INFINITY, f32::min);
+        let high = self
+            .curves
+            .iter()
+            .map(|curve| curve.log_h[curve.log_h.len() - 1])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let mut pairs: [Vec<(f32, f32)>; 3] = Default::default();
+        for index in 0..SAMPLES {
+            let log_h = low + (high - low) * index as f32 / (SAMPLES - 1) as f32;
+            let density = [
+                self.curves[0].eval(log_h),
+                self.curves[1].eval(log_h),
+                self.curves[2].eval(log_h),
+            ];
+            let scanned = self.scanned_density(density);
+            let mean = (scanned[0] + scanned[1] + scanned[2]) / 3.0;
+            for (channel, list) in pairs.iter_mut().enumerate() {
+                list.push((scanned[channel], mean));
+            }
+        }
+        pairs.map(|mut list| {
+            list.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+            let mut knots: Vec<(f32, f32)> = Vec::with_capacity(list.len() + 2);
+            for (scanned, mean) in list {
+                match knots.last() {
+                    Some(&(last, _)) if scanned < last + STEP => {}
+                    Some(&(_, last_mean)) => knots.push((scanned, mean.max(last_mean))),
+                    None => knots.push((scanned, mean)),
+                }
+            }
+            let (first_x, first_y) = knots[0];
+            let (last_x, last_y) = knots[knots.len() - 1];
+            knots.insert(0, (first_x - REACH, first_y - REACH));
+            knots.push((last_x + REACH, last_y + REACH));
+            Curve::new(knots).expect("neutral curve is monotone")
+        })
+    }
+
     /// Recompute the scan balance from `reference_log_exposure`.
     fn rebalance(&mut self) {
+        if self.neutral_scale.is_some() {
+            self.neutral_scale = Some(self.neutral_curves());
+        }
         self.scan_balance = [0.0; 3];
         if let Some(log_h) = self.reference_log_exposure {
             let density = [
@@ -720,11 +806,18 @@ impl Spectral {
     /// `print_exposure - density` into light, so `print_exposure + slide
     /// density` views the slide itself, denser and darker.
     fn printing(&self, scanned: [f32; 3]) -> [f32; 3] {
-        let balanced = [
-            scanned[0] - self.scan_balance[0],
-            scanned[1] - self.scan_balance[1],
-            scanned[2] - self.scan_balance[2],
-        ];
+        let balanced = match &self.neutral_scale {
+            Some(curves) => [
+                curves[0].eval(scanned[0]),
+                curves[1].eval(scanned[1]),
+                curves[2].eval(scanned[2]),
+            ],
+            None => [
+                scanned[0] - self.scan_balance[0],
+                scanned[1] - self.scan_balance[1],
+                scanned[2] - self.scan_balance[2],
+            ],
+        };
         match self.process {
             Process::Negative => balanced,
             Process::Reversal => balanced.map(|channel| -channel),
@@ -784,6 +877,8 @@ pub(crate) struct ScanTables<'a> {
     pub balance: [f32; 3],
     /// 1 for a negative, -1 for a reversal stock, whose scan is negated.
     pub sign: f32,
+    /// Per-channel neutral curves that replace `balance`, when set.
+    pub neutral: Option<&'a [Curve; 3]>,
 }
 
 #[cfg(feature = "gpu")]
@@ -798,6 +893,7 @@ impl Spectral {
                     Process::Negative => 1.0,
                     Process::Reversal => -1.0,
                 },
+                neutral: self.neutral_scale.as_ref(),
             }),
             _ => None,
         };
@@ -904,6 +1000,7 @@ impl FilmModel {
                 left.dye_density == right.dye_density
                     && left.scan_responses == right.scan_responses
                     && left.reference_log_exposure == right.reference_log_exposure
+                    && left.neutral_scale.is_some() == right.neutral_scale.is_some()
             }
             _ => false,
         }
@@ -1690,6 +1787,9 @@ struct StockFile {
     /// `negative` (the default) or `reversal`. Spectral stocks only.
     #[serde(default)]
     process: Option<Process>,
+    /// Balance the scan at every gray level. Spectral stocks with dyes only.
+    #[serde(default)]
+    neutral_scale: Option<bool>,
 }
 
 /// Three sampled spectra on the stock's wavelength grid.
@@ -1952,6 +2052,9 @@ impl Stock {
                 if let Some(dyes) = print_dyes {
                     model = model.with_print_dyes(dyes).map_err(StockError::Model)?;
                 }
+                if file.neutral_scale == Some(true) {
+                    model = model.with_neutral_scale().map_err(StockError::Model)?;
+                }
                 FilmModel::Spectral(Box::new(model))
             }
         };
@@ -2184,6 +2287,11 @@ fn reject_spectral_fields(file: &StockFile) -> Result<(), StockError> {
     if file.process.is_some() {
         return Err(StockError::NotParametric { field: "process" });
     }
+    if file.neutral_scale.is_some() {
+        return Err(StockError::NotParametric {
+            field: "neutral_scale",
+        });
+    }
     Ok(())
 }
 
@@ -2372,6 +2480,9 @@ impl StockText {
         if let FilmModel::Spectral(model) = stock.parameters.film() {
             if model.process() == Process::Reversal {
                 text.key_raw("process", &model.process().to_string());
+            }
+            if model.neutral_scale().is_some() {
+                text.line("neutral_scale = true");
             }
             if let Some(reference) = model.reference_log_exposure() {
                 text.key_float("reference_log_exposure", reference);
@@ -2796,6 +2907,74 @@ mod tests {
         )
         .unwrap();
         assert_eq!(negative.process(), Process::Negative);
+    }
+
+    #[test]
+    fn neutral_scale_keeps_every_gray_neutral() {
+        let wavelengths: Vec<f32> = (0..41).map(|index| 380.0 + index as f32 * 10.0).collect();
+        let flat = flat_sensitivity(&wavelengths);
+        // Banded dyes, so each scan channel mostly reads its own layer.
+        let band = |low: f32, high: f32| -> Vec<f32> {
+            wavelengths
+                .iter()
+                .map(|&w| if (low..high).contains(&w) { 1.0 } else { 0.02 })
+                .collect()
+        };
+        let dyes = [band(600.0, 800.0), band(500.0, 600.0), band(300.0, 500.0)];
+        // The red layer has less contrast, as in the Velvia datasheet.
+        let red = Curve::falling([
+            (-3.0, 2.6),
+            (-1.5, 1.6),
+            (-0.5, 0.8),
+            (0.5, 0.2),
+            (1.0, 0.15),
+        ])
+        .unwrap();
+        let curves = [red, falling_curve(), falling_curve()];
+        let build = || {
+            Spectral::new(
+                wavelengths.clone(),
+                [flat.clone(), flat.clone(), flat.clone()],
+                Some(dyes.clone()),
+                curves.clone(),
+                None,
+                Some(-0.5),
+            )
+            .unwrap()
+        };
+        let spread = |model: &Spectral, log_h: f32| {
+            let density = curves.clone().map(|curve| curve.eval(log_h));
+            let printed = model.printing(model.scanned_density(density));
+            printed[0].max(printed[1]).max(printed[2]) - printed[0].min(printed[1]).min(printed[2])
+        };
+        let single = build();
+        assert!(spread(&single, -0.5) < 1.0e-4);
+        assert!(spread(&single, -2.5) > 0.1, "the test curves should drift");
+        let neutral = build().with_neutral_scale().unwrap();
+        for log_h in [-2.8, -2.0, -1.0, -0.5, 0.0, 0.8] {
+            assert!(spread(&neutral, log_h) < 2.0e-3, "gray at {log_h} drifted");
+        }
+        // Dye scaling rebuilds the curves rather than dropping them.
+        assert!(
+            neutral
+                .with_dye_scales([1.1, 1.0, 0.9])
+                .unwrap()
+                .neutral_scale()
+                .is_some()
+        );
+
+        let err = Spectral::new(
+            wavelengths.clone(),
+            [flat.clone(), flat.clone(), flat],
+            None,
+            [sample_curve(), sample_curve(), sample_curve()],
+            None,
+            None,
+        )
+        .unwrap()
+        .with_neutral_scale()
+        .unwrap_err();
+        assert!(matches!(err, ModelError::NeutralWithoutDye));
     }
 
     #[test]

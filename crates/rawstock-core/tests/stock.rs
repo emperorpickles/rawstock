@@ -455,6 +455,14 @@ fn spectral_velvia_is_a_reversal_stock_beside_the_parametric_one() {
     assert!(model.curves().iter().all(|curve| curve.falls()));
     assert!(model.dye_density().is_some());
     assert!(model.reference_log_exposure().is_some());
+    assert!(model.neutral_scale().is_some());
+    for row in model.coupling().expect("velvia coupling") {
+        let sum = row.iter().sum::<f32>();
+        assert!(
+            (sum - 1.0).abs() < 1.0e-5,
+            "coupling row {row:?} sums to {sum}"
+        );
+    }
     for layer in model.sensitivities() {
         let integral = trapezoid(model.wavelengths(), layer);
         assert!(
@@ -471,25 +479,29 @@ fn spectral_velvia_is_a_reversal_stock_beside_the_parametric_one() {
         assert!(layer.points().eq(other.points()));
     }
 
-    // A slide is a positive: more light develops brighter, and the
-    // reference gray scans close to neutral.
+    // A slide is a positive: more light develops brighter, and with the
+    // neutral scale every gray stays neutral, shadows to highlights.
     let mut parameters = stock.parameters().clone();
     parameters.set_grain(None).unwrap();
-    let pipeline = Pipeline::new(parameters);
+    let pipeline = Pipeline::new(parameters.clone());
     let mut previous = 0.0f32;
-    for level in [0.02, 0.06, 0.18, 0.5, 1.0] {
+    for level in [0.005, 0.02, 0.06, 0.18, 0.5] {
         let pixel = pipeline.develop(&gray_image(level)).pixels().to_vec();
         let mean = pixel.iter().sum::<f32>() / 3.0;
         assert!(mean > previous, "gray {level} developed to {pixel:?}");
         previous = mean;
+        let spread = pixel[0].max(pixel[1]).max(pixel[2]) - pixel[0].min(pixel[1]).min(pixel[2]);
+        assert!(spread < 0.01, "gray {level} is not neutral: {pixel:?}");
     }
-    let gray = pipeline.develop(&gray_image(0.18)).pixels().to_vec();
-    let spread = gray[0].max(gray[1]).max(gray[2]) - gray[0].min(gray[1]).min(gray[2]);
-    assert!(spread < 0.01, "reference gray is not neutral: {gray:?}");
-    for &channel in &gray {
+    // Placed like the parametric Velvia: a camera's middle gray, near
+    // scene-linear 0.08 in rawstock's RAF decode, prints in the midtones.
+    let reference = Pipeline::new(parametric.parameters().clone()).develop(&gray_image(0.08));
+    let gray = pipeline.develop(&gray_image(0.08)).pixels().to_vec();
+    for (&channel, &other) in gray.iter().zip(reference.pixels()) {
         assert!(
-            (0.35..0.6).contains(&channel),
-            "reference gray left the midtones: {gray:?}"
+            (channel - other).abs() < 0.05,
+            "middle gray {gray:?} is far from the parametric {:?}",
+            reference.pixels()
         );
     }
 }
@@ -531,6 +543,18 @@ fn process_is_a_spectral_key_that_must_match_the_curves() {
     assert!(matches!(
         load_text(&parametric).unwrap_err(),
         StockError::NotParametric { field: "process" }
+    ));
+
+    // The neutral scale is spectral only, and needs dye curves.
+    let parametric = neutral_text().replace(
+        "model = \"parametric\"\n",
+        "model = \"parametric\"\nneutral_scale = true\n",
+    );
+    assert!(matches!(
+        load_text(&parametric).unwrap_err(),
+        StockError::NotParametric {
+            field: "neutral_scale"
+        }
     ));
 
     // Unknown processes fail to parse.

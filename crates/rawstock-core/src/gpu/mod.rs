@@ -434,6 +434,10 @@ struct StageParams {
     spectral: [u32; 4],
     scan_balance: [f32; 4],
     ap1_to_ap0: [[f32; 4]; 3],
+    /// Knot offsets and counts of the red, green, and blue neutral scan
+    /// curves. A zero count means the constant `scan_balance` applies.
+    neutral_offset: [u32; 4],
+    neutral_len: [u32; 4],
 }
 
 /// The film pipeline on a [`Gpu`], for one set of [`Parameters`].
@@ -495,6 +499,8 @@ impl GpuPipeline {
             spectral: [0; 4],
             scan_balance: [0.0; 4],
             ap1_to_ap0: [[0.0; 4]; 3],
+            neutral_offset: [0; 4],
+            neutral_len: [0; 4],
         };
         let device = &gpu.inner.device;
         let mut sequence = vec![Kernel::Exposure];
@@ -518,6 +524,12 @@ impl GpuPipeline {
                         }
                         let balance = scan.balance;
                         params.scan_balance = [balance[0], balance[1], balance[2], scan.sign];
+                        if let Some(curves) = scan.neutral {
+                            for (channel, curve) in curves.iter().enumerate() {
+                                params.neutral_offset[channel] = knots.len() as u32;
+                                params.neutral_len[channel] = append_curve(&mut knots, curve);
+                            }
+                        }
                     }
                     None => values.resize(count * 10, 0.0),
                 }

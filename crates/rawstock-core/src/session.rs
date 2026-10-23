@@ -1359,6 +1359,7 @@ fn crop_buffer(
 #[derive(Clone, PartialEq, Eq)]
 struct DyeKey {
     process: crate::stock::Process,
+    neutral_scale: bool,
     reference: Option<u32>,
     samples: Vec<u32>,
 }
@@ -1375,6 +1376,7 @@ impl DyeKey {
         }
         Some(Self {
             process: model.process(),
+            neutral_scale: model.neutral_scale().is_some(),
             reference: model.reference_log_exposure().map(f32::to_bits),
             samples,
         })

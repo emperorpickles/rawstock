@@ -50,6 +50,11 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   with a Status M scan, the Portra Endura paper curve and dyes, and grain
   retuned for the paper's contrast. Adds `[scan_response]` and
   `[print_dye_density]` to schema 1, CPU and GPU.
+- **#73** — Spectral Velvia brought in line with the parametric one
+  (`agent: claude`, `stage: ready`, waiting on Caleb's look review).
+  Exposure placed for camera files, a new spectral `neutral_scale` key
+  (per-channel neutral scan balance, CPU and GPU), and an approximate
+  saturation coupling.
 - **#52, #53** — 1.0 app presets and export queue (`agent: claude`,
   `stage: holding`) until #39 and #41 land.
 
