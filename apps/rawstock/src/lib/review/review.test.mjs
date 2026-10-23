@@ -351,6 +351,120 @@ test("a memory eviction drops the texture and develops for region delivery", asy
   assert.equal(host.count("develop_full"), 2);
 });
 
+test("zoomed drag previews develop the full frame once, on release", async () => {
+  for (const zoom of [1, 2]) {
+    const { host, review } = harness();
+    review.adjustOwnsAfterPreview();
+    review.open("img", settings(0), { width: 800, height: 600 });
+    review.setZoom(zoom);
+    await flush();
+    const full = host.last("develop_full");
+    done(review, full);
+    ready(review, full);
+    await flush();
+    const during = host.count("develop_full");
+    assert.equal(during, 1);
+
+    let jobId = 20;
+    for (const exposure of [0.1, 0.2, 0.3]) {
+      review.holdPreview(settings(exposure), 720);
+      host.jobs.set(jobId, { kind: "preview", settings: settings(exposure) });
+      review.claimPreview(jobId);
+      review.done({
+        jobId,
+        imageId: "img",
+        kind: "preview",
+        settingsHash: `hash-${exposure}`,
+        width: 24,
+        height: 16,
+        exact: false,
+      });
+      await flush();
+      assert.equal(host.count("develop_full"), during, `zoom ${zoom} exposure ${exposure}`);
+      jobId += 1;
+    }
+
+    review.update(settings(0.3));
+    await flush();
+    assert.equal(host.count("develop_full"), during + 1, `zoom ${zoom}`);
+    assert.equal(host.last("develop_full").settings.exposureEv, 0.3);
+  }
+});
+
+test("settling a drag still develops the full frame once", async () => {
+  const { host, review } = harness();
+  review.adjustOwnsAfterPreview();
+  review.open("img", settings(0), { width: 800, height: 600 });
+  review.setZoom(1);
+  await flush();
+  assert.equal(host.count("develop_preview"), 0);
+  assert.equal(host.count("develop_full"), 1);
+  review.holdPreview(settings(0.5), 720);
+  review.update(settings(0.5));
+  await flush();
+  assert.equal(host.count("develop_full"), 2);
+  assert.equal(host.last("develop_full").settings.exposureEv, 0.5);
+});
+
+test("a preview replaced before it lands is discarded", async () => {
+  const { host, review, view } = harness();
+  review.adjustOwnsAfterPreview();
+  review.open("img", settings(0));
+  await flush();
+  review.holdPreview(settings(0), 720);
+  review.claimPreview(4);
+  host.jobs.set(4, { kind: "preview", settings: settings(0) });
+  review.holdPreview(settings(1), 1536);
+  review.done({
+    jobId: 4,
+    imageId: "img",
+    kind: "preview",
+    settingsHash: "hash-0",
+    width: 99,
+    height: 99,
+    exact: false,
+  });
+  await flush();
+  assert.equal(view().after, null);
+  assert.equal(host.count("take_frame"), 1);
+});
+
+test("split still develops the before image while adjust owns the after preview", async () => {
+  const { host, review } = harness();
+  review.adjustOwnsAfterPreview();
+  review.open("img", settings(0));
+  review.update(settings(1));
+  review.setCompare(true);
+  await flush();
+  assert.equal(host.count("develop_preview"), 1);
+  assert.equal(host.last("develop_preview").compare, true);
+  assert.equal(host.last("develop_preview").settings.exposureEv, 0);
+});
+
+test("an adjust preview that finishes before its id is known is still shown", async () => {
+  const { host, review, view } = harness();
+  review.adjustOwnsAfterPreview();
+  review.open("img", settings());
+  await flush();
+  assert.equal(host.count("develop_preview"), 0);
+  review.holdPreview(settings(0.5), 720);
+  review.done({
+    jobId: 9,
+    imageId: "img",
+    kind: "preview",
+    settingsHash: "hash-0.5",
+    width: 24,
+    height: 16,
+    exact: false,
+  });
+  assert.equal(view().after, null);
+  host.jobs.set(9, { kind: "preview", settings: settings(0.5) });
+  review.claimPreview(9);
+  await flush();
+  assert.equal(view().after.frame.width, 24);
+  assert.equal(view().after.frame.height, 16);
+});
+
 test("a failed develop is reported once and not retried", async () => {
   const { host, review, errors } = harness();
   review.open("img", settings());

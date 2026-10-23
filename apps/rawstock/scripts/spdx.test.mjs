@@ -5,6 +5,10 @@ import { Spdx } from "./spdx.mjs";
 
 test("single allowed licenses pass and others fail", () => {
   assert.equal(Spdx.allowed("MIT"), true);
+  assert.equal(Spdx.allowed("OFL-1.1"), false);
+  assert.equal(Spdx.allowed("OFL-1.1", undefined, "@fontsource/inter"), true);
+  assert.equal(Spdx.allowed("OFL-1.1", undefined, "@fontsource/jetbrains-mono"), true);
+  assert.equal(Spdx.allowed("OFL-1.1", undefined, "some-other-font"), false);
   assert.equal(Spdx.allowed("LGPL-2.1"), true);
   assert.equal(Spdx.allowed("GPL-2.0-only"), false);
   assert.equal(Spdx.allowed("SSPL-1.0"), false);

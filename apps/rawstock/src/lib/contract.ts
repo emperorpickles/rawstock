@@ -134,12 +134,22 @@ export interface OpenOutcome {
   rejected: RejectedPath[];
 }
 
+export interface StockControls {
+  dye: boolean;
+  contrast: boolean;
+  grain: boolean;
+  halationThreshold?: number;
+  halationRadius?: number;
+}
+
 export interface StockSummary {
   id: string;
   name: string;
   category: StockCategory;
   model: string;
   revision: number;
+  /** Absent only in older fixtures. The app always sends it. */
+  controls?: StockControls;
 }
 
 export interface JobStarted {

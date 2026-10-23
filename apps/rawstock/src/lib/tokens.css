@@ -1,0 +1,53 @@
+/*
+ * Design tokens for every rawstock 1.0 screen.
+ * `data-theme` on the document root picks the palette. The viewer surround
+ * is not a theme token: Preferences sets `--surround` inline, and it stays
+ * a neutral grey in both themes.
+ */
+
+:root,
+:root[data-theme="warm"] {
+  --app: #141210;
+  --panel: #1b1815;
+  --paper: #231f1b;
+  --line: #3a332c;
+  --ink: #f3eadc;
+  --muted: #b3a594;
+  --accent: #d7a15a;
+  --accent-deep: #8a6230;
+  --on-accent: #1a140e;
+  --danger: #e0a090;
+  --tick-major: #766c60;
+  --tick-minor: #524a41;
+  --fill: #2a241e;
+}
+
+:root[data-theme="neutral"] {
+  --app: #101010;
+  --panel: #161616;
+  --paper: #1c1c1c;
+  --line: #3a3a3a;
+  --ink: #f2f2f2;
+  --muted: #a3a3a3;
+  --accent: #d4d4d4;
+  --accent-deep: #8a8a8a;
+  --on-accent: #141414;
+  --danger: #c8c8c8;
+  --tick-major: #6a6a6a;
+  --tick-minor: #454545;
+  --fill: #2a2a2a;
+}
+
+:root {
+  --font-ui: "Inter", "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  --gutter: 8px;
+  --surround: #2e2e2e;
+  --surround-ink: #f2f2f2;
+  color-scheme: dark;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.35;
+  background: var(--app);
+  color: var(--ink);
+}

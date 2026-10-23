@@ -116,7 +116,7 @@
   }
 
   .count {
-    color: #9a9a9a;
+    color: var(--muted);
     font-weight: normal;
     margin-left: 0.3rem;
   }
@@ -131,8 +131,8 @@
     font-size: 0.8rem;
     max-height: 18rem;
     overflow: auto;
-    background: #141414;
-    border: 1px solid #3a3a3a;
+    background: var(--app);
+    border: 1px solid var(--line);
     border-radius: 6px;
     padding: 0.6rem;
   }
@@ -142,8 +142,8 @@
   }
 
   input[type="search"] {
-    background: #141414;
-    border: 1px solid #3a3a3a;
+    background: var(--app);
+    border: 1px solid var(--line);
     border-radius: 6px;
     padding: 0.3rem 0.5rem;
   }

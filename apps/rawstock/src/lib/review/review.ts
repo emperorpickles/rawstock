@@ -287,11 +287,15 @@ export class ReviewController {
   private zoom: Zoom = "fit";
   private compare = false;
   private longEdge = ReviewController.defaultEdge;
+  /** The adjust panel starts after-side previews. This controller does not. */
+  private yieldAfter = false;
   private memoryPressure = false;
   private delivery: "texture" | "region" = "texture";
   private pending: Record<Slot, Job | null> = { preview: null, full: null };
   private known = new Map<number, Job>();
   private early = new Map<number, EarlyEvent>();
+  /** Preview ids the adjust panel replaced. Their frames are discarded. */
+  private abandoned = new Set<number>();
   private landed = new Map<string, Job>();
   private ready = new Map<string, { width: number; height: number }>();
   private opened = new Map<string, EditSettings>();
@@ -324,6 +328,7 @@ export class ReviewController {
     this.pending = { preview: null, full: null };
     this.known.clear();
     this.early.clear();
+    this.abandoned.clear();
     this.landed.clear();
     this.ready.clear();
     this.regionRect = null;
@@ -339,23 +344,27 @@ export class ReviewController {
     this.pending = { preview: null, full: null };
     this.known.clear();
     this.early.clear();
+    this.abandoned.clear();
     this.landed.clear();
     this.ready.clear();
     this.emit();
   }
 
-  /** Settings settled. Older jobs for the after side are superseded. */
+  /**
+   * Settings settled. Older full develops for the after side are superseded.
+   * A drag does not write this key; pumping when it already matches is a
+   * no-op while that full frame is current.
+   */
   update(settings: EditSettings): void {
     if (!this.after) {
       return;
     }
     const key = ReviewController.key(settings);
-    if (key === this.after.key) {
-      return;
+    if (key !== this.after.key) {
+      this.after.settings = ReviewController.clone(settings);
+      this.after.key = key;
+      this.emit();
     }
-    this.after.settings = ReviewController.clone(settings);
-    this.after.key = key;
-    this.emit();
     this.pump();
   }
 
@@ -370,6 +379,76 @@ export class ReviewController {
     this.compare = active;
     this.emit();
     this.pump();
+  }
+
+  /**
+   * After-side previews belong to the adjust panel, which picks 720 px while
+   * a slider moves and the screen size when it settles. Before-side previews
+   * and full develops stay here.
+   */
+  adjustOwnsAfterPreview(): void {
+    this.yieldAfter = true;
+  }
+
+  /**
+   * Reserve the preview slot for an adjust develop whose id is not known yet,
+   * so a before-side preview does not take the slot out from under it.
+   * The drag key stays on that job. `after.key` is the settled edit, and a
+   * full develop is stale only against that, so a finished drag preview does
+   * not develop the intermediate value.
+   */
+  holdPreview(settings: EditSettings, edge: number): void {
+    if (!this.after) {
+      return;
+    }
+    const key = ReviewController.key(settings);
+    const previous = this.pending.preview;
+    if (previous?.side === "after" && previous.id != null) {
+      this.known.delete(previous.id);
+      this.abandoned.add(previous.id);
+    }
+    this.pending.preview = {
+      id: null,
+      adopting: false,
+      side: "after",
+      slot: "preview",
+      key,
+      edge,
+      hash: "",
+    };
+    this.emit();
+  }
+
+  /** The adjust command failed before it had an id. Free the slot. */
+  releasePreview(): void {
+    const job = this.pending.preview;
+    if (!job || job.side !== "after" || job.id !== null) {
+      return;
+    }
+    this.pending.preview = null;
+    this.pump();
+  }
+
+  /** The adjust preview's id arrived. A terminal event may already be buffered. */
+  claimPreview(jobId: number): void {
+    const job = this.pending.preview;
+    if (!job || job.side !== "after" || job.id !== null) {
+      return;
+    }
+    job.id = jobId;
+    this.known.set(jobId, job);
+    const early = this.early.get(jobId);
+    if (!early) {
+      return;
+    }
+    this.early.delete(jobId);
+    if (early.type === "done") {
+      this.done(early.event);
+    } else if (early.type === "cancelled") {
+      this.cancelled(early.event);
+    } else {
+      this.failed(early.event);
+    }
   }
 
   /** The viewer's long edge in device pixels. Rounded so resizes do not churn. */
@@ -391,6 +470,10 @@ export class ReviewController {
   }
 
   done(event: DoneEvent): void {
+    if (this.abandoned.delete(event.jobId)) {
+      void this.host.takeFrame(event.jobId).catch(() => {});
+      return;
+    }
     const job = this.known.get(event.jobId);
     if (!job) {
       this.remember(event.jobId, { type: "done", event });
@@ -418,6 +501,9 @@ export class ReviewController {
   }
 
   cancelled(event: CancelledEvent): void {
+    if (this.abandoned.delete(event.jobId)) {
+      return;
+    }
     const job = this.known.get(event.jobId);
     if (!job) {
       this.remember(event.jobId, { type: "cancelled", event });
@@ -431,6 +517,9 @@ export class ReviewController {
   }
 
   failed(event: FailedEvent): void {
+    if (this.abandoned.delete(event.jobId)) {
+      return;
+    }
     const job = this.known.get(event.jobId);
     if (!job) {
       this.remember(event.jobId, { type: "failed", event });
@@ -558,11 +647,14 @@ export class ReviewController {
     const previewFor = (side: SideState) =>
       (side.previewKey !== side.key || side.previewEdge !== this.longEdge) &&
       side.failedPreview !== `${side.key}@${this.longEdge}`;
-    const previewTarget: Side | null = previewFor(after)
-      ? "after"
-      : compareBefore && previewFor(before)
-        ? "before"
-        : null;
+    // The adjust panel starts after-side previews. Asking for one here would
+    // only block the before side, which still has to wait for a free slot.
+    const previewTarget: Side | null =
+      !this.yieldAfter && previewFor(after)
+        ? "after"
+        : compareBefore && previewFor(before)
+          ? "before"
+          : null;
     this.schedule("preview", previewTarget);
 
     const zoomed = this.zoom !== "fit";
@@ -588,6 +680,9 @@ export class ReviewController {
 
   private schedule(slot: Slot, target: Side | null): void {
     if (!target) {
+      return;
+    }
+    if (this.yieldAfter && slot === "preview" && target === "after") {
       return;
     }
     const side = this.sideState(target);
