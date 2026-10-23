@@ -1,6 +1,6 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
-  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { onMount } from "svelte";
@@ -11,7 +11,12 @@
   import Filmstrip from "./lib/Filmstrip.svelte";
   import { FrameBuffer } from "./lib/frame";
   import type { PackedFrame } from "./lib/frame";
+  import About from "./lib/help/About.svelte";
+  import Licenses from "./lib/help/Licenses.svelte";
+  import { Report } from "./lib/help/report";
+  import type { AppInfo } from "./lib/help/report";
   import { Host } from "./lib/host";
+  import Onboarding from "./lib/onboarding/Onboarding.svelte";
   import Preferences from "./lib/preferences/Preferences.svelte";
   import { Preferences as Prefs } from "./lib/preferences/settings";
   import type { AppSettings } from "./lib/preferences/settings";
@@ -39,7 +44,11 @@
   let aboutOpen = $state(false);
   let licensesOpen = $state(false);
   let preferencesOpen = $state(false);
+  let onboardingOpen = $state(false);
+  let onboardingMode = $state<"welcome" | "cheat-sheet">("welcome");
+  let samplePath = $state<string | null>(null);
   let appSettings = $state<AppSettings>(Prefs.defaults());
+  let appInfo = $state<AppInfo | null>(null);
   let quality = $state(90);
   let frame = $state<PackedFrame | null>(null);
   let frameMode = $state<"texture" | "region" | "empty">("empty");
@@ -49,8 +58,6 @@
   let cacheWidth = $state(0);
   let cacheHeight = $state(0);
   let exportDialog = $state<HTMLDialogElement | null>(null);
-  let aboutDialog = $state<HTMLDialogElement | null>(null);
-  let licensesDialog = $state<HTMLDialogElement | null>(null);
 
   $effect(() => {
     Prefs.applyAppearance(appSettings);
@@ -60,8 +67,6 @@
 
   $effect(() => {
     syncDialog(exportDialog, exportOpen);
-    syncDialog(aboutDialog, aboutOpen);
-    syncDialog(licensesDialog, licensesOpen);
   });
 
   function syncDialog(dialog: HTMLDialogElement | null, openDialog: boolean) {
@@ -171,6 +176,19 @@
       cleanups.push(...unlisten);
       try {
         appSettings = await host.getAppSettings();
+        if (!appSettings.onboarding.completed) {
+          showOnboarding("welcome");
+        }
+      } catch (error) {
+        errors = [appError(error).message];
+      }
+      try {
+        samplePath = await host.onboardingSample();
+      } catch {
+        samplePath = null;
+      }
+      try {
+        appInfo = await host.appInfo();
       } catch (error) {
         errors = [appError(error).message];
       }
@@ -307,6 +325,12 @@
       case "preferences":
         preferencesOpen = true;
         break;
+      case "welcome":
+        showOnboarding("welcome");
+        break;
+      case "cheat-sheet":
+        showOnboarding("cheat-sheet");
+        break;
       case "about":
         aboutOpen = true;
         break;
@@ -314,8 +338,17 @@
         licensesOpen = true;
         break;
       case "report-issue":
-        if (host) {
-          await openUrl("https://github.com/emperorpickles/rawstock/issues/new");
+        if (host && appInfo) {
+          await openUrl(Report.issueUrl(appInfo));
+        }
+        break;
+      case "show-log":
+        if (host && appInfo) {
+          try {
+            await revealItemInDir(appInfo.logPath);
+          } catch {
+            errors = [`The log file could not be shown. It is at ${appInfo.logPath}`];
+          }
         }
         break;
       default:
@@ -357,6 +390,25 @@
       appSettings = await host.setAppSettings(next);
     } catch (error) {
       errors = [appError(error).message];
+    }
+  }
+
+  function showOnboarding(mode: "welcome" | "cheat-sheet") {
+    if (onboardingOpen) {
+      return;
+    }
+    onboardingMode = mode;
+    onboardingOpen = true;
+  }
+
+  function closeOnboarding(dontShowAgain: boolean) {
+    onboardingOpen = false;
+    const completed = onboardingMode === "welcome" ? dontShowAgain : appSettings.onboarding.completed;
+    if (completed !== appSettings.onboarding.completed) {
+      void changeAppSettings({
+        ...appSettings,
+        onboarding: { ...appSettings.onboarding, completed },
+      });
     }
   }
 
@@ -506,23 +558,29 @@
   onclose={() => (preferencesOpen = false)}
 />
 
-<dialog bind:this={aboutDialog} aria-labelledby="about-title" onclose={() => (aboutOpen = false)}>
-  <h2 id="about-title">About rawstock</h2>
-  <p>rawstock 0.0.1 develops RAW photos through film stocks. This window is the app shell.</p>
-  <p>Licensed under GPL-3.0-or-later.</p>
-  <div class="dialog-actions">
-    <button type="button" onclick={() => (aboutOpen = false)}>Close</button>
-  </div>
-</dialog>
+<Onboarding
+  open={onboardingOpen}
+  mode={onboardingMode}
+  {platform}
+  sampleAvailable={samplePath !== null}
+  onopen={() => void perform("open")}
+  onopenfolder={() => void perform("open-folder")}
+  onsample={() => {
+    if (host && samplePath) {
+      void host.requestOpen([samplePath]);
+    }
+  }}
+  onclose={closeOnboarding}
+/>
 
-<dialog bind:this={licensesDialog} aria-labelledby="licenses-title" onclose={() => (licensesOpen = false)}>
-  <h2 id="licenses-title">Licenses</h2>
-  <p>rawstock is free software under the GNU General Public License, version 3 or any later version. You can redistribute it and modify it under those terms. The full text ships with the source as LICENSE.</p>
-  <ul>
-    <li>rawler is LGPL-2.1-only.</li>
-    <li>Tauri, serde, toml, and the Svelte toolchain are MIT or Apache-2.0.</li>
-  </ul>
-  <div class="dialog-actions">
-    <button type="button" onclick={() => (licensesOpen = false)}>Close</button>
-  </div>
-</dialog>
+<About
+  open={aboutOpen}
+  info={appInfo}
+  onclose={() => (aboutOpen = false)}
+  onlicenses={() => {
+    aboutOpen = false;
+    licensesOpen = true;
+  }}
+/>
+
+<Licenses open={licensesOpen} onclose={() => (licensesOpen = false)} />

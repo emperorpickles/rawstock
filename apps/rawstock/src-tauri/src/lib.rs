@@ -7,8 +7,10 @@ mod commands;
 mod contract;
 mod files;
 mod frame;
+mod help;
 mod jobs;
 mod menu;
+mod onboarding;
 mod recent;
 mod settings;
 mod shell;
@@ -34,6 +36,16 @@ pub fn run() {
         .setup(|app| {
             let log_dir = app.path().app_log_dir()?;
             std::fs::create_dir_all(&log_dir)?;
+            state::log_info(
+                &log_dir,
+                &format!(
+                    "rawstock {} ({}) started on {} {}",
+                    env!("CARGO_PKG_VERSION"),
+                    env!("RAWSTOCK_GIT_COMMIT"),
+                    std::env::consts::OS,
+                    std::env::consts::ARCH
+                ),
+            );
             let config_dir = app.path().app_config_dir()?;
             std::fs::create_dir_all(&config_dir)?;
             let (settings, note) = settings::SettingsStore::load(config_dir.join("settings.json"));
