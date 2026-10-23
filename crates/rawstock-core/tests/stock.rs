@@ -654,7 +654,8 @@ fn hp5_path() -> PathBuf {
 fn hp5_is_one_silver_layer() {
     let stock = Stock::load(hp5_path()).unwrap();
     assert_eq!(stock.name(), "Ilford HP5 Plus");
-    assert!(stock.source().starts_with("Approximate"));
+    assert!(stock.source().starts_with("Digitized"));
+    assert!(stock.source().contains("approximate"));
     let FilmModel::Spectral(model) = stock.parameters().film() else {
         panic!("HP5 Plus is spectral");
     };

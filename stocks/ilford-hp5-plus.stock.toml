@@ -1,18 +1,20 @@
 # Ilford HP5 Plus, schema 1 monochrome spectral stock.
-# Written by lab/ilford_bw.py. APPROXIMATE: the sensitivity, the
-# characteristic curve, grain, and halation are hand-drawn from the
-# shapes in Ilford's published datasheet figures (wedge spectrogram
-# and the ILFOTEC HC 1+31, 6.5 min at 20 C curve), not digitized from tables.
-# Ilford publishes no numeric tables for these.
+# Written by lab/ilford_bw.py. The sensitivity and characteristic
+# curve are digitized from the figures in Ilford's HP5 PLUS technical information, Nov 2018:
+# the wedge spectrogram to tungsten (2850 K) and the
+# ILFOTEC HC 1+31, 6.5 min at 20 C curve. Reading the spectrogram as
+# 3 decades of log sensitivity and placing the curve by ISO
+# speed are assumptions; see the script. Grain and halation are an
+# approximate aesthetic tuning.
 #
 # The print is Kodak Polymax Fine-Art paper, grade 1, measured,
 # from the MIT-licensed KODAK_POLYMAX module in Jan Lohse,
 # spectral_film_lut (https://github.com/JanLohse/spectral_film_lut).
 
 schema_version = 1
-revision = 1
+revision = 2
 name = "Ilford HP5 Plus"
-source = "Approximate hand reading of the Ilford HP5 Plus datasheet figures (wedge spectrogram to tungsten, characteristic curve in ILFOTEC HC 1+31, 6.5 min at 20 C); not a digitized table. Grain and halation are an approximate aesthetic tuning. Print curve: Kodak Professional Polymax Fine-Art paper grade 1 from spectral_film_lut (MIT, Jan Lohse)."
+source = "Digitized from the figures in Ilford HP5 PLUS technical information, Nov 2018 (wedge spectrogram to tungsten 2850 K, characteristic curve in ILFOTEC HC 1+31, 6.5 min at 20 C). The spectrogram is read as 3 decades of log sensitivity with the tungsten source divided out, and the curve is placed by ISO speed: approximate. Grain and halation are an approximate aesthetic tuning. Print curve: Kodak Professional Polymax Fine-Art paper grade 1 from spectral_film_lut (MIT, Jan Lohse)."
 license = "MIT"
 model = "spectral"
 emulsion = "monochrome"
@@ -21,19 +23,19 @@ emulsion = "monochrome"
 # about 0.08) on log10(12.5 / ISO).
 exposure_ev = -1.356144
 # Prints that middle gray at an 18 % reflector's density.
-print_exposure = 2.156368
+print_exposure = 2.175325
 
 wavelength_nm = [380, 390, 400, 410, 420, 430, 440, 450, 460, 470, 480, 490, 500, 510, 520, 530, 540, 550, 560, 570, 580, 590, 600, 610, 620, 630, 640, 650, 660, 670, 680, 690, 700, 710, 720, 730, 740, 750, 760, 770, 780]
 
-# Approximate. One panchromatic silver layer, equal-energy, integral 1.
+# The datasheet spectrogram as equal-energy sensitivity, integral 1.
 [sensitivity]
-silver = [0.005005, 0.005487, 0.006017, 0.00588, 0.005746, 0.005363, 0.005005, 0.00446, 0.003975, 0.003423, 0.002947, 0.002596, 0.002288, 0.002235, 0.00248, 0.00275, 0.00305, 0.003384, 0.003502, 0.003626, 0.003502, 0.003384, 0.003384, 0.003384, 0.003281, 0.002793, 0.002086, 0.000999, 0.000316, 0.000079, 0.00002, 0.000006, 0.000006, 0.000006, 0.000006, 0.000006, 0.000006, 0.000006, 0.000006, 0.000006, 0.000006]
+silver = [0.001271, 0.002901, 0.004754, 0.005584, 0.005781, 0.006049, 0.005966, 0.005543, 0.005019, 0.004425, 0.003668, 0.002958, 0.002319, 0.002251, 0.002523, 0.003045, 0.003695, 0.004351, 0.004972, 0.005073, 0.004621, 0.003506, 0.002669, 0.002456, 0.002714, 0.002281, 0.000151, 0.000011, 0.000006, 0.000006, 0.000006, 0.000006, 0.000006, 0.000006, 0.000006, 0.000006, 0.000006, 0.000006, 0.000006, 0.000006, 0.000006]
 
-# Approximate. Net density above base + fog. The ISO speed point
-# (net 0.10) sits at log10(0.8 / ISO).
+# The datasheet curve, net of base + fog. The ISO speed point
+# (net 0.10) is placed at log10(0.8 / ISO) lux seconds.
 [silver]
-log_exposure = [-3.6, -3.3, -3, -2.7, -2.4, -2.1, -1.8, -1.5, -1.2, -0.9, -0.6, -0.3, 0, 0.3, 0.6, 0.9, 1.2]
-density = [0, 0.01, 0.04, 0.1, 0.22, 0.4, 0.59, 0.78, 0.97, 1.16, 1.34, 1.52, 1.68, 1.83, 1.95, 2.04, 2.1]
+log_exposure = [-3.799, -3.299, -3.099, -2.999, -2.899, -2.799, -2.699, -2.599, -2.499, -2.399, -2.299, -2.199, -2.099, -1.999, -1.899, -1.799, -1.599, -1.399, -1.199, -0.999, -0.799, -0.599, -0.399, -0.199, 0.001, 0.201, 0.301]
+density = [0, 0, 0.015, 0.03, 0.05, 0.07, 0.1, 0.14, 0.18, 0.22, 0.28, 0.34, 0.4, 0.47, 0.54, 0.61, 0.73, 0.87, 1, 1.13, 1.25, 1.38, 1.5, 1.63, 1.76, 1.88, 1.94]
 
 # Kodak Polymax Fine-Art, grade 1, from the paper white.
 [print]

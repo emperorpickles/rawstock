@@ -70,9 +70,10 @@ python3 lab/import_spectral_film_lut.py \
 ## Ilford black and white stocks
 
 `ilford_bw.py` writes monochrome stocks (`emulsion = "monochrome"`) from
-hand-drawn knots, because Ilford publishes its curves only as figures. Every
-number but the paper curve is an approximation, and the written file says
-so. The paper curve is read from spectral_film_lut's MIT-licensed Polymax
+readings of Ilford's datasheet charts (the wedge spectrogram and the
+characteristic curve), because Ilford publishes its curves only as figures.
+The script's docstring lists the assumptions that turn the charts into a
+stock; grain and halation are approximate. The paper curve is read from spectral_film_lut's MIT-licensed Polymax
 module as source text. Only HP5 Plus is drawn so far; other Ilford films are
 new entries in its `FILMS` table.
 

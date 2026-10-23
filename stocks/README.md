@@ -279,18 +279,22 @@ There is no halation.
 ## Ilford HP5 Plus
 
 [ilford-hp5-plus.stock.toml](ilford-hp5-plus.stock.toml) is the first black
-and white stock, a monochrome spectral negative. It is an **approximate**
-hand reading, not a measurement: Ilford publishes HP5 Plus's spectral
-sensitivity (a wedge spectrogram to tungsten) and its characteristic curve
-only as figures, and no permissively licensed digitization exists.
-`lab/ilford_bw.py` writes the file from a few knots per curve.
+and white stock, a monochrome spectral negative. Ilford publishes HP5
+Plus's spectral sensitivity and characteristic curve only as figures, so
+`lab/ilford_bw.py` holds readings of the two charts in the November 2018
+HP5 PLUS technical information sheet, traced from the chart images and
+calibrated to their ticks and grid, and writes the file from them.
 
-- **Sensitivity.** Panchromatic: native blue, a shallow gap near 500 nm,
-  dye-sensitized green and red, and a red edge near 670 nm, so deep reds
-  print darker than the eye sees them.
-- **Curve.** Net density above base plus fog, the shape of the ILFOTEC HC
-  1+31 curve: ISO speed point (net 0.10) at `log10(0.8 / 400)`, a gentle
-  toe, and a long straight line near G-bar 0.62.
+- **Sensitivity.** The wedge spectrogram to tungsten (2850 K): native blue
+  from 356 nm, a dip at 505 nm, the green peak at 575 nm, and a red edge
+  at 655 nm, so deep reds print darker than the eye sees them. Its height
+  is read as 3 decades of log sensitivity, the usual spectrograph wedge,
+  and the tungsten spectrum is divided out. That scale is an assumption:
+  the chart does not state it.
+- **Curve.** The ILFOTEC HC 1+31 curve, net of its 0.18 base plus fog: a
+  short toe and a straight line at gradient 0.64. The chart's exposure
+  axis is relative, so the ISO speed point (net 0.10) is placed at
+  `log10(0.8 / 400)` lux seconds.
 - **Print.** Kodak Professional Polymax Fine-Art paper, grade 1, from the
   paper white. That curve is measured: the MIT-licensed `KODAK_POLYMAX`
   module in [spectral_film_lut](https://github.com/JanLohse/spectral_film_lut).

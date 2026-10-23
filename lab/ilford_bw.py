@@ -1,17 +1,32 @@
 #!/usr/bin/env python3
-"""Write a black and white (monochrome) Ilford stock from hand-drawn knots.
+"""Write a black and white (monochrome) Ilford stock from its datasheet charts.
 
 Ilford publishes its film curves only as figures: a wedge spectrogram to
-tungsten light and a characteristic curve for one developer. There is no
-numeric table and no MIT digitization in spectral_film_lut, so the knots in
-``FILMS`` below are an **approximate** hand reading of the shapes on the
-datasheet, not a measurement. Every stock this script writes says so in its
-``source`` and its comments.
+tungsten light (2850 K) and a characteristic curve for one developer. The
+``FILMS`` records below hold readings of those two figures, traced from the
+chart images in the datasheet PDF and calibrated to their tick marks and
+grid lines, then rounded to the precision a figure supports. HP5 Plus was
+read from the November 2018 HP5 PLUS technical information sheet.
 
-Only HP5 Plus is drawn so far. FP4 Plus, Delta 100/400/3200, and Pan F Plus
-fit the same ``Film`` record: a log10 spectral sensitivity on a few
-wavelengths, a net-density D-logH curve, an ISO speed, a grain table, and a
-clump size. Add an entry, then run the script with its key.
+Two steps turn the readings into a stock, and both are assumptions the
+figures do not state:
+
+- **Spectrogram.** A wedge spectrogram's height is the log of the
+  exposure that reaches threshold, so the plotted 0 to 1 scale is read as
+  ``WEDGE_DECADES`` of log sensitivity. The source was tungsten at 2850 K,
+  so its Planck spectrum is divided out to give an equal-energy
+  sensitivity. Outside the traced ends the sensitivity is floored three
+  decades below its peak.
+- **Placement.** The curve's relative log exposure is placed so the ISO
+  speed point, 0.10 above base plus fog, falls at ``log10(0.8 / ISO)`` lux
+  seconds. Density is stored net of base plus fog.
+
+Grain and halation are an **approximate** aesthetic tuning. Ilford
+publishes no granularity for these films.
+
+FP4 Plus, Delta 100/400/3200, and Pan F Plus fit the same ``Film`` record:
+read their two figures the same way, add an entry, then run the script with
+its key.
 
 The print is a measured black and white paper curve: one grade of the Kodak
 Professional Polymax Fine-Art paper module in Jan Lohse, spectral_film_lut
@@ -19,15 +34,12 @@ Professional Polymax Fine-Art paper module in Jan Lohse, spectral_film_lut
 Lohse). The module is read as source text, so the package does not have to
 be installed. The curve is stored from the paper white (D-min subtracted).
 
-Placement:
-
 - ``exposure_ev`` puts rawstock's metered camera middle gray (scene-linear
   about 0.08 for a Fuji RAF, not 0.18) on ``log10(12.5 / ISO)``, the ISO
   middle-gray log exposure spectral_film_lut uses.
 - ``print_exposure`` prints that gray at an 18 % reflector's density.
 
-Sensitivity knots are interpolated in log10 at 10 nm on 380-780 nm, floored
-three decades below the peak, raised to linear, and scaled so the
+Sensitivity is evaluated at 10 nm on 380-780 nm and scaled so the
 trapezoidal integral is 1. Uses only the Python standard library.
 
 Usage:
@@ -49,6 +61,16 @@ GRID = list(range(380, 781, 10))
 # Decades below the peak where the sensitivity is floored.
 FLOOR_DECADES = 3.0
 
+# Log sensitivity spanned by the spectrogram's 0 to 1 scale. Read as the
+# usual 3.0 density spectrograph wedge, so threshold meets the floor.
+WEDGE_DECADES = 3.0
+
+# Second radiation constant, nm kelvin, for the tungsten source.
+PLANCK_C2 = 1.4388e7
+
+# Net density of the ISO speed point above base plus fog.
+SPEED_POINT_DENSITY = 0.10
+
 # Density of an 18 % reflector, the print aim for middle gray.
 GRAY_PRINT_DENSITY = -math.log10(0.18)
 
@@ -60,9 +82,12 @@ CAMERA_MIDDLE_GRAY = 0.08
 class Film:
     name: str
     iso: int
-    # log10 relative spectral sensitivity (equal energy), (nm, value) knots.
-    log_sensitivity: list[tuple[float, float]]
-    # Net density above base + fog versus log10 exposure (lux seconds).
+    datasheet: str
+    # Wedge spectrogram: (nm, height on the chart's 0 to 1 scale).
+    spectrogram: list[tuple[float, float]]
+    # Spectrogram light source, kelvin.
+    source_kelvin: float
+    # Characteristic curve: (relative log exposure, gross density).
     curve: list[tuple[float, float]]
     developer: str
     paper_grade: int
@@ -78,57 +103,95 @@ FILMS = {
     "hp5": Film(
         name="Ilford HP5 Plus",
         iso=400,
-        # Panchromatic: native silver halide blue, a shallow gap near 500 nm,
-        # dye-sensitized green and red, falling off steeply past 640 nm with
-        # the edge near 670 nm, as on Ilford's wedge spectrogram.
-        log_sensitivity=[
-            (380, 2.60),
-            (400, 2.68),
-            (420, 2.66),
-            (440, 2.60),
-            (460, 2.50),
-            (480, 2.37),
-            (500, 2.26),
-            (510, 2.25),
-            (530, 2.34),
-            (550, 2.43),
-            (570, 2.46),
-            (590, 2.43),
-            (610, 2.43),
-            (625, 2.41),
-            (640, 2.22),
-            (650, 1.90),
-            (660, 1.40),
-            (670, 0.80),
-            (680, 0.20),
-            (690, -0.40),
+        datasheet="HP5 PLUS technical information, Nov 2018",
+        # Rising blue edge from 356 nm, a flat top near 460 nm, a dip at
+        # 505 nm, the green peak at 575 nm, a shoulder to 630 nm, and the red
+        # edge at 655 nm. The ends were read along rows, the rest along
+        # columns.
+        spectrogram=[
+            (356, 0.0),
+            (360, 0.11),
+            (365, 0.20),
+            (370, 0.29),
+            (375, 0.35),
+            (380, 0.43),
+            (385, 0.51),
+            (390, 0.58),
+            (395, 0.63),
+            (400, 0.68),
+            (405, 0.71),
+            (410, 0.73),
+            (415, 0.75),
+            (420, 0.76),
+            (430, 0.79),
+            (440, 0.81),
+            (450, 0.82),
+            (460, 0.825),
+            (470, 0.825),
+            (480, 0.815),
+            (490, 0.80),
+            (500, 0.78),
+            (505, 0.78),
+            (510, 0.79),
+            (520, 0.82),
+            (530, 0.86),
+            (540, 0.90),
+            (550, 0.935),
+            (560, 0.965),
+            (570, 0.978),
+            (575, 0.982),
+            (580, 0.974),
+            (590, 0.943),
+            (600, 0.912),
+            (610, 0.908),
+            (620, 0.93),
+            (625, 0.934),
+            (630, 0.912),
+            (633, 0.842),
+            (636, 0.737),
+            (640, 0.526),
+            (643, 0.421),
+            (646, 0.316),
+            (650, 0.158),
+            (654, 0.053),
+            (656, 0.0),
         ],
-        # ISO speed point (net 0.10) at log H = log10(0.8 / 400) = -2.70, a
-        # gentle toe, a long straight line near G-bar 0.62, and a late,
-        # soft shoulder: the shape of the ILFOTEC HC 1+31 curve.
+        source_kelvin=2850.0,
+        # ILFOTEC HC (1+31), 6.5 min at 20 C. Base plus fog 0.18, a short
+        # toe, and a straight line at gradient 0.64 to the end of the chart.
         curve=[
-            (-3.60, 0.00),
-            (-3.30, 0.01),
-            (-3.00, 0.04),
-            (-2.70, 0.10),
-            (-2.40, 0.22),
-            (-2.10, 0.40),
-            (-1.80, 0.59),
-            (-1.50, 0.78),
-            (-1.20, 0.97),
-            (-0.90, 1.16),
-            (-0.60, 1.34),
-            (-0.30, 1.52),
-            (0.00, 1.68),
-            (0.30, 1.83),
-            (0.60, 1.95),
-            (0.90, 2.04),
-            (1.20, 2.10),
+            (0.0, 0.18),
+            (0.5, 0.18),
+            (0.7, 0.195),
+            (0.8, 0.21),
+            (0.9, 0.23),
+            (1.0, 0.25),
+            (1.1, 0.28),
+            (1.2, 0.32),
+            (1.3, 0.36),
+            (1.4, 0.40),
+            (1.5, 0.46),
+            (1.6, 0.52),
+            (1.7, 0.58),
+            (1.8, 0.65),
+            (1.9, 0.72),
+            (2.0, 0.79),
+            (2.2, 0.91),
+            (2.4, 1.05),
+            (2.6, 1.18),
+            (2.8, 1.31),
+            (3.0, 1.43),
+            (3.2, 1.56),
+            (3.4, 1.68),
+            (3.6, 1.81),
+            (3.8, 1.94),
+            (4.0, 2.06),
+            (4.1, 2.12),
         ],
         developer="ILFOTEC HC 1+31, 6.5 min at 20 C",
         paper_grade=1,
-        # Silver granularity rises with density. HP5 Plus is a traditional
-        # cubic-grain 400 film, about as grainy as Tri-X (Kodak rms 17).
+        # Approximate. Silver granularity rises with density. HP5 Plus is a
+        # traditional cubic-grain 400 film, close to Tri-X in grain.
         grain=[
             (0.0, 8),
             (0.3, 11),
@@ -139,8 +202,8 @@ FILMS = {
         ],
         grain_size_mm=0.006,
         seed=5,
-        # The 35 mm base has an anti-halation dye that clears in processing,
-        # so only a faint glow.
+        # Approximate. The 35 mm base has an anti-halation dye that clears in
+        # processing, so only a faint glow.
         halation=(0.25, 0.008, 0.04),
     ),
 }
@@ -177,13 +240,35 @@ def trapezoid(xs: list[float], ys: list[float]) -> float:
     return sum((xs[i + 1] - xs[i]) * (ys[i] + ys[i + 1]) / 2 for i in range(len(xs) - 1))
 
 
+def planck(wavelength_nm: float, kelvin: float) -> float:
+    """Relative spectral radiance of a black body."""
+    return wavelength_nm**-5 / math.expm1(PLANCK_C2 / (wavelength_nm * kelvin))
+
+
 def sensitivity(film: Film) -> list[float]:
-    # Extend the end slopes, then floor below the peak.
-    log_values = [interpolate(film.log_sensitivity, wave) for wave in GRID]
+    """Equal-energy sensitivity from the spectrogram, integral 1."""
+    first, last = film.spectrogram[0][0], film.spectrogram[-1][0]
+    log_values = []
+    for wave in GRID:
+        if first <= wave <= last:
+            height = interpolate(film.spectrogram, wave)
+            log_values.append(
+                WEDGE_DECADES * height - math.log10(planck(wave, film.source_kelvin))
+            )
+        else:
+            log_values.append(-math.inf)
     floor = max(log_values) - FLOOR_DECADES
     linear = [10 ** max(value, floor) for value in log_values]
     area = trapezoid(GRID, linear)
     return [value / area for value in linear]
+
+
+def net_curve(film: Film) -> list[tuple[float, float]]:
+    """Net density versus log10 lux seconds, speed point on log10(0.8 / ISO)."""
+    base = film.curve[0][1]
+    net = [(log_e, density - base) for log_e, density in film.curve]
+    shift = math.log10(0.8 / film.iso) - inverse(net, SPEED_POINT_DENSITY)
+    return [(round(log_e + shift, 4), round(density, 4)) for log_e, density in net]
 
 
 def paper_curve(path: Path, grade: int) -> list[tuple[float, float]]:
@@ -219,32 +304,37 @@ def array(values: list[float]) -> str:
 
 
 def write(film: Film, paper: list[tuple[float, float]], grade: int) -> str:
+    curve = net_curve(film)
     gray_log_h = math.log10(12.5 / film.iso)
     exposure_ev = math.log2(10**gray_log_h / CAMERA_MIDDLE_GRAY)
-    gray_density = clamped(film.curve, gray_log_h)
+    gray_density = clamped(curve, gray_log_h)
     print_exposure = inverse(paper, GRAY_PRINT_DENSITY) + gray_density
     silver = sensitivity(film)
     lines = [
         f"# {film.name}, schema 1 monochrome spectral stock.",
-        "# Written by lab/ilford_bw.py. APPROXIMATE: the sensitivity, the",
-        "# characteristic curve, grain, and halation are hand-drawn from the",
-        "# shapes in Ilford's published datasheet figures (wedge spectrogram",
-        f"# and the {film.developer} curve), not digitized from tables.",
-        "# Ilford publishes no numeric tables for these.",
+        "# Written by lab/ilford_bw.py. The sensitivity and characteristic",
+        f"# curve are digitized from the figures in Ilford's {film.datasheet}:",
+        f"# the wedge spectrogram to tungsten ({film.source_kelvin:.0f} K) and the",
+        f"# {film.developer} curve. Reading the spectrogram as",
+        f"# {WEDGE_DECADES:g} decades of log sensitivity and placing the curve by ISO",
+        "# speed are assumptions; see the script. Grain and halation are an",
+        "# approximate aesthetic tuning.",
         "#",
         f"# The print is Kodak Polymax Fine-Art paper, grade {grade}, measured,",
         "# from the MIT-licensed KODAK_POLYMAX module in Jan Lohse,",
         "# spectral_film_lut (https://github.com/JanLohse/spectral_film_lut).",
         "",
         "schema_version = 1",
-        "revision = 1",
+        "revision = 2",
         f'name = "{film.name}"',
         (
-            f'source = "Approximate hand reading of the {film.name} datasheet figures '
-            f"(wedge spectrogram to tungsten, characteristic curve in {film.developer}); "
-            "not a digitized table. Grain and halation are an approximate aesthetic tuning. "
-            f"Print curve: Kodak Professional Polymax Fine-Art paper grade {grade} from "
-            'spectral_film_lut (MIT, Jan Lohse)."'
+            f'source = "Digitized from the figures in Ilford {film.datasheet} '
+            f"(wedge spectrogram to tungsten {film.source_kelvin:.0f} K, characteristic "
+            f"curve in {film.developer}). The spectrogram is read as {WEDGE_DECADES:g} "
+            "decades of log sensitivity with the tungsten source divided out, and the "
+            "curve is placed by ISO speed: approximate. Grain and halation are an "
+            "approximate aesthetic tuning. Print curve: Kodak Professional Polymax "
+            f'Fine-Art paper grade {grade} from spectral_film_lut (MIT, Jan Lohse)."'
         ),
         'license = "MIT"',
         'model = "spectral"',
@@ -258,15 +348,15 @@ def write(film: Film, paper: list[tuple[float, float]], grade: int) -> str:
         "",
         "wavelength_nm = [" + ", ".join(str(wave) for wave in GRID) + "]",
         "",
-        "# Approximate. One panchromatic silver layer, equal-energy, integral 1.",
+        "# The datasheet spectrogram as equal-energy sensitivity, integral 1.",
         "[sensitivity]",
         f"silver = {array(silver)}",
         "",
-        "# Approximate. Net density above base + fog. The ISO speed point",
-        "# (net 0.10) sits at log10(0.8 / ISO).",
+        "# The datasheet curve, net of base + fog. The ISO speed point",
+        f"# (net {SPEED_POINT_DENSITY:.2f}) is placed at log10(0.8 / ISO) lux seconds.",
         "[silver]",
-        f"log_exposure = {array([x for x, _ in film.curve])}",
-        f"density = {array([y for _, y in film.curve])}",
+        f"log_exposure = {array([x for x, _ in curve])}",
+        f"density = {array([y for _, y in curve])}",
         "",
         f"# Kodak Polymax Fine-Art, grade {grade}, from the paper white.",
         "[print]",
