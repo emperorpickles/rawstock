@@ -234,7 +234,7 @@ impl ThumbnailRender {
         let developed = Pipeline::new(parameters).develop(base);
         let rgb = developed.to_rgb8();
         let mut rgba = Vec::with_capacity(rgb.len() / 3 * 4);
-        for pixel in rgb.chunks_exact(3) {
+        for pixel in rgb.as_chunks::<3>().0 {
             rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
         }
         Ok(frame::pack(developed.width(), developed.height(), &rgba))
