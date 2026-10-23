@@ -23,14 +23,23 @@ export const ALLOWED = new Set([
   "CC0-1.0",
 ]);
 
+/**
+ * OFL-1.1 is a free font license on the GNU list, not a GPL-compatible one.
+ * It is accepted only for these two UI fonts.
+ */
+export const FONT_OFL = new Set(["@fontsource/inter", "@fontsource/jetbrains-mono"]);
+
 export class Spdx {
-  /** True when `expression` can be used under the allowlist. */
-  static allowed(expression, allowed = ALLOWED) {
+  /**
+   * True when `expression` can be used under the allowlist.
+   * `packageName` unlocks OFL-1.1 for the two bundled font packages only.
+   */
+  static allowed(expression, allowed = ALLOWED, packageName = "") {
     if (typeof expression !== "string" || expression.trim() === "") {
       return false;
     }
     const tokens = Spdx.tokens(expression);
-    const parser = new SpdxParser(tokens, allowed);
+    const parser = new SpdxParser(tokens, allowed, packageName);
     const result = parser.or();
     if (parser.index !== tokens.length) {
       throw new Error(`Unexpected "${tokens[parser.index]}" in license "${expression}"`);
@@ -48,9 +57,10 @@ export class Spdx {
 }
 
 class SpdxParser {
-  constructor(tokens, allowed) {
+  constructor(tokens, allowed, packageName = "") {
     this.tokens = tokens;
     this.allowed = allowed;
+    this.packageName = packageName;
     this.index = 0;
   }
 
@@ -100,6 +110,10 @@ class SpdxParser {
       this.next();
       this.next();
     }
-    return this.allowed.has(token.replace(/\+$/, ""));
+    const license = token.replace(/\+$/, "");
+    if (license === "OFL-1.1" && FONT_OFL.has(this.packageName)) {
+      return true;
+    }
+    return this.allowed.has(license);
   }
 }

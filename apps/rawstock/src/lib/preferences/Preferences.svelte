@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { StockSummary } from "../contract";
   import { RECENT_MAX, RECENT_MIN } from "./settings";
-  import type { AppSettings, ReduceMotion, Surround } from "./settings";
+  import type { AppSettings, ReduceMotion, Surround, Theme } from "./settings";
 
   let {
     open = false,
@@ -44,6 +44,10 @@
       node.close();
     }
   });
+
+  function setTheme(theme: Theme) {
+    onchange({ ...settings, appearance: { ...settings.appearance, theme } });
+  }
 
   function setSurround(surround: Surround) {
     onchange({ ...settings, appearance: { ...settings.appearance, surround } });
@@ -94,6 +98,30 @@
       </div>
     </section>
   {:else}
+    <fieldset>
+      <legend>Appearance</legend>
+      <label class="check">
+        <input
+          type="radio"
+          name="theme"
+          value="warm"
+          checked={settings.appearance.theme !== "neutral"}
+          onchange={() => setTheme("warm")}
+        />
+        Warm
+      </label>
+      <label class="check">
+        <input
+          type="radio"
+          name="theme"
+          value="neutral"
+          checked={settings.appearance.theme === "neutral"}
+          onchange={() => setTheme("neutral")}
+        />
+        Neutral
+      </label>
+    </fieldset>
+
     <fieldset>
       <legend>Viewer surround</legend>
       <label class="check">
@@ -171,7 +199,7 @@
 
 <style>
   fieldset {
-    border: 1px solid #3a3a3a;
+    border: 1px solid var(--line);
     border-radius: 8px;
     margin: 0.7rem 0;
     padding: 0.5rem 0.8rem 0.7rem;
@@ -194,8 +222,8 @@
   }
 
   select {
-    background: #141414;
-    border: 1px solid #3a3a3a;
+    background: var(--app);
+    border: 1px solid var(--line);
     border-radius: 6px;
     padding: 0.3rem 0.4rem;
   }

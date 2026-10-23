@@ -5,9 +5,20 @@
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { onMount } from "svelte";
 
+  import { Adjustments } from "./lib/adjust";
   import { appError, defaultSettings } from "./lib/contract";
-  import type { EditSettings, ImageInfo, StockSummary, ThumbnailReadyEvent } from "./lib/contract";
+  import type {
+    CancelledEvent,
+    CropRect,
+    DoneEvent,
+    EditSettings,
+    FailedEvent,
+    ImageInfo,
+    StockSummary,
+    ThumbnailReadyEvent,
+  } from "./lib/contract";
   import { JobTracker } from "./lib/delivery";
+  import { PreviewInbox, PreviewSchedule } from "./lib/preview";
   import {
     Autosave,
     EditHistory,
@@ -36,8 +47,14 @@
   import { StockBrowser, ThumbnailRequests } from "./lib/stockBrowser";
   import Viewer from "./lib/Viewer.svelte";
 
+  type PreviewTerminal =
+    | { type: "done"; jobId: number; event: DoneEvent }
+    | { type: "failed"; jobId: number; event: FailedEvent }
+    | { type: "cancelled"; jobId: number; event: CancelledEvent };
+
   const host = Host.available() ? new Host() : null;
   const jobs = new JobTracker();
+  const inbox = new PreviewInbox<PreviewTerminal>();
   const history = new EditHistory();
   const thumbnailRequests = new ThumbnailRequests();
   const platform = Shortcuts.platform();
@@ -96,7 +113,15 @@
   let committed = $state<EditSettings | null>(null);
   let exportDialog = $state<HTMLDialogElement | null>(null);
   let resetting = $state(false);
+  let horizon = $state(false);
+  let viewLongEdge = $state(720);
   let closing = false;
+  let previewBusy = false;
+  let previewPending: {
+    settings: EditSettings;
+    phase: "drag" | "settle";
+    imageId: string;
+  } | null = null;
 
   $effect(() => {
     Prefs.applyAppearance(appSettings);
@@ -152,6 +177,7 @@
         onjob: (imageId, kind, jobId) => jobs.note(imageId, kind, jobId),
       })
     : null;
+  reviewer?.adjustOwnsAfterPreview();
 
   $effect(() => {
     reviewer?.setZoom(zoom);
@@ -159,18 +185,6 @@
 
   $effect(() => {
     reviewer?.setCompare(compare || split);
-  });
-
-  // Settled settings reach the review view after a short pause, so a burst
-  // of edits develops once.
-  $effect(() => {
-    const next = settings;
-    const imageId = selected;
-    if (!reviewer || !imageId || selectedImage?.error) {
-      return;
-    }
-    const timer = setTimeout(() => reviewer.update(next), 150);
-    return () => clearTimeout(timer);
   });
 
   $effect(() => {
@@ -235,7 +249,7 @@
       const unlisten = await Promise.all([
         host.onMenu((action) => void perform(action)),
         host.onSettingsChanged((next) => {
-          appSettings = next;
+          appSettings = Prefs.normalize(next);
         }),
         host.onOpen((paths) => void ingest(paths)),
         host.onProgress((event) => {
@@ -244,7 +258,13 @@
           }
         }),
         host.onDone((event) => {
-          if (event.kind === "preview" || event.kind === "full") {
+          if (event.kind === "preview") {
+            const verdict = inbox.receive({ type: "done", jobId: event.jobId, event });
+            if (verdict === "early") {
+              return;
+            }
+            reviewer?.done(event);
+          } else if (event.kind === "full") {
             reviewer?.done(event);
           }
           if (!jobs.current(event.imageId, event.kind, event.jobId)) {
@@ -256,7 +276,13 @@
           }
         }),
         host.onCancelled((event) => {
-          if (event.kind === "preview" || event.kind === "full") {
+          if (event.kind === "preview") {
+            const verdict = inbox.receive({ type: "cancelled", jobId: event.jobId, event });
+            if (verdict === "early") {
+              return;
+            }
+            reviewer?.cancelled(event);
+          } else if (event.kind === "full") {
             reviewer?.cancelled(event);
           }
           if (jobs.current(event.imageId, event.kind, event.jobId)) {
@@ -264,7 +290,18 @@
           }
         }),
         host.onFailed((event) => {
-          if (event.kind === "preview" || event.kind === "full") {
+          if (event.kind === "preview") {
+            const verdict = inbox.receive({ type: "failed", jobId: event.jobId, event });
+            if (verdict === "early") {
+              return;
+            }
+            if (jobs.current(event.imageId, event.kind, event.jobId)) {
+              progress = "";
+            }
+            reviewer?.failed(event);
+            return;
+          }
+          if (event.kind === "full") {
             // The review view reports its own failures.
             if (jobs.current(event.imageId, event.kind, event.jobId)) {
               progress = "";
@@ -284,7 +321,7 @@
       ]);
       cleanups.push(...unlisten);
       try {
-        appSettings = await host.getAppSettings();
+        appSettings = Prefs.normalize(await host.getAppSettings());
         if (!appSettings.onboarding.completed) {
           showOnboarding("welcome");
         }
@@ -425,6 +462,10 @@
         reviewer?.close();
       }
       notice = info.fileName;
+      horizon = false;
+      if (!info.error) {
+        requestPreview(current, "settle");
+      }
       if (Host.available()) {
         await getCurrentWindow().setTitle(`${info.fileName} - rawstock`);
       }
@@ -460,6 +501,7 @@
     }
     settings = next;
     history.preview(selected, next);
+    requestPreview(next, "drag");
   }
 
   function applyCommit(next: EditSettings) {
@@ -470,6 +512,85 @@
     committed = next;
     if (history.commit(selected, next)) {
       autosave.schedule(selected, next);
+    }
+    reviewer?.update(next);
+    requestPreview(next, "settle");
+  }
+
+  function requestPreview(next: EditSettings, phase: "drag" | "settle") {
+    if (!host || !selected || selectedImage?.error) {
+      return;
+    }
+    previewPending = { settings: next, phase, imageId: selected };
+    if (!previewBusy) {
+      void flushPreview();
+    }
+  }
+
+  function deliverPreview(notice: PreviewTerminal) {
+    if (notice.type === "done") {
+      reviewer?.done(notice.event);
+    } else if (notice.type === "failed") {
+      reviewer?.failed(notice.event);
+    } else {
+      reviewer?.cancelled(notice.event);
+    }
+  }
+
+  async function flushPreview() {
+    if (!host) {
+      return;
+    }
+    previewBusy = true;
+    try {
+      while (previewPending && host) {
+        const job = previewPending;
+        previewPending = null;
+        const edge = PreviewSchedule.longEdge(job.phase, viewLongEdge);
+        inbox.expect();
+        reviewer?.holdPreview(job.settings, edge);
+        try {
+          const started = await host.developPreview(job.imageId, job.settings, edge, false);
+          jobs.note(job.imageId, "preview", started.jobId);
+          reviewer?.claimPreview(started.jobId);
+          const arrived = inbox.note(started.jobId);
+          if (arrived.matched) {
+            deliverPreview(arrived.matched);
+          }
+          for (const old of arrived.stale) {
+            deliverPreview(old);
+          }
+        } catch (error) {
+          reviewer?.releasePreview();
+          for (const old of inbox.abandon()) {
+            deliverPreview(old);
+          }
+          errors = [appError(error).message];
+        }
+      }
+    } finally {
+      previewBusy = false;
+      if (previewPending) {
+        void flushPreview();
+      }
+    }
+  }
+
+  function editCrop(crop: CropRect, commit: boolean) {
+    const next = Adjustments.crop(settings, crop);
+    if (commit) {
+      applyCommit(next);
+    } else {
+      applyPreview(next);
+    }
+  }
+
+  function editStraighten(degrees: number, commit: boolean) {
+    const next = Adjustments.straighten(settings, degrees);
+    if (commit) {
+      applyCommit(next);
+    } else {
+      applyPreview(next);
     }
   }
 
@@ -486,6 +607,8 @@
     settings = next;
     committed = next;
     autosave.schedule(selected, next);
+    reviewer?.update(next);
+    requestPreview(next, "settle");
     notice = selectedImage?.fileName ?? "Undo";
   }
 
@@ -502,6 +625,8 @@
     settings = next;
     committed = next;
     autosave.schedule(selected, next);
+    reviewer?.update(next);
+    requestPreview(next, "settle");
     notice = selectedImage?.fileName ?? "Redo";
   }
 
@@ -644,7 +769,7 @@
       return;
     }
     try {
-      appSettings = await host.setAppSettings(next);
+      appSettings = Prefs.normalize(await host.setAppSettings(next));
     } catch (error) {
       errors = [appError(error).message];
     }
@@ -675,7 +800,7 @@
       return;
     }
     try {
-      appSettings = await host.resetAppSettings(clearRecent);
+      appSettings = Prefs.normalize(await host.resetAppSettings(clearRecent));
       notice = clearRecent ? "Settings and recent files were reset." : "Settings were reset.";
     } catch (error) {
       errors = [appError(error).message];
@@ -737,7 +862,7 @@
   <h1>rawstock</h1>
   <header class="toolbar" role="toolbar" aria-label="Develop">
     <button type="button" onclick={() => void perform("open")} aria-keyshortcuts="{modLabel}+O">Open…</button>
-    <button type="button" onclick={() => void perform("export")} aria-keyshortcuts="{modLabel}+E">Export…</button>
+    <button type="button" class="primary" onclick={() => void perform("export")} aria-keyshortcuts="{modLabel}+E">Export…</button>
     <span class="spacer"></span>
     <button type="button" aria-pressed={zoom === "fit"} aria-keyshortcuts="{modLabel}+0" onclick={() => (zoom = "fit")}>Fit</button>
     <button type="button" aria-pressed={zoom === 1} aria-keyshortcuts="{modLabel}+1" onclick={() => (zoom = 1)}>100%</button>
@@ -785,9 +910,16 @@
       problem={openProblem}
       {dropActive}
       onopen={() => void perform("open")}
+      edit={settings.geometry}
+      {horizon}
       onzoom={(next) => (zoom = next)}
       onregion={viewChanged}
-      onsize={(edge) => reviewer?.setLongEdge(edge)}
+      oncrop={editCrop}
+      onstraighten={editStraighten}
+      onsize={(edge) => {
+        viewLongEdge = Math.max(1, Math.round(edge));
+        reviewer?.setLongEdge(viewLongEdge);
+      }}
     />
     <SidePanel
       stocks={browserStocks}
@@ -795,9 +927,13 @@
       {settings}
       stockId={settings.stock.id}
       disabled={adjustmentsDisabled}
+      frameWidth={review?.width || selectedImage?.width || 0}
+      frameHeight={review?.height || selectedImage?.height || 0}
+      {horizon}
       onstock={chooseStock}
       onpreview={applyPreview}
       oncommit={applyCommit}
+      onhorizon={(on) => (horizon = on)}
     />
   </div>
 

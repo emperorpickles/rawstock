@@ -1,7 +1,7 @@
 <script lang="ts">
+  import AdjustPanel from "./AdjustPanel.svelte";
   import type { EditSettings, StockSummary } from "./contract";
   import type { PackedFrame } from "./frame";
-  import { exposureText, quantityText } from "./shortcuts";
   import StockBrowser from "./StockBrowser.svelte";
 
   let {
@@ -10,27 +10,28 @@
     thumbnails = {},
     settings,
     disabled = false,
+    frameWidth = 0,
+    frameHeight = 0,
+    horizon = false,
     onstock,
     onpreview,
     oncommit,
+    onhorizon,
   }: {
     stocks: StockSummary[];
     stockId?: string;
     thumbnails?: Record<string, PackedFrame>;
     settings: EditSettings;
     disabled?: boolean;
+    frameWidth?: number;
+    frameHeight?: number;
+    horizon?: boolean;
     onstock: (stock: StockSummary) => void;
     onpreview: (settings: EditSettings) => void;
     oncommit: (settings: EditSettings) => void;
+    onhorizon: (on: boolean) => void;
   } = $props();
 
-  function patch(next: EditSettings, commit: boolean) {
-    if (commit) {
-      oncommit(next);
-    } else {
-      onpreview(next);
-    }
-  }
 </script>
 
 <aside class="side" aria-label="Stock and adjustments">
@@ -43,117 +44,54 @@
     {/if}
   </section>
 
-  <section class="adjust" aria-label="Adjust">
-    <h2>Adjust</h2>
-    <label class="field" for="exposure">Exposure</label>
-    <input
-      id="exposure"
-      type="range"
-      min="-3"
-      max="3"
-      step="0.01"
-      {disabled}
-      value={settings.exposureEv}
-      aria-valuetext={exposureText(settings.exposureEv)}
-      oninput={(event) =>
-        patch({ ...settings, exposureEv: Number(event.currentTarget.value) }, false)}
-      onchange={(event) =>
-        patch({ ...settings, exposureEv: Number(event.currentTarget.value) }, true)}
-    />
-    <p class="readout">{exposureText(settings.exposureEv)}</p>
-
-    <p class="field" id="wb-label">White balance</p>
-    {#if settings.whiteBalance.mode === "custom"}
-      <p class="readout" aria-labelledby="wb-label">
-        Custom white balance is saved. This build develops as shot.
-      </p>
-    {:else}
-      <p class="readout" aria-labelledby="wb-label">As shot</p>
-    {/if}
-
-    <label class="field" for="print">Print exposure</label>
-    <input
-      id="print"
-      type="range"
-      min="0"
-      max="2.5"
-      step="0.01"
-      {disabled}
-      value={settings.printExposure}
-      aria-valuetext={quantityText(settings.printExposure, "print")}
-      oninput={(event) =>
-        patch({ ...settings, printExposure: Number(event.currentTarget.value) }, false)}
-      onchange={(event) =>
-        patch({ ...settings, printExposure: Number(event.currentTarget.value) }, true)}
-    />
-    <p class="readout">{settings.printExposure.toFixed(2)}</p>
-
-    <label class="field" for="grain">Grain amount</label>
-    <input
-      id="grain"
-      type="range"
-      min="0"
-      max="2"
-      step="0.01"
-      {disabled}
-      value={settings.grain.amount}
-      aria-valuetext={quantityText(settings.grain.amount, "times the stock grain")}
-      oninput={(event) =>
-        patch(
-          { ...settings, grain: { ...settings.grain, amount: Number(event.currentTarget.value) } },
-          false,
-        )}
-      onchange={(event) =>
-        patch(
-          { ...settings, grain: { ...settings.grain, amount: Number(event.currentTarget.value) } },
-          true,
-        )}
-    />
-    <p class="readout">{settings.grain.amount.toFixed(2)}×</p>
-  </section>
+  <AdjustPanel
+    {settings}
+    stock={stocks.find((item) => item.id === stockId) ?? null}
+    {disabled}
+    {frameWidth}
+    {frameHeight}
+    {horizon}
+    {onpreview}
+    {oncommit}
+    {onhorizon}
+  />
 </aside>
 
 <style>
   .side {
-    background: #1c1c1c;
-    border-left: 1px solid #3a3a3a;
-    overflow: auto;
+    background: var(--panel);
+    border-left: 1px solid var(--line);
     min-height: 0;
     display: flex;
     flex-direction: column;
+    overflow: hidden;
   }
 
   section {
-    padding: 0.85rem 0.9rem 1rem;
+    padding: 0.7rem 0.75rem 0.8rem;
   }
 
-  section + section {
-    border-top: 1px solid #3a3a3a;
+  .stocks {
+    max-height: 32%;
+    overflow: auto;
+    flex: none;
   }
 
   h2 {
-    margin: 0 0 0.7rem;
-    font-size: 0.78rem;
+    margin: 0 0 0.55rem;
+    font-size: 0.72rem;
     font-weight: 600;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.06em;
     text-transform: uppercase;
-    color: #b8b8b8;
+    color: var(--muted);
   }
 
-  .hint,
-  .readout {
-    color: #b8b8b8;
-    font-size: 0.85rem;
+  .hint {
+    color: var(--muted);
+    font-size: 0.78rem;
   }
 
-  .hint,
-  .readout,
-  .field {
+  .hint {
     margin: 0.15rem 0 0.45rem;
-  }
-
-  input[type="range"] {
-    width: 100%;
-    accent-color: #d0d0d0;
   }
 </style>

@@ -36,20 +36,20 @@
   td {
     text-align: left;
     padding: 0.25rem 0.4rem;
-    border-bottom: 1px solid #2e2e2e;
+    border-bottom: 1px solid var(--line);
   }
 
   th {
-    color: #b8b8b8;
+    color: var(--muted);
     font-weight: normal;
   }
 
   kbd {
     font: inherit;
-    border: 1px solid #4a4a4a;
+    border: 1px solid var(--line);
     border-radius: 4px;
     padding: 0 0.35rem;
-    background: #141414;
+    background: var(--app);
   }
 
   .hint {

@@ -93,7 +93,7 @@ class LicenseBundle {
   add(entry, dir) {
     let ok = false;
     try {
-      ok = Spdx.allowed(entry.license);
+      ok = Spdx.allowed(entry.license, undefined, entry.name);
     } catch (error) {
       this.violations.push(`${entry.name} ${entry.version}: ${error.message}`);
       return;

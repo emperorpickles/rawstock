@@ -1,7 +1,10 @@
-import type { StockSummary } from "../contract";
+import type { StockSummary } from "../contract.ts";
+import { ThemeSetting } from "../tokens.ts";
+import type { Theme } from "../tokens.ts";
 
 export type Surround = "dark" | "mid";
 export type ReduceMotion = "system" | "on" | "off";
+export type { Theme };
 
 /**
  * Mirrors `settings.rs`. Unknown keys from a newer build ride along in the
@@ -9,7 +12,12 @@ export type ReduceMotion = "system" | "on" | "off";
  */
 export interface AppSettings {
   version: number;
-  appearance: { surround: Surround; reduceMotion: ReduceMotion; [key: string]: unknown };
+  appearance: {
+    surround: Surround;
+    reduceMotion: ReduceMotion;
+    theme: Theme;
+    [key: string]: unknown;
+  };
   newImage: { defaultStockId: string | null; [key: string]: unknown };
   recent: { limit: number; [key: string]: unknown };
   onboarding: { completed: boolean; [key: string]: unknown };
@@ -33,7 +41,7 @@ export class Preferences {
   static defaults(): AppSettings {
     return {
       version: 1,
-      appearance: { surround: "dark", reduceMotion: "system" },
+      appearance: { surround: "dark", reduceMotion: "system", theme: "warm" },
       newImage: { defaultStockId: null },
       recent: { limit: 10 },
       onboarding: { completed: false },
@@ -44,12 +52,27 @@ export class Preferences {
     return SURROUND_COLORS[surround] ?? SURROUND_COLORS.dark;
   }
 
+  /**
+   * Fill a theme a file omitted, and turn anything else into warm.
+   * Surround and the other keys are left as they were saved.
+   */
+  static normalize(settings: AppSettings): AppSettings {
+    return {
+      ...settings,
+      appearance: {
+        ...settings.appearance,
+        theme: ThemeSetting.parse(settings.appearance?.theme),
+      },
+    };
+  }
+
   /** Push the appearance keys onto the document root, where the CSS reads them. */
   static applyAppearance(settings: AppSettings, root: HTMLElement = document.documentElement) {
     const colors = Preferences.surroundColors(settings.appearance.surround);
     root.style.setProperty("--surround", colors.background);
     root.style.setProperty("--surround-ink", colors.ink);
     root.dataset.reduceMotion = settings.appearance.reduceMotion;
+    root.dataset.theme = ThemeSetting.parse(settings.appearance.theme);
   }
 
   /** The stock a newly opened image starts on. */

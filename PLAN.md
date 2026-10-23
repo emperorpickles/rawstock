@@ -42,6 +42,11 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
 
 ## In flight
 
+- **#39** — 1.0 app adjust panel (`agent: grok`). Exposure, print, dye,
+  contrast, grain, and halation sliders, as-shot white balance, scan look,
+  and crop, straighten, and rotate. Edits go through the sidecar and
+  `develop_preview`. Warm and neutral themes. Depends on #37, which is on
+  `main`.
 - **#17** — Provia simulation fit (`agent: grok`, `stage: holding`).
   Waiting on more Provia RAF+JPEG pairs from Caleb. Pairs already in hand
   are held out. Do not commit them.

@@ -85,7 +85,7 @@
   }
 
   dt {
-    color: #b8b8b8;
+    color: var(--muted);
   }
 
   dd {

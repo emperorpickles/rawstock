@@ -1,7 +1,10 @@
 <script lang="ts">
+  import CropOverlay from "./CropOverlay.svelte";
+  import type { CropRect, GeometryEdit } from "./contract";
+  import type { PackedFrame } from "./frame";
+  import { CropMath, GeometryView } from "./geometry";
   import { Clipping, Divider, Viewport } from "./review/review";
   import type { Layer, Rect, ReviewView, Side, Zoom } from "./review/review";
-  import type { PackedFrame } from "./frame";
 
   let {
     view = null,
@@ -13,9 +16,13 @@
     fileName = "",
     problem = "",
     dropActive = false,
+    edit = null,
+    horizon = false,
     onopen,
     onzoom,
     onregion,
+    oncrop,
+    onstraighten,
     onsize,
   }: {
     view?: ReviewView | null;
@@ -28,10 +35,14 @@
     fileName?: string;
     problem?: string;
     dropActive?: boolean;
+    edit?: GeometryEdit | null;
+    horizon?: boolean;
     onopen: () => void;
     onzoom: (zoom: Zoom) => void;
     /** Visible image rectangle at 100% or 200%, in image pixels. */
     onregion: (rect: Rect) => void;
+    oncrop?: (crop: CropRect, commit: boolean) => void;
+    onstraighten?: (degrees: number, commit: boolean) => void;
     /** The viewer's long edge in device pixels, for the proxy size. */
     onsize: (longEdge: number) => void;
   } = $props();
@@ -63,6 +74,28 @@
   const decoding = new Set<PackedFrame>();
   const masking = new Set<PackedFrame>();
   let shown: Record<Side, Layer | null> = { after: null, before: null };
+  let line = $state<{ x: number; y: number; cx: number; cy: number } | null>(null);
+
+  const turns = $derived((((edit?.quarterTurns ?? 0) % 4) + 4) % 4);
+  const straighten = $derived(edit?.straightenDeg ?? 0);
+  const oriented = $derived(
+    view && view.width > 0 ? GeometryView.orientedSize(view.width, view.height, turns) : { width: 0, height: 0 },
+  );
+  const shownCrop = $derived(edit?.crop ?? { x: 0, y: 0, w: 1, h: 1 });
+  const lockRatio = $derived(
+    CropMath.pixelRatio(CropMath.infer(edit?.crop, oriented.width, oriented.height), oriented.width, oriented.height),
+  );
+  /** Fit placement of the oriented frame, in CSS pixels, matching the 8 px gutter. */
+  const cropBox = $derived.by(() => {
+    if (zoom !== "fit" || oriented.width <= 0 || viewWidth <= 0 || viewHeight <= 0) {
+      return null;
+    }
+    const ratio = window.devicePixelRatio || 1;
+    const scale = Viewport.fitScale(oriented.width, oriented.height, viewWidth * ratio, viewHeight * ratio, GUTTER * ratio);
+    const width = (oriented.width * scale) / ratio;
+    const height = (oriented.height * scale) / ratio;
+    return { left: (viewWidth - width) / 2, top: (viewHeight - height) / 2, width, height };
+  });
 
   const hasLayer = $derived(view !== null && (view.after !== null || view.before !== null));
   const zoomLabel = $derived(zoom === "fit" ? "Fit" : `${zoom * 100}%`);
@@ -94,7 +127,7 @@
 
   $effect(() => {
     // Redraw whenever anything drawn changes.
-    void [view, zoom, split, showBefore, clipping, divider, viewWidth, viewHeight, canvas];
+    void [view, zoom, split, showBefore, clipping, divider, viewWidth, viewHeight, canvas, edit];
     if (view?.imageId !== shownImage) {
       shownImage = view?.imageId ?? "";
       center = { x: 0.5, y: 0.5 };
@@ -206,7 +239,7 @@
     if (!node || viewWidth === 0 || viewHeight === 0) {
       return;
     }
-    const { width, height, imageWidth, imageHeight, gutter, scale } = geometry();
+    const { ratio, width, height, imageWidth, imageHeight, gutter, scale } = geometry();
     if (node.width !== width || node.height !== height) {
       node.width = width;
       node.height = height;
@@ -241,6 +274,7 @@
           ]
         : [{ side: "after", from: 0, to: width }];
 
+    const rotatedFit = zoom === "fit" && (turns !== 0 || straighten !== 0) && cropBox !== null;
     for (const pane of panes) {
       const layer = current(pane.side);
       if (!layer || pane.to <= pane.from) {
@@ -250,12 +284,52 @@
       context.beginPath();
       context.rect(pane.from, 0, pane.to - pane.from, height);
       context.clip();
-      paint(context, bitmaps.get(layer.frame), layer, visible, origin, scale);
-      if (clipping) {
-        paint(context, masks.get(layer.frame), layer, visible, origin, scale, true);
+      if (rotatedFit && cropBox) {
+        paintRotated(context, bitmaps.get(layer.frame), layer, ratio);
+        if (clipping) {
+          paintRotated(context, masks.get(layer.frame), layer, ratio);
+        }
+      } else {
+        paint(context, bitmaps.get(layer.frame), layer, visible, origin, scale);
+        if (clipping) {
+          paint(context, masks.get(layer.frame), layer, visible, origin, scale, true);
+        }
       }
       context.restore();
     }
+  }
+
+  /** Straighten and quarter-turns, drawn under the upright crop at fit. */
+  function paintRotated(
+    context: CanvasRenderingContext2D,
+    bitmap: ImageBitmap | undefined,
+    layer: Layer,
+    ratio: number,
+  ) {
+    if (!bitmap || !cropBox || view === null) {
+      return;
+    }
+    const pixel = (cropBox.width * ratio) / Math.max(1, oriented.width);
+    context.save();
+    context.translate((cropBox.left + cropBox.width / 2) * ratio, (cropBox.top + cropBox.height / 2) * ratio);
+    context.rotate((straighten * Math.PI) / 180);
+    context.rotate((turns * Math.PI) / 2);
+    context.scale(pixel, pixel);
+    context.imageSmoothingEnabled = !(layer.exact && pixel >= 1);
+    // The proxy is the whole unrotated frame. Stretch it to the file size,
+    // then the scale above fits that into the upright crop box.
+    context.drawImage(
+      bitmap,
+      0,
+      0,
+      bitmap.width,
+      bitmap.height,
+      -view.width / 2,
+      -view.height / 2,
+      view.width,
+      view.height,
+    );
+    context.restore();
   }
 
   /** The newest decoded layer for a side, else the one already on screen. */
@@ -289,6 +363,16 @@
     // Full-resolution pixels are never smoothed at 100% and 200%.
     context.imageSmoothingEnabled = !nearest && !(layer.exact && scale >= 1);
     context.imageSmoothingQuality = "high";
+    const tilted = view !== null && (turns !== 0 || straighten !== 0);
+    if (tilted && view) {
+      const cx = origin.x + (view.width * scale) / 2;
+      const cy = origin.y + (view.height * scale) / 2;
+      context.save();
+      context.translate(cx, cy);
+      context.rotate((straighten * Math.PI) / 180);
+      context.rotate((turns * Math.PI) / 2);
+      context.translate(-cx, -cy);
+    }
     context.drawImage(
       bitmap,
       (area.x - layer.rect.x) * fx,
@@ -300,6 +384,9 @@
       area.width * scale,
       area.height * scale,
     );
+    if (tilted) {
+      context.restore();
+    }
   }
 
   function panBy(dx: number, dy: number) {
@@ -315,6 +402,11 @@
   }
 
   function pointerDown(event: PointerEvent) {
+    if (horizon && zoom === "fit" && cropBox && event.button === 0) {
+      line = { x: event.clientX, y: event.clientY, cx: event.clientX, cy: event.clientY };
+      (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+      return;
+    }
     if (zoom === "fit" || !hasLayer || event.button !== 0) {
       return;
     }
@@ -325,6 +417,14 @@
   }
 
   function pointerMove(event: PointerEvent) {
+    if (line) {
+      line = { ...line, cx: event.clientX, cy: event.clientY };
+      const degrees = CropMath.horizon(line.x, line.y, event.clientX, event.clientY);
+      if (degrees != null) {
+        onstraighten?.(degrees, false);
+      }
+      return;
+    }
     if (!dragging || zoom === "fit") {
       return;
     }
@@ -333,7 +433,15 @@
     lastY = event.clientY;
   }
 
-  function pointerUp() {
+  function pointerUp(event: PointerEvent) {
+    if (line) {
+      const degrees = CropMath.horizon(line.x, line.y, event.clientX, event.clientY);
+      line = null;
+      if (degrees != null) {
+        onstraighten?.(degrees, true);
+      }
+      return;
+    }
     dragging = false;
   }
 
@@ -422,6 +530,35 @@
       onpointercancel={pointerUp}
       ondblclick={doubleClick}
     ></canvas>
+    {#if cropBox && oncrop && !horizon}
+      <div
+        class="edit-frame"
+        style:left="{cropBox.left}px"
+        style:top="{cropBox.top}px"
+        style:width="{cropBox.width}px"
+        style:height="{cropBox.height}px"
+      >
+        <CropOverlay
+          crop={shownCrop}
+          width={oriented.width}
+          height={oriented.height}
+          {lockRatio}
+          disabled={!active}
+          onpreview={(crop) => oncrop(crop, false)}
+          oncommit={(crop) => oncrop(crop, true)}
+        />
+      </div>
+    {/if}
+    {#if line && stage}
+      <svg class="horizon" aria-hidden="true">
+        <line
+          x1={line.x - stage.getBoundingClientRect().left}
+          y1={line.y - stage.getBoundingClientRect().top}
+          x2={line.cx - stage.getBoundingClientRect().left}
+          y2={line.cy - stage.getBoundingClientRect().top}
+        />
+      </svg>
+    {/if}
 
     {#if !hasLayer}
       <p class="developing" role="status">Developing {fileName}…</p>
@@ -521,6 +658,28 @@
 
   canvas.zoomed:active {
     cursor: grabbing;
+  }
+
+  .edit-frame {
+    position: absolute;
+    pointer-events: none;
+  }
+
+  .edit-frame :global(.crop) {
+    pointer-events: auto;
+  }
+
+  .horizon {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+
+  .horizon line {
+    stroke: #f2f2f2;
+    stroke-width: 2;
   }
 
   .developing {
