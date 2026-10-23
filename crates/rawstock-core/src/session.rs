@@ -1179,12 +1179,7 @@ fn render_tail(
     }
     if printed.is_none() {
         let scanned = dye.as_ref().expect("dye");
-        *printed = Some(render::print_buffer(
-            scanned,
-            parameters.print_exposure(),
-            parameters.print_curve(),
-            control,
-        )?);
+        *printed = Some(render::print_buffer(scanned, parameters, control)?);
         *image = None;
     }
     if image.is_none() {
@@ -1218,7 +1213,8 @@ fn first_dirty(previous: &Parameters, next: &Parameters) -> Stage {
     if film_stage == Stage::DyeScan {
         return Stage::DyeScan;
     }
-    if previous.print_exposure() != next.print_exposure()
+    if film_stage == Stage::Print
+        || previous.print_exposure() != next.print_exposure()
         || !curve_eq(previous.print_curve(), next.print_curve())
     {
         return Stage::Print;
@@ -1539,13 +1535,8 @@ mod tests {
     }
 
     fn quantize(stock: &Stock, density: &[f32]) -> [u8; 3] {
-        let linear = crate::render::print_buffer(
-            density,
-            stock.parameters().print_exposure(),
-            stock.parameters().print_curve(),
-            &mut NopControl,
-        )
-        .unwrap();
+        let linear =
+            crate::render::print_buffer(density, stock.parameters(), &mut NopControl).unwrap();
         let image =
             crate::render::encode_buffer(linear, 1, 1, Fidelity::Exact, &mut NopControl).unwrap();
         let rgb = image.to_rgb8();

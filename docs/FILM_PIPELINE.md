@@ -431,6 +431,17 @@ clear film (transmittance 1) is ACEScg `(1, 1, 1)`. Each ACEScg channel
 becomes a density again with `−log10`. That density is what `print_scan`
 sees.
 
+The eye is the right reader for a slide, which is viewed. A negative is
+read by a printer, whose red, green, and blue responses each sit on one
+dye. A stock with `[scan_response]` (Portra 400 uses ISO 5-3 Status M)
+scans with those responses instead (`Observer::from_responses`), each
+normalized so clear film reads 1. With `[print_dye_density]` the print
+stage then forms each channel's print density from that paper dye's
+spectrum and views the sum under the same D65 observer
+(`Spectral::print_pixel`), instead of taking `10^(−print density)` per
+ACEScg channel. The paper dyes' side absorptions are what keep a
+negative-print look from the oversaturation of ideal dyes.
+
 `reference_log_exposure` is the datasheet printer balance. At load time
 the curves are evaluated at that log exposure, the result is scanned
 through the dyes, and a per-channel offset (`scan_balance`) is subtracted

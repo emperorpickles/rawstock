@@ -506,7 +506,7 @@ impl GpuPipeline {
             FilmModel::Spectral(film) => {
                 let tables = film.gpu_tables();
                 let count = tables.wavelengths.len();
-                let mut values = Vec::with_capacity(count * 10);
+                let mut values = Vec::with_capacity(count * 16);
                 values.extend_from_slice(tables.wavelengths);
                 for layer in tables.weighted_sensitivity {
                     values.extend_from_slice(layer);
@@ -521,8 +521,18 @@ impl GpuPipeline {
                     }
                     None => values.resize(count * 10, 0.0),
                 }
+                if let Some(print) = tables.print {
+                    for layer in print.dyes.iter().chain(print.observer) {
+                        values.extend_from_slice(layer);
+                    }
+                }
                 let (res, _, _, ap0) = crate::spectrum::gpu_upsample();
-                params.spectral = [count as u32, u32::from(tables.scan.is_some()), res, 0];
+                params.spectral = [
+                    count as u32,
+                    u32::from(tables.scan.is_some()),
+                    res,
+                    u32::from(tables.print.is_some()),
+                ];
                 params.ap1_to_ap0 = ap0.map(|row| [row[0], row[1], row[2], 0.0]);
                 sequence.push(Kernel::DensitySpectral);
                 if tables.scan.is_some() {

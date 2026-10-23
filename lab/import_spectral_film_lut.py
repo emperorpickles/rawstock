@@ -8,7 +8,7 @@ The upstream package is MIT licensed (Copyright 2026 Jan Lohse):
 
     https://github.com/JanLohse/spectral_film_lut/blob/main/LICENSE
 
-This script reads one ``FilmData(...)`` module as source text. It does not
+This script reads ``FilmData(...)`` modules as source text. It does not
 import the package, and it does not copy grain. The Portra 400 module's RMS
 tables are commented as copied from Kodak 5207, and its scalar ``rms`` is
 commented as guessed, so the written stock leaves ``[grain]`` and
@@ -17,35 +17,43 @@ commented as guessed, so the written stock leaves ``[grain]`` and
 Usage:
     python3 lab/import_spectral_film_lut.py \\
         path/to/spectral_film_lut/src/spectral_film_lut/negative_film/kodak_portra_400.py \\
+        --paper path/to/spectral_film_lut/src/spectral_film_lut/print_film/kodak_portra_endura.py \\
         -o stocks/portra400.stock.toml
 
-What is copied
-    ``log_sensitivity`` and ``sensiometric_curve``, in the module's layer
-    order (red, green, blue). Wavelengths are resampled onto 380–780 nm at
-    10 nm, the grid ``spectral_film_lut`` uses for ``SPECTRAL_SHAPE``.
+Negative (Kodak Portra 400)
+    A negative is printed the way a lab prints it. ``--paper`` names the
+    print paper module; the Status M table is read from the package's
+    ``densiometry.py`` next to the film modules.
 
-What is derived
+    Sensitivities are ``10`` to the power of the resampled log sensitivity,
+    end slopes extended and floored three decades below the peak (as for the
+    reversal path below), then scaled so each layer's trapezoidal integral
+    is 1. Wavelengths are resampled onto 380–780 nm at 10 nm, the grid
+    ``spectral_film_lut`` uses for ``SPECTRAL_SHAPE``.
+
     The module has no per-layer ``spectral_density``. It has the combined
     midscale curve ``d_ref_sd`` and the base ``d_min_sd`` from the E-4050
     spectral-dye-density figure. Per-layer dye curves are that difference,
     split the way ``construct_spectral_density`` in
     ``spectral_film_lut/densiometry.py`` splits it (peaks in the red, green,
-    and blue bands, then a Gaussian blend). Each layer is then scaled so its
-    peak is 1. That scale is not Status M; a later calibration can replace it.
+    and blue bands, then a Gaussian blend). Each dye is then scaled to read
+    density 1 through its own Status M channel, the normalization
+    ``spectral_film_lut`` uses.
 
-    Sensitivities are ``10`` to the power of the resampled log sensitivity,
-    then scaled so each layer's trapezoidal integral is 1. A flat spectrum of
-    level 1 therefore exposes every layer equally, and the datasheet D-logH
-    curves keep the relative layer speed.
+    The ``sensiometric_curve`` values are Status M readings of the whole dye
+    stack. The stock stores dye amounts instead: each reading less its D-min
+    (the orange mask), unmixed by the inverse of the 3×3 matrix of the dyes'
+    Status M readings. The stock's ``[scan_response]`` is that Status M
+    table, so the core's scan reads the datasheet curves back.
 
     ``exposure_ev`` places a scene-linear 0.18 on ``log10(12.5 / ISO)``, the
-    middle-gray log exposure spectral_film_lut uses for an ISO speed. The
-    print curve below is the synthetic scan curve Portra was imported
-    against. It used to match ``stocks/neutral.stock.toml``; Neutral's live
-    curve has since been retuned, and these knots stay frozen so a re-import
-    still matches the stock in the tree. ``print_exposure`` is chosen so the
-    mean scanned dye density at that log exposure sits on print
-    log-exposure 0.2, which was Neutral's 0.18 gray when Portra was built.
+    middle-gray log exposure spectral_film_lut uses for an ISO speed, and
+    ``reference_log_exposure`` balances that gray to neutral. The print
+    curve is the paper's green layer, less its D-min. ``print_exposure``
+    prints middle gray at ``-log10(0.18)``, the density of an 18 % reflector.
+    The paper's dye traces are held at their ends outside 400–700 nm and
+    scaled so that density in all three channels views as a neutral under
+    D65.
 
 Reversal (Fuji Velvia 50)
     The module is ``reversal_film/fuji_velvia_50.py``. Its sensitometric
@@ -55,8 +63,8 @@ Reversal (Fuji Velvia 50)
     density; a running minimum holds those at D-min.
 
     Its log sensitivity traces stop about 1.4 decades below each peak.
-    Clamping to the lowest traced value, as the Portra path does, would
-    leave a 4 % floor across the whole spectrum. Instead each end segment's
+    Clamping to the lowest traced value would leave a 4 % floor across the
+    whole spectrum. Instead each end segment's
     slope is extended and the result is floored three decades below that
     layer's peak.
 
@@ -85,12 +93,6 @@ WAVELENGTH_MAX = 780
 WAVELENGTH_STEP = 10
 # spectral_film_lut construct_spectral_density defaults.
 DYE_SIGMA_NM = 25.0
-# Frozen print stage from the Neutral stock at the time Portra was imported.
-# 0.2 is the print log-exposure that stock gave a 0.18 gray. Neutral's live
-# curve is no longer these knots; do not copy them back from the stock file.
-NEUTRAL_PRINT_LOG = 0.2
-PRINT_LOG_EXPOSURE = [-1.5, -0.5, 0.2, 1.0, 2.0]
-PRINT_DENSITY = [0.04, 0.20, 0.70, 1.50, 2.20]
 SCENE_GRAY = 0.18
 # Reversal sensitivity floor, in decades below each layer's peak.
 SENSITIVITY_FLOOR_DECADES = 3.0
@@ -106,9 +108,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("module", type=Path, help="path to a spectral_film_lut FilmData module")
     parser.add_argument("-o", "--output", type=Path, required=True, help="stock TOML to write")
+    parser.add_argument(
+        "--paper",
+        type=Path,
+        help="print paper module for a negative, e.g. print_film/kodak_portra_endura.py",
+    )
     args = parser.parse_args()
     film = load_film_data(args.module)
-    text = render_stock(film)
+    paper = load_film_data(args.paper) if args.paper else None
+    status_m = load_status_m(args.module) if args.paper else None
+    text = render_stock(film, paper, status_m)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(text)
     print(f"wrote {args.output}")
@@ -122,77 +131,108 @@ def load_film_data(path: Path) -> dict:
     raise SystemExit(f"{path} has no FilmData(...) call")
 
 
-def render_stock(film: dict) -> str:
+def render_stock(film: dict, paper: dict | None, status_m: list[dict[float, float]] | None) -> str:
     if film.get("name") == "Fuji Velvia 50":
         return render_reversal_stock(film)
     if film.get("name") != "Kodak Portra 400":
         raise SystemExit(f"this importer currently knows Kodak Portra 400, not {film.get('name')!r}")
+    if paper is None or status_m is None:
+        raise SystemExit("a negative needs --paper, the print paper module to print onto")
+    if film.get("density_measure") != "status_m":
+        raise SystemExit("the negative path expects Status M characteristic curves")
     grid = list(range(WAVELENGTH_MIN, WAVELENGTH_MAX + 1, WAVELENGTH_STEP))
     sensitivities = []
     for layer in film["log_sensitivity"]:
-        log_samples = resample_log(layer, grid)
+        log_samples = resample_log_tail(layer, grid)
         linear = [10.0**value for value in log_samples]
         sensitivities.append(normalize(grid, linear))
-    curves = [sorted(layer.items()) for layer in film["sensiometric_curve"]]
-    for curve in curves:
+    raw_curves = [sorted(layer.items()) for layer in film["sensiometric_curve"]]
+    for curve in raw_curves:
         logs = [point[0] for point in curve]
         densities = [point[1] for point in curve]
         if any(right <= left for left, right in zip(logs, logs[1:])):
             raise SystemExit("characteristic log exposure does not strictly increase")
         if any(right < left for left, right in zip(densities, densities[1:])):
             raise SystemExit("characteristic density decreases")
+    responses = status_responses(grid, status_m)
     dyes = split_dyes(grid, film["d_ref_sd"], film["d_min_sd"])
+    # One unit of each dye reads density 1 through its own Status M channel,
+    # the normalization spectral_film_lut uses.
+    dyes = [
+        [value / sum(r * d for r, d in zip(response, dye)) for value in dye]
+        for dye, response in zip(dyes, responses)
+    ]
+    # Status M density of one unit of each dye, row = channel, column = dye.
+    reading = [[sum(r * d for r, d in zip(responses[row], dyes[col])) for col in range(3)] for row in range(3)]
+    unmix = invert(reading)
+    # The datasheet curves are Status M readings of the whole dye stack, base
+    # included. Each dye's side absorptions show up in the other channels, so
+    # the dye amounts are the readings above D-min times the inverse reading
+    # matrix. Read back through Status M, they give the datasheet curves.
+    base = [min(point[1] for point in curve) for curve in raw_curves]
+    axis = [point[0] for point in raw_curves[1]]
+    readings = [[interp(log_h, curve) - floor for curve, floor in zip(raw_curves, base)] for log_h in axis]
+    amounts = [[sum(unmix[layer][channel] * reading_at[channel] for channel in range(3)) for reading_at in readings] for layer in range(3)]
+    curves = []
+    for layer, values in enumerate(amounts):
+        held = []
+        for value in values:
+            held.append(value if not held else max(held[-1], value))
+        dips = sum(1 for raw, kept in zip(values, held) if raw != kept)
+        print(f"dye amount {layer}: {values[0]:.3f} .. {values[-1]:.3f}, {dips} points held")
+        curves.append(list(zip(axis, held)))
     iso = int(film["iso"])
     log_h_ref = math.log10(12.5 / iso)
     exposure_ev = math.log2((10.0**log_h_ref) / SCENE_GRAY)
-    ref_density = [interp(log_h_ref, curve) for curve in curves]
-    # Status-M density is not the density the print curve sees. The scan
-    # integrates the dye spectra, the same way FilmModel::Spectral does, and
-    # print_exposure places that mean on the neutral stock's 0.2 step.
-    effective = scanned_density(grid, dyes, ref_density)
-    print_exposure = sum(effective) / len(effective) + NEUTRAL_PRINT_LOG
+    ref_amount = [interp(log_h_ref, curve) for curve in curves]
+    # The core balances each scanned channel to their mean at the reference.
+    scanned = status_density(grid, responses, dyes, ref_amount)
+    mean_scan = sum(scanned) / 3.0
+    paper_curve = paper_print_curve(paper)
+    # The paper's laboratory aim: middle gray prints to the density of an 18 %
+    # reflector, measured from the paper white.
+    paper_aim = -math.log10(SCENE_GRAY)
+    paper_log_h = inverse_interp(paper_aim, paper_curve)
+    print_exposure = paper_log_h + mean_scan
+    paper_dyes = balanced_paper_dyes(grid, paper, paper_aim)
 
     print(f"log H ref {log_h_ref:.4f}  exposure_ev {exposure_ev:.4f}")
-    print("density at ref", " ".join(f"{value:.3f}" for value in ref_density))
-    print("scanned density", " ".join(f"{value:.3f}" for value in effective))
-    print(f"print_exposure {print_exposure:.4f}")
+    print("D-min", " ".join(f"{value:.3f}" for value in base))
+    print("Status M reading of the dyes", reading)
+    print("dye amount at ref", " ".join(f"{value:.3f}" for value in ref_amount))
+    print("Status M scan at ref", " ".join(f"{value:.3f}" for value in scanned))
+    print(f"paper log H at aim {paper_log_h:.4f}  print_exposure {print_exposure:.4f}")
     for index, layer in enumerate(sensitivities):
         peak = max(range(len(layer)), key=layer.__getitem__)
         print(
             f"sensitivity {index} integral {trapezoid(grid, layer):.6f} "
-            f"peak {grid[peak]} nm {layer[peak]:.5f} min {min(layer):.5f}"
+            f"peak {grid[peak]} nm {layer[peak]:.5f} min {min(layer):.6f}"
         )
-    for index, layer in enumerate(dyes):
-        peak = max(range(len(layer)), key=layer.__getitem__)
-        print(f"dye {index} peak {grid[peak]} nm {layer[peak]:.4f} min {min(layer):.4f}")
 
     lines = [
         "# Kodak Portra 400, schema 1 spectral stock.",
         "# Generated by lab/import_spectral_film_lut.py from the MIT-licensed",
-        "# KODAK_PORTRA_400 module in Jan Lohse, spectral_film_lut",
-        "# (https://github.com/JanLohse/spectral_film_lut). The curves were",
+        "# KODAK_PORTRA_400 and KODAK_PORTRA_ENDURA modules and the Status M",
+        "# table in Jan Lohse, spectral_film_lut",
+        "# (https://github.com/JanLohse/spectral_film_lut). The film curves were",
         "# digitized from Kodak publication E-4050. Grain and halation are",
         "# omitted: that module's RMS tables are copied from Kodak 5207 and its",
-        "# scalar rms is marked guessed. The print curve is the synthetic scan",
-        "# curve shared with stocks/neutral.stock.toml, not a paper measurement.",
-        "# Dye curves are the importer's split of (midscale spectral density",
-        "# minus D-min), peak-normalized. They are not separately traced dyes.",
+        "# scalar rms is marked guessed.",
         "",
         "schema_version = 1",
-        "revision = 1",
+        "revision = 3",
         'name = "Kodak Portra 400"',
-        'source = "spectral_film_lut, digitized from Kodak publication E-4050 (KODAK PROFESSIONAL PORTRA 400 Film)."',
+        'source = "spectral_film_lut, digitized from Kodak publication E-4050 (KODAK PROFESSIONAL PORTRA 400 Film) and the KODAK PROFESSIONAL PORTRA ENDURA paper datasheet."',
         'license = "MIT"',
         'model = "spectral"',
         "",
         "# Stops that place scene-linear 0.18 on log10(12.5 / ISO), the",
         "# middle-gray log exposure spectral_film_lut uses for this ISO.",
         f"exposure_ev = {exposure_ev:.6f}",
-        "# Synthetic scan curve. print_exposure puts the mean scanned dye",
-        "# density at the reference log exposure on print log-exposure 0.2.",
+        "# Prints that middle gray at the paper's 18 % gray density.",
         f"print_exposure = {print_exposure:.6f}",
-        "# Log lux-seconds of that middle gray. The spectral print balances",
-        "# this exposure to neutral. It is not a chart-scan white balance.",
+        "# The Status M scan balances this log exposure to neutral, the job of",
+        "# a printer's color trims.",
         f"reference_log_exposure = {log_h_ref:.6f}",
         "",
         "wavelength_nm = [" + ", ".join(str(wave) for wave in grid) + "]",
@@ -202,11 +242,29 @@ def render_stock(film: dict) -> str:
         f"green = {format_samples(sensitivities[1])}",
         f"blue = {format_samples(sensitivities[2])}",
         "",
+        "# The importer's split of (midscale spectral density minus D-min), each",
+        "# dye scaled to read density 1 through its own Status M channel.",
         "[dye_density]",
         f"red = {format_samples(dyes[0])}",
         f"green = {format_samples(dyes[1])}",
         f"blue = {format_samples(dyes[2])}",
         "",
+        "# ISO 5-3 Status M, the densitometer the datasheet curves were read",
+        "# with. The negative is scanned with it, not with the eye.",
+        "[scan_response]",
+        f"red = {format_samples(responses[0])}",
+        f"green = {format_samples(responses[1])}",
+        f"blue = {format_samples(responses[2])}",
+        "",
+        "# Portra Endura paper dyes, scaled so equal print densities at the",
+        "# 18 % aim view as a neutral under D65.",
+        "[print_dye_density]",
+        f"red = {format_samples(paper_dyes[0])}",
+        f"green = {format_samples(paper_dyes[1])}",
+        f"blue = {format_samples(paper_dyes[2])}",
+        "",
+        "# Datasheet D-logH curves as dye amounts: the Status M readings above",
+        "# D-min, unmixed by the inverse of the dyes' Status M readings.",
     ]
     names = ("red", "green", "blue")
     for name, curve in zip(names, curves):
@@ -214,11 +272,111 @@ def render_stock(film: dict) -> str:
         lines.append("log_exposure = " + format_samples([point[0] for point in curve]))
         lines.append("density = " + format_samples([point[1] for point in curve]))
         lines.append("")
+    lines.append("# Portra Endura paper, green layer, from the paper white.")
     lines.append("[print]")
-    lines.append("log_exposure = " + format_samples(PRINT_LOG_EXPOSURE))
-    lines.append("density = " + format_samples(PRINT_DENSITY))
+    lines.append("log_exposure = " + format_samples([point[0] for point in paper_curve]))
+    lines.append("density = " + format_samples([point[1] for point in paper_curve]))
     lines.append("")
     return "\n".join(lines)
+
+
+def status_responses(grid: list[int], table: list[dict[float, float]]) -> list[list[float]]:
+    """Status M spectral products on ``grid``, each summing to 1.
+
+    The ISO 5-3 table is log10 of the spectral product. It is interpolated in
+    log inside each traced band and is zero outside it.
+    """
+    responses = []
+    for layer in table:
+        points = sorted(layer.items())
+        linear = []
+        for wave in grid:
+            if wave < points[0][0] or wave > points[-1][0]:
+                linear.append(0.0)
+            else:
+                linear.append(10.0 ** interp(float(wave), points))
+        total = sum(linear)
+        responses.append([value / total for value in linear])
+    return responses
+
+
+def status_density(
+    grid: list[int], responses: list[list[float]], dyes: list[list[float]], amount: list[float]
+) -> list[float]:
+    """Status M density of a dye stack, matching ``Observer::from_responses``.
+
+    The core weights each response by the trapezoid and normalizes it so a
+    clear film reads 1; on an even grid that is the plain sum used here.
+    """
+    transmittance = []
+    for index in range(len(grid)):
+        optical = sum(dyes[layer][index] * amount[layer] for layer in range(3))
+        transmittance.append(10.0 ** (-optical))
+    weights = [0.5 if index in (0, len(grid) - 1) else 1.0 for index in range(len(grid))]
+    out = []
+    for response in responses:
+        white = sum(r * w for r, w in zip(response, weights))
+        value = sum(r * w * t for r, w, t in zip(response, weights, transmittance))
+        out.append(-math.log10(max(value / white, 1.0e-6)))
+    return out
+
+
+def balanced_paper_dyes(grid: list[int], paper: dict, aim: float) -> list[list[float]]:
+    """Paper dye spectra, scaled so ``aim`` in every channel views neutral.
+
+    The traces are peak-normalized and stop near 400 and 700 nm; the end
+    values are held outside them. Each dye is then scaled until a print of
+    density ``aim`` in all three channels is an ACEScg gray of
+    ``10^-aim`` under D65, the observer the core views the print with.
+    """
+    dyes = []
+    for layer in paper["spectral_density"]:
+        points = sorted(layer.items())
+        dyes.append([max(0.0, interp(float(wave), points)) for wave in grid])
+    rows = acescg_rows(grid)
+    scales = [1.0, 1.0, 1.0]
+    for _ in range(100):
+        transmittance = [
+            10.0 ** -(sum(scales[c] * dyes[c][index] * aim for c in range(3))) for index in range(len(grid))
+        ]
+        viewed = [sum(row[index] * transmittance[index] for index in range(len(grid))) for row in rows]
+        scales = [scale * aim / -math.log10(value) for scale, value in zip(scales, viewed)]
+    print("paper dye scales", " ".join(f"{scale:.4f}" for scale in scales))
+    return [[scale * value for value in dye] for scale, dye in zip(scales, dyes)]
+
+
+def load_status_m(module: Path) -> list[dict[float, float]]:
+    """The ``STATUS_M`` table in the package's ``densiometry.py``."""
+    path = module.resolve().parents[1] / "densiometry.py"
+    tree = ast.parse(path.read_text())
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(getattr(target, "id", None) == "STATUS_M" for target in node.targets):
+            return ast.literal_eval(node.value)
+    raise SystemExit(f"{path} has no STATUS_M table")
+
+
+def paper_print_curve(paper: dict) -> list[tuple[float, float]]:
+    """The paper's green-layer D-logH curve, measured from the paper white.
+
+    The print stage has one curve for all three channels. Green carries
+    most of a print's luminance, so its trace is the shared curve. D-min is
+    subtracted so unexposed paper is white.
+    """
+    if paper.get("stage") != "print":
+        raise SystemExit(f"{paper.get('name')!r} is not a print stock")
+    points = sorted(paper["sensiometric_curve"][1].items())
+    held = []
+    for _, density in points:
+        held.append(density if not held else max(held[-1], density))
+    floor = held[0]
+    return [(log_h, density - floor) for (log_h, _), density in zip(points, held)]
+
+
+def inverse_interp(density: float, curve: list[tuple[float, float]]) -> float:
+    for (left_x, left_y), (right_x, right_y) in zip(curve, curve[1:]):
+        if left_y <= density <= right_y and right_y > left_y:
+            return left_x + (density - left_y) / (right_y - left_y) * (right_x - left_x)
+    raise SystemExit(f"density {density} is outside the paper curve")
 
 
 def render_reversal_stock(film: dict) -> str:
@@ -334,23 +492,6 @@ def resample_log_tail(samples: dict[float, float], grid: list[int]) -> list[floa
     ceiling = max(point[1] for point in points)
     floor = ceiling - SENSITIVITY_FLOOR_DECADES
     return [min(ceiling, max(floor, extrapolate(points, float(wave)))) for wave in grid]
-
-
-def resample_log(samples: dict[float, float], grid: list[int]) -> list[float]:
-    """Linear resample of log sensitivity, clamped outside the measured range.
-
-    Inside the digitized trace, this is linear interpolation. Outside it, the
-    end segment is extended and then clamped to the measured min and max, so
-    a steep edge cannot run away and a gap cannot invent a peak.
-    """
-    points = sorted(samples.items())
-    lows = [point[1] for point in points]
-    floor = min(lows)
-    ceiling = max(lows)
-    resampled = []
-    for wave in grid:
-        resampled.append(min(ceiling, max(floor, extrapolate(points, float(wave)))))
-    return resampled
 
 
 def extrapolate(points: list[tuple[float, float]], wave: float) -> float:
