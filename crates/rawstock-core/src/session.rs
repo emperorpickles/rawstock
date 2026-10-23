@@ -1223,7 +1223,6 @@ fn render_tail(
                 model.mix_field(
                     &mut grained,
                     &grain_field.as_ref().expect("cloud field").samples,
-                    frame_width,
                 );
                 grained
             }

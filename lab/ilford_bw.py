@@ -191,14 +191,16 @@ FILMS = {
         developer="ILFOTEC HC 1+31, 6.5 min at 20 C",
         paper_grade=1,
         # Approximate. Silver granularity rises with density. HP5 Plus is a
-        # traditional cubic-grain 400 film, close to Tri-X in grain.
+        # traditional cubic-grain 400 film, close to Tri-X in grain. Tuned by
+        # eye on 100% exports of a 6160 px frame, where a pixel reads about
+        # 1.5 times the 48 um figure for 6 um clumps.
         grain=[
-            (0.0, 8),
-            (0.3, 11),
-            (0.7, 14),
-            (1.1, 15),
-            (1.5, 15),
-            (2.0, 14),
+            (0.0, 5.3),
+            (0.3, 7.2),
+            (0.7, 9.2),
+            (1.1, 9.9),
+            (1.5, 9.9),
+            (2.0, 9.2),
         ],
         grain_size_mm=0.006,
         seed=5,
@@ -325,7 +327,7 @@ def write(film: Film, paper: list[tuple[float, float]], grade: int) -> str:
         "# spectral_film_lut (https://github.com/JanLohse/spectral_film_lut).",
         "",
         "schema_version = 1",
-        "revision = 2",
+        "revision = 3",
         f'name = "{film.name}"',
         (
             f'source = "Digitized from the figures in Ilford {film.datasheet} '
@@ -364,9 +366,10 @@ def write(film: Film, paper: list[tuple[float, float]], grade: int) -> str:
         f"density = {array([y for _, y in paper])}",
         "",
         "# Approximate aesthetic tuning, not a published granularity table.",
-        "# Silver grain: one layer, the same clouds in every channel, coarser",
-        "# than the color stocks. rms is 1000 times the density standard",
-        "# deviation through a 48 um aperture, and rises with density.",
+        "# Silver grain: one layer of hard-edged silver clumps, the same in",
+        "# every channel. rms is 1000 times the density standard deviation",
+        "# through a 48 um aperture, and rises with density. A 6160 px frame",
+        "# reads about 1.5 times that per pixel with 6 um clumps.",
         "[grain]",
         "frame_mm = 35",
         f"seed = {film.seed}",

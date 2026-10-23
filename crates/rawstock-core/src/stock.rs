@@ -1152,15 +1152,17 @@ impl GrainRegion {
 /// spektrafilm.
 ///
 /// [`Self::APERTURE_MM`] is the Kodak 48 µm measurement window, not a tile.
-/// While that window covers at least one pixel, the density standard
-/// deviation is `rms / 1000`. Below one pixel per aperture, each pixel
-/// averages several windows and the standard deviation scales with
-/// `sqrt(cell_px)`. [`Self::size_mm`] is the primary dye-cloud sigma of each
-/// layer, in millimetres. It scales with [`Self::frame_mm`], not with the
-/// pixel.
+/// `rms / 1000` is the density standard deviation through that window. A
+/// pixel sees [`Self::pixel_ratio`] times as much: more than 1 when pixels
+/// are finer than the clouds' reach through the window, less for a small
+/// preview, as averaging a full-size render down to that size gives.
+/// [`Self::size_mm`] is the primary cloud sigma of each layer, in
+/// millimetres. It scales with [`Self::frame_mm`], not with the pixel, and
+/// finer clouds read stronger per pixel at the same RMS.
 ///
 /// [`Self::monochrome`] is silver grain: one image layer, so the three
-/// channels carry the same table, the same size, and the same clouds.
+/// channels carry the same table, the same size, and the same clouds, which
+/// are hard-edged silver clumps rather than soft dye clouds.
 #[derive(Debug, Clone)]
 pub struct Grain {
     frame_mm: f32,
@@ -1260,9 +1262,9 @@ impl Grain {
     pub const DEFAULT_SIZE_MM: [f32; 3] = [0.018, 0.013, 0.010];
 
     /// Silver clump sigma for monochrome grain without a `size_mm`, in
-    /// millimetres. Coarser than the color clouds: a 400-speed silver image
-    /// shows clumps of developed grains, not single crystals.
-    pub const MONOCHROME_SIZE_MM: f32 = 0.016;
+    /// millimetres. Finer than the color clouds: silver clumps are sharp
+    /// and sparse, and at 16 µm they read as mottle on a full frame.
+    pub const MONOCHROME_SIZE_MM: f32 = 0.006;
 
     /// `layers` are red, green, and blue, in that order.
     ///
@@ -1374,16 +1376,14 @@ impl Grain {
         })
     }
 
-    /// Kodak measurement aperture in pixels when the image is `width` across.
+    /// A pixel's grain over the 48 µm reading, per layer, when the frame is
+    /// `width` pixels across.
     ///
-    /// This is the 48 µm window on a frame of [`Self::frame_mm`]. It scales
-    /// the grain amplitude. It is not a rendered tile.
-    pub fn cell_px(&self, width: u32) -> f32 {
-        if width == 0 {
-            0.0
-        } else {
-            Self::APERTURE_MM / self.frame_mm * width as f32
-        }
+    /// Density deviation per pixel is `rms / 1000` times this. It depends
+    /// on the cloud sizes, the scanner, and the pitch, not on the tables.
+    pub fn pixel_ratio(&self, width: u32) -> [f32; 3] {
+        crate::grain::FilmGrain::new(self.frame_mm, self.seed, self.size_mm, self.monochrome)
+            .pixel_ratio(width)
     }
 
     /// Add per-layer grain to interleaved density.
@@ -1428,17 +1428,19 @@ impl Grain {
             return Ok(());
         }
         let field = self.unit_field(region, rows, control)?;
-        self.mix_field(density, &field, frame_width);
+        self.mix_field(density, &field);
         Ok(())
     }
 
-    /// Normalized dye-cloud field for `region`, one value per density sample.
+    /// Grain field for `region`, one value per density sample, in units of
+    /// its deviation through the 48 µm aperture.
     ///
     /// The field does not depend on the granularity tables. [`Self::mix_field`]
     /// applies RMS. A crop uses the full frame's pitch, so the same film-plane
-    /// coordinate gets the same cloud. Clouds smaller than a pixel are
-    /// drawn per pixel, as their summed mass. Resolved clouds are gaussian stamps filtered
-    /// by the scanner aperture, padded so the crop matches the full frame.
+    /// coordinate gets the same cloud. Clouds smaller than a pixel are drawn
+    /// per pixel, as their summed mass, then spread by a pixel aperture.
+    /// Resolved clouds are stamps filtered by the scanner aperture. Either
+    /// blur is padded so the crop matches the full frame.
     pub(crate) fn unit_field(
         &self,
         region: GrainRegion,
@@ -1467,10 +1469,11 @@ impl Grain {
 
     /// Add `field` from [`Self::unit_field`] onto density.
     ///
-    /// `frame_width` is the full frame, matching the field. RMS comes from
-    /// the tables on `self`, so an amount change can reuse `field`.
-    pub(crate) fn mix_field(&self, density: &mut [f32], field: &[f32], frame_width: u32) {
-        let scale = self.cell_px(frame_width).min(1.0).sqrt() / 1000.0;
+    /// The field is in 48 µm deviations, so RMS applies as published. RMS
+    /// comes from the tables on `self`, so an amount change can reuse
+    /// `field`.
+    pub(crate) fn mix_field(&self, density: &mut [f32], field: &[f32]) {
+        let scale = 1.0 / 1000.0;
         for (index, (sample, unit)) in density.iter_mut().zip(field.iter()).enumerate() {
             let rms = self.layers[index % 3].eval(*sample);
             if rms == 0.0 {

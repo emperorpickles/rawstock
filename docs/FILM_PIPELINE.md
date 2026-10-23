@@ -377,27 +377,63 @@ draws hash the pixel's full-frame position, so a crop at the same pitch
 matches the frame. This keeps a preview's cost per pixel. Drawing every
 cloud took 5 to 6 s at the 1440 px proxy, because the frame holds about
 100 million of them. The proxy's grain has the export's statistics but not
-its individual clouds, which at that scale are smaller than a pixel. Above that, the
-gaussian is evaluated and a 6 µm scanner aperture blurs the field. The crop
-is padded by that kernel, so a 100% view matches the full frame.
+its individual clouds, which at that scale are smaller than a pixel. A
+cloud centered in one pixel still reaches its neighbors, so the per-pixel
+draws are then spread by a pixel aperture: the scanned cloud's gaussian,
+averaged over the source pixel and binned into whole pixels. That gives the
+preview the neighbor correlation the export has when shrunk to its size
+(lag-1 within about 0.05). When every cloud is resolved, the profile is
+evaluated per pixel and a 6 µm scanner aperture blurs the field. Either
+blur pads the crop, so a 100% view matches the full frame.
 
 The working sum is `f64`. A coarse pixel covers millions of clouds whose
 masses sit below the unit in the last place of an `f32` total, and the
 lost mass is a density bias (a 1×1 frame of Portra came out several tenths
 dark and colored). The stored field is `f32` after the mean is removed.
 
-The **48 µm aperture** still sets only the RMS amplitude. `Granularity`
-stores `(density, rms)`. Density must strictly increase. RMS may rise and
-fall. `cell_px = width * 0.048 / frame_mm`. While that window covers at
-least one pixel, the density standard deviation is `rms / 1000`. Below one
-pixel per aperture it scales with `sqrt(cell_px)`. RMS is evaluated at the
-pixel's own density, after the field is built, so an edge does not grow
-extra grain. The amount slider scales the tables and reuses the field.
+The **48 µm aperture** calibrates the field (#79). `Granularity` stores
+`(density, rms)`. Density must strictly increase. RMS may rise and fall.
+`rms / 1000` is the density deviation through a 48 µm circle, modelled as
+a square of the same area. Each process's share of the variance is set at
+that aperture, and its variance at a pixel follows from the cloud size,
+the scanner, and the pitch: a cloud's mass, blurred by the scanner, then
+averaged over the pixel's box, against the same cloud averaged over the
+aperture. `Grain::pixel_ratio` is the resulting deviation per pixel over
+the 48 µm one. At 35 mm across 6160 px it is about 1.28 for Portra, 1.45
+for Velvia, and 1.52 for HP5 Plus; at a 48 µm pixel it is about 1, and far
+coarser it falls as the pixel side, as Selwyn's law says. So a preview
+shows what the export shows shrunk to the same size, within a few percent,
+and finer clouds read stronger per pixel at the same RMS. Before #79 every
+pitch finer than the aperture got exactly `rms / 1000` per pixel, which
+made a fit-to-screen preview 10–21% grainier than the export. The stock
+tables were divided by their 6160 px ratio when this changed, so 100%
+exports look as they did. RMS is evaluated at the pixel's own density,
+after the field is built, so an edge does not grow extra grain. The amount
+slider scales the tables and reuses the field.
+
+**Silver grain.** A monochrome stock (`emulsion = "monochrome"`) draws a
+different process table, every process in all three channels:
+
+| Process | Variance | Sigma, in units of `size_mm` | Cell | Profile |
+| --- | --- | --- | --- | --- |
+| Clumps | 0.75 | 0.70–1.35 | 2.6 | silver |
+| Aggregates | 0.20 | 1.60–2.60 | 4.2 | silver |
+| Mottle | 0.05 | 3.20–4.60 | 4.0 | gaussian |
+
+Developed silver is opaque filament, not a dye cloud. The silver profile is
+a flat-topped disk with a short rim, `(1 − q²)²` for `q = d² / R²` with `R`
+2.4 sigmas, whose equivalent gaussian sigma is within 0.5% of the cloud's,
+so `size_mm` means the same for both profiles. The cells are wider than the
+dye processes', so a point sees two or three clumps instead of seven or
+eight. The field is then skewed toward dense specks, about +0.6 per pixel
+against +0.2 for dye clouds of the same size, and reads crisp rather than
+soft.
 
 `Grain::hash` is unchanged: the PCG hash of Jarzynski and Hill, integer
 only, so a later WGSL port can match the draws. Mean density is unchanged
 in expectation. The splatted field is normalized with the analytical mean
-and variance, including the scanner's effect on `∫k²`.
+and the 48 µm variance; the per-pixel variance it is drawn to includes the
+aperture's effect on `∫k²`.
 
 ## 7. Print/scan
 

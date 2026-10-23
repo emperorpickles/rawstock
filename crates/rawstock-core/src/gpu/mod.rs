@@ -1039,7 +1039,7 @@ impl GrainUpload {
                 f32::from_bits(cdf_len),
                 mass_mean,
                 mass_spread,
-                0.0,
+                f32::from_bits(process.kernel),
                 0.0,
             ]);
             cdf_offset += cdf_len;
@@ -1062,12 +1062,7 @@ impl GrainUpload {
         let params = GrainParams {
             band: [0, 0, pad, region.width],
             origin: [0, 0, plan.processes.len() as i32, i32::from(plan.blur)],
-            scalars: [
-                plan.pitch,
-                grain.cell_px(region.frame_width).min(1.0).sqrt() / 1000.0,
-                0.0,
-                0.0,
-            ],
+            scalars: [plan.pitch, 1.0 / 1000.0, 0.0, 0.0],
             mean: [plan.mean[0], plan.mean[1], plan.mean[2], 0.0],
             spread: [plan.spread[0], plan.spread[1], plan.spread[2], 0.0],
             counts: [0, kernel_offset, 0, 0],
@@ -1089,7 +1084,7 @@ impl GrainUpload {
         }
     }
 
-    /// Field and scanner blur, unless `band` holds a cached field, then the
+    /// Field and aperture blur, unless `band` holds a cached field, then the
     /// mix, for one chunk of whole rows.
     fn apply(
         &self,

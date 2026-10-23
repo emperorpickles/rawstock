@@ -12,7 +12,7 @@
 # spectral_film_lut (https://github.com/JanLohse/spectral_film_lut).
 
 schema_version = 1
-revision = 2
+revision = 3
 name = "Ilford HP5 Plus"
 source = "Digitized from the figures in Ilford HP5 PLUS technical information, Nov 2018 (wedge spectrogram to tungsten 2850 K, characteristic curve in ILFOTEC HC 1+31, 6.5 min at 20 C). The spectrogram is read as 3 decades of log sensitivity with the tungsten source divided out, and the curve is placed by ISO speed: approximate. Grain and halation are an approximate aesthetic tuning. Print curve: Kodak Professional Polymax Fine-Art paper grade 1 from spectral_film_lut (MIT, Jan Lohse)."
 license = "MIT"
@@ -43,15 +43,16 @@ log_exposure = [0.203, 0.3303, 0.5525, 0.697, 0.7725, 0.8243, 0.8675, 0.9365, 1.
 density = [0, 0.0011, 0.0033, 0.0108, 0.0195, 0.0378, 0.0637, 0.1187, 0.2385, 0.4187, 0.6454, 0.8526, 1.0447, 1.2529, 1.4677, 1.7504, 1.962, 2.1249, 2.1799, 2.2177, 2.2555, 2.2598, 2.2598, 2.2598]
 
 # Approximate aesthetic tuning, not a published granularity table.
-# Silver grain: one layer, the same clouds in every channel, coarser
-# than the color stocks. rms is 1000 times the density standard
-# deviation through a 48 um aperture, and rises with density.
+# Silver grain: one layer of hard-edged silver clumps, the same in
+# every channel. rms is 1000 times the density standard deviation
+# through a 48 um aperture, and rises with density. A 6160 px frame
+# reads about 1.5 times that per pixel with 6 um clumps.
 [grain]
 frame_mm = 35
 seed = 5
 [grain.silver]
 density = [0, 0.3, 0.7, 1.1, 1.5, 2]
-rms = [8, 11, 14, 15, 15, 14]
+rms = [5.3, 7.2, 9.2, 9.9, 9.9, 9.2]
 size_mm = 0.006
 
 # Approximate. A faint neutral glow: the anti-halation dye clears in
