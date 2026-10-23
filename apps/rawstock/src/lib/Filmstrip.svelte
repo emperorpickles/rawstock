@@ -54,8 +54,8 @@
 
 <style>
   .filmstrip {
-    background: #1c1c1c;
-    border-right: 1px solid #3a3a3a;
+    background: var(--panel);
+    border-right: 1px solid var(--line);
     overflow: auto;
     padding: 0.6rem;
     display: flex;
@@ -66,7 +66,7 @@
 
   .empty {
     margin: 0;
-    color: #b8b8b8;
+    color: var(--muted);
     font-size: 0.85rem;
   }
 
@@ -83,8 +83,8 @@
   }
 
   button.selected {
-    border-color: #6a6a6a;
-    background: #2a2a2a;
+    border-color: var(--accent);
+    background: var(--paper);
   }
 
   .thumb {
@@ -92,8 +92,8 @@
     height: 1.8rem;
     flex: none;
     border-radius: 3px;
-    background: #2e2e2e;
-    border: 1px solid #3a3a3a;
+    background: var(--surround, #2e2e2e);
+    border: 1px solid var(--line);
   }
 
   .copy {
@@ -118,9 +118,9 @@
   .badge {
     font-size: 0.68rem;
     letter-spacing: 0.02em;
-    color: #d0d0d0;
-    background: #2a2a2a;
-    border: 1px solid #4a4a4a;
+    color: var(--ink);
+    background: var(--paper);
+    border: 1px solid var(--line);
     border-radius: 999px;
     padding: 0 0.35rem;
   }

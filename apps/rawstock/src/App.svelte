@@ -5,8 +5,10 @@
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { onMount } from "svelte";
 
+  import { Adjustments } from "./lib/adjust";
   import { appError, defaultSettings } from "./lib/contract";
-  import type { EditSettings, ImageInfo, StockSummary } from "./lib/contract";
+  import type { CropRect, EditSettings, ImageInfo, StockSummary } from "./lib/contract";
+  import { PreviewSchedule } from "./lib/preview";
   import { Delivery, JobTracker } from "./lib/delivery";
   import {
     Autosave,
@@ -92,7 +94,16 @@
   let cacheHeight = $state(0);
   let exportDialog = $state<HTMLDialogElement | null>(null);
   let resetting = $state(false);
+  let horizon = $state(false);
+  let viewLongEdge = $state(720);
   let closing = false;
+  let previewBusy = false;
+  let previewPending: {
+    settings: EditSettings;
+    phase: "drag" | "settle";
+    imageId: string;
+    compare: boolean;
+  } | null = null;
 
   $effect(() => {
     Prefs.applyAppearance(appSettings);
@@ -183,7 +194,7 @@
       const unlisten = await Promise.all([
         host.onMenu((action) => void perform(action)),
         host.onSettingsChanged((next) => {
-          appSettings = next;
+          appSettings = Prefs.normalize(next);
         }),
         host.onOpen((paths) => void ingest(paths)),
         host.onProgress((event) => {
@@ -192,6 +203,10 @@
           }
         }),
         host.onDone((event) => {
+          if (event.kind === "preview") {
+            void showPreview(event.imageId, event.jobId);
+            return;
+          }
           if (!jobs.current(event.imageId, event.kind, event.jobId)) {
             return;
           }
@@ -235,7 +250,7 @@
       ]);
       cleanups.push(...unlisten);
       try {
-        appSettings = await host.getAppSettings();
+        appSettings = Prefs.normalize(await host.getAppSettings());
         if (!appSettings.onboarding.completed) {
           showOnboarding("welcome");
         }
@@ -373,6 +388,10 @@
       frameMode = "empty";
       fullJob = null;
       notice = info.fileName;
+      horizon = false;
+      if (!info.error) {
+        requestPreview(current, "settle");
+      }
       if (Host.available()) {
         await getCurrentWindow().setTitle(`${info.fileName} - rawstock`);
       }
@@ -408,6 +427,7 @@
     }
     settings = next;
     history.preview(selected, next);
+    requestPreview(next, "drag");
   }
 
   function applyCommit(next: EditSettings) {
@@ -417,6 +437,90 @@
     settings = next;
     if (history.commit(selected, next)) {
       autosave.schedule(selected, next);
+    }
+    requestPreview(next, "settle");
+  }
+
+  function requestPreview(next: EditSettings, phase: "drag" | "settle") {
+    if (!host || !selected || selectedImage?.error) {
+      return;
+    }
+    previewPending = { settings: next, phase, imageId: selected, compare };
+    if (!previewBusy) {
+      void flushPreview();
+    }
+  }
+
+  async function flushPreview() {
+    if (!host) {
+      return;
+    }
+    previewBusy = true;
+    try {
+      while (previewPending && host) {
+        const job = previewPending;
+        previewPending = null;
+        try {
+          const started = await host.developPreview(
+            job.imageId,
+            job.settings,
+            PreviewSchedule.longEdge(job.phase, viewLongEdge),
+            job.compare,
+          );
+          jobs.note(job.imageId, "preview", started.jobId);
+        } catch (error) {
+          errors = [appError(error).message];
+        }
+      }
+    } finally {
+      previewBusy = false;
+      if (previewPending) {
+        void flushPreview();
+      }
+    }
+  }
+
+  async function showPreview(imageId: string, jobId: number) {
+    if (!host) {
+      return;
+    }
+    if (!jobs.current(imageId, "preview", jobId)) {
+      void host.takeFrame(jobId).catch(() => {});
+      return;
+    }
+    try {
+      const bytes = await host.takeFrame(jobId);
+      if (!jobs.current(imageId, "preview", jobId) || imageId !== selected) {
+        return;
+      }
+      frame = FrameBuffer.decode(bytes);
+      frameMode = "texture";
+      progress = "";
+    } catch (error) {
+      errors = [appError(error).message];
+    }
+  }
+
+  function setCompare(next: boolean) {
+    compare = next;
+    requestPreview(settings, "settle");
+  }
+
+  function editCrop(crop: CropRect, commit: boolean) {
+    const next = Adjustments.crop(settings, crop);
+    if (commit) {
+      applyCommit(next);
+    } else {
+      applyPreview(next);
+    }
+  }
+
+  function editStraighten(degrees: number, commit: boolean) {
+    const next = Adjustments.straighten(settings, degrees);
+    if (commit) {
+      applyCommit(next);
+    } else {
+      applyPreview(next);
     }
   }
 
@@ -432,6 +536,7 @@
     }
     settings = next;
     autosave.schedule(selected, next);
+    requestPreview(next, "settle");
     notice = selectedImage?.fileName ?? "Undo";
   }
 
@@ -447,6 +552,7 @@
     }
     settings = next;
     autosave.schedule(selected, next);
+    requestPreview(next, "settle");
     notice = selectedImage?.fileName ?? "Redo";
   }
 
@@ -516,7 +622,7 @@
         zoom = 2;
         break;
       case "before-after":
-        compare = !compare;
+        setCompare(!compare);
         break;
       case "clipping":
         clipping = !clipping;
@@ -586,7 +692,7 @@
       return;
     }
     try {
-      appSettings = await host.setAppSettings(next);
+      appSettings = Prefs.normalize(await host.setAppSettings(next));
     } catch (error) {
       errors = [appError(error).message];
     }
@@ -617,7 +723,7 @@
       return;
     }
     try {
-      appSettings = await host.resetAppSettings(clearRecent);
+      appSettings = Prefs.normalize(await host.resetAppSettings(clearRecent));
       notice = clearRecent ? "Settings and recent files were reset." : "Settings were reset.";
     } catch (error) {
       errors = [appError(error).message];
@@ -685,12 +791,12 @@
   <h1>rawstock</h1>
   <header class="toolbar" role="toolbar" aria-label="Develop">
     <button type="button" onclick={() => void perform("open")} aria-keyshortcuts="{modLabel}+O">Open…</button>
-    <button type="button" onclick={() => void perform("export")} aria-keyshortcuts="{modLabel}+E">Export…</button>
+    <button type="button" class="primary" onclick={() => void perform("export")} aria-keyshortcuts="{modLabel}+E">Export…</button>
     <span class="spacer"></span>
     <button type="button" aria-pressed={zoom === "fit"} aria-keyshortcuts="{modLabel}+0" onclick={() => (zoom = "fit")}>Fit</button>
     <button type="button" aria-pressed={zoom === 1} aria-keyshortcuts="{modLabel}+1" onclick={() => (zoom = 1)}>100%</button>
     <button type="button" aria-pressed={zoom === 2} aria-keyshortcuts="{modLabel}+2" onclick={() => (zoom = 2)}>200%</button>
-    <button type="button" aria-pressed={compare} onclick={() => (compare = !compare)}>Before/After</button>
+    <button type="button" aria-pressed={compare} onclick={() => setCompare(!compare)}>Before/After</button>
     <button type="button" aria-pressed={clipping} onclick={() => (clipping = !clipping)}>Clipping</button>
   </header>
 
@@ -732,15 +838,24 @@
       imageHeight={cacheHeight}
       onopen={() => void perform("open")}
       onview={viewChanged}
+      geometry={settings.geometry}
+      {horizon}
+      oncrop={editCrop}
+      onstraighten={editStraighten}
+      onsize={(edge) => (viewLongEdge = edge)}
     />
     <SidePanel
       {stocks}
       {settings}
       stockId={settings.stock.id}
       disabled={adjustmentsDisabled}
+      frameWidth={frame?.width ?? selectedImage?.width ?? 0}
+      frameHeight={frame?.height ?? selectedImage?.height ?? 0}
+      {horizon}
       onstock={chooseStock}
       onpreview={applyPreview}
       oncommit={applyCommit}
+      onhorizon={(on) => (horizon = on)}
     />
   </div>
 

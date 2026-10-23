@@ -156,7 +156,7 @@
   .progress {
     margin: 0 0 0.3rem;
     font-size: 0.85rem;
-    color: #b8b8b8;
+    color: var(--muted);
   }
 
   /* Focus moves to the heading so a screen reader reads each step. It is

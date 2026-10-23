@@ -499,7 +499,7 @@ pub struct RejectedPath {
 
 /// A browsable stock. `category` is not in the stock file yet; the shell
 /// maps the known 1.0 names and treats anything else as a color negative.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StockSummary {
     pub id: String,
@@ -507,6 +507,24 @@ pub struct StockSummary {
     pub category: StockCategory,
     pub model: String,
     pub revision: u32,
+    /// Which adjust-panel controls this stock actually has.
+    pub controls: StockControls,
+}
+
+/// Controls the adjust panel shows. Hidden controls are omitted, not disabled.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StockControls {
+    pub dye: bool,
+    /// Monochrome stocks. A contrast multiplier on the print.
+    pub contrast: bool,
+    pub grain: bool,
+    /// The stock's own halation, when it sets one. Absent means the panel
+    /// uses its built-in fallback once halation is turned on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub halation_threshold: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub halation_radius: Option<f64>,
 }
 
 /// Stock browser groups from the 1.0 spec.

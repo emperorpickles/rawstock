@@ -4,8 +4,8 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::contract::{AppError, StockSummary, category_for};
-use rawstock_core::stock::Stock;
+use crate::contract::{AppError, StockControls, StockSummary, category_for};
+use rawstock_core::stock::{Emulsion, FilmModel, Stock};
 
 pub fn list() -> Result<Vec<StockSummary>, AppError> {
     let directory = directory();
@@ -30,6 +30,7 @@ pub fn list() -> Result<Vec<StockSummary>, AppError> {
         let name = stock.name().to_string();
         stocks.push(StockSummary {
             category: category_for(&id, &name),
+            controls: controls_for(&stock),
             model: stock.model().to_string(),
             revision: stock.revision(),
             id,
@@ -38,6 +39,27 @@ pub fn list() -> Result<Vec<StockSummary>, AppError> {
     }
     stocks.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(stocks)
+}
+
+/// Dye scales are a color spectral stock. Contrast is the monochrome print.
+/// Grain and halation follow the tables the file actually carries.
+fn controls_for(stock: &Stock) -> StockControls {
+    let parameters = stock.parameters();
+    let (dye, contrast) = match parameters.film() {
+        FilmModel::Spectral(spectral) => {
+            let mono = spectral.emulsion() == Emulsion::Monochrome;
+            (spectral.dye_density().is_some() && !mono, mono)
+        }
+        FilmModel::Parametric(_) => (false, false),
+    };
+    let halation = parameters.halation();
+    StockControls {
+        dye,
+        contrast,
+        grain: parameters.grain().is_some(),
+        halation_threshold: halation.map(|item| f64::from(item.threshold())),
+        halation_radius: halation.map(|item| f64::from(item.radius())),
+    }
 }
 
 fn stock_id(path: &Path) -> Option<String> {
@@ -84,6 +106,21 @@ mod tests {
         assert_eq!(portra.model, "spectral");
         let velvia = stocks.iter().find(|stock| stock.id == "velvia").unwrap();
         assert_eq!(velvia.category, StockCategory::FujiSim);
-        assert!(stocks.iter().any(|stock| stock.id == "neutral"));
+        assert!(portra.controls.dye);
+        assert!(!portra.controls.contrast);
+        assert!(portra.controls.grain);
+        assert!(velvia.controls.grain);
+        assert!(!velvia.controls.dye);
+        let neutral = stocks.iter().find(|stock| stock.id == "neutral").unwrap();
+        assert!(!neutral.controls.dye);
+        assert!(!neutral.controls.grain);
+        assert!(!neutral.controls.contrast);
+        let hp5 = stocks
+            .iter()
+            .find(|stock| stock.id == "ilford-hp5-plus")
+            .unwrap();
+        assert!(hp5.controls.contrast);
+        assert!(!hp5.controls.dye);
+        assert!(hp5.controls.grain);
     }
 }

@@ -21,6 +21,9 @@ export const ALLOWED = new Set([
   "LGPL-3.0-only",
   "LGPL-3.0-or-later",
   "CC0-1.0",
+  // SIL Open Font License. The GNU license list marks OFL-1.1 as
+  // GPL-compatible. Inter and JetBrains Mono ship under it.
+  "OFL-1.1",
 ]);
 
 export class Spdx {

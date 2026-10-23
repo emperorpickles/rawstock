@@ -34,11 +34,21 @@ pub enum ReduceMotion {
     Off,
 }
 
+/// Warm is the brass palette. Neutral is the grey Darkroom palette.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum Theme {
+    #[default]
+    Warm,
+    Neutral,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Appearance {
     pub surround: Surround,
     pub reduce_motion: ReduceMotion,
+    pub theme: Theme,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -257,6 +267,7 @@ mod tests {
         assert_eq!(note, LoadNote::Loaded);
         assert_eq!(store.get().appearance.surround, Surround::Mid);
         assert_eq!(store.get().appearance.reduce_motion, ReduceMotion::System);
+        assert_eq!(store.get().appearance.theme, Theme::Warm);
         assert_eq!(store.get().recent.limit, 10);
         assert!(!store.get().onboarding.completed);
         let _ = std::fs::remove_dir_all(dir);
@@ -290,6 +301,7 @@ mod tests {
         let mut next = store.get().clone();
         next.appearance.surround = Surround::Mid;
         next.appearance.reduce_motion = ReduceMotion::On;
+        next.appearance.theme = Theme::Neutral;
         next.new_image.default_stock_id = Some("velvia".to_string());
         next.recent.limit = 15;
         next.onboarding.completed = true;
@@ -301,6 +313,7 @@ mod tests {
         assert_eq!(loaded.get(), &next);
         let text = std::fs::read_to_string(file).unwrap();
         assert!(text.contains("\"reduceMotion\": \"on\""));
+        assert!(text.contains("\"theme\": \"neutral\""));
         assert!(text.contains("\"defaultStockId\": \"velvia\""));
         let _ = std::fs::remove_dir_all(dir);
     }
