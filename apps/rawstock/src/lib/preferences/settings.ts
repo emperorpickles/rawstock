@@ -1,4 +1,5 @@
 import type { StockSummary } from "../contract.ts";
+import { ExportPlan } from "../export.ts";
 import { ThemeSetting } from "../tokens.ts";
 import type { Theme } from "../tokens.ts";
 
@@ -10,6 +11,12 @@ export type { Theme };
  * Mirrors `settings.rs`. Unknown keys from a newer build ride along in the
  * index signatures so a save never drops them.
  */
+export interface ExportPrefs {
+  quality: number;
+  lastFolder: string | null;
+  [key: string]: unknown;
+}
+
 export interface AppSettings {
   version: number;
   appearance: {
@@ -21,6 +28,7 @@ export interface AppSettings {
   newImage: { defaultStockId: string | null; [key: string]: unknown };
   recent: { limit: number; [key: string]: unknown };
   onboarding: { completed: boolean; [key: string]: unknown };
+  export: ExportPrefs;
   [namespace: string]: unknown;
 }
 
@@ -45,6 +53,7 @@ export class Preferences {
       newImage: { defaultStockId: null },
       recent: { limit: 10 },
       onboarding: { completed: false },
+      export: { quality: 92, lastFolder: null },
     };
   }
 
@@ -57,11 +66,18 @@ export class Preferences {
    * Surround and the other keys are left as they were saved.
    */
   static normalize(settings: AppSettings): AppSettings {
+    const saved = settings.export ?? { quality: 92, lastFolder: null };
+    const folder = typeof saved.lastFolder === "string" ? saved.lastFolder.trim() : "";
     return {
       ...settings,
       appearance: {
         ...settings.appearance,
         theme: ThemeSetting.parse(settings.appearance?.theme),
+      },
+      export: {
+        ...saved,
+        quality: ExportPlan.savedQuality(saved.quality),
+        lastFolder: folder || null,
       },
     };
   }
