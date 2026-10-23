@@ -22,6 +22,10 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
 - GPU rendering on wgpu (#21): every film stage, checked against the CPU
   (#23, #25, #27, #32), and used by the CLI (`--gpu`), the preview session,
   and the desktop tuner with a CPU fallback (#44). See `docs/GPU.md`.
+- 1.0 app (`apps/rawstock`): Preferences and a per-user settings store
+  (#49), the Help menu with About, generated Licenses, Report an issue and
+  a rotating log (#50), and the first-launch welcome with a shortcut cheat
+  sheet (#51).
 
 ## In flight
 
@@ -43,11 +47,8 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   with a Status M scan, the Portra Endura paper curve and dyes, and grain
   retuned for the paper's contrast. Adds `[scan_response]` and
   `[print_dye_density]` to schema 1, CPU and GPU.
-- **#49, #50, #51** — 1.0 app Preferences and settings store, Help menu
-  (About, generated Licenses, Report an issue, log), and the first-launch
-  welcome (`agent: claude`, `stage: ready`). #49 merged in #55; PRs #56
-  and #57 are open, and #57 merges last. #52 (presets) and #53 (export
-  queue) stay `stage: holding` until #39 and #41 land.
+- **#52, #53** — 1.0 app presets and export queue (`agent: claude`,
+  `stage: holding`) until #39 and #41 land.
 
 ## Next
 
