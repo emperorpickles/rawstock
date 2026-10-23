@@ -70,6 +70,13 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   with layer `correlation` and soft `clumping`, measured on V550 scans of
   Portra 400 and HP5 Plus; Portra, the Velvias, and HP5 use it. Portra
   grain is about 8× faster.
+- **#40** — 1.0 app review view (`agent: claude`, `stage: ready`). Fit
+  shows the proxy; 100% and 200% pan one `develop_full` per settings state
+  as a client texture (`get_region` past 128 MB or under memory pressure),
+  with no develop while panning. Split with a keyboard divider, A/B (`\`),
+  and a clipping overlay (`J`). Logic in `apps/rawstock/src/lib/review/`.
+  The backend still returns the stub's placeholder frames until the real
+  develop service lands.
 - **#52, #53** — 1.0 app presets and export queue (`agent: claude`,
   `stage: holding`) until #39 and #41 land.
 
