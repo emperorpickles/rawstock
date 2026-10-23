@@ -348,14 +348,10 @@ fn portra_400_loads_and_keeps_a_gray_near_neutral() {
     };
     assert!(model.wavelengths().len() >= 2);
     assert!(model.dye_density().is_some());
-    let coupling = model.coupling().expect("portra coupling");
-    for row in coupling {
-        let sum = row.iter().sum::<f32>();
-        assert!(
-            (sum - 1.0).abs() < 1.0e-5,
-            "coupling row {row:?} sums to {sum}"
-        );
-    }
+    // Read through Status M and printed on Portra Endura's own dyes.
+    assert!(model.scan_responses().is_some());
+    assert!(model.print_dye_density().is_some());
+    assert!(model.coupling().is_none());
     assert!(model.reference_log_exposure().is_some());
     for layer in model.sensitivities() {
         assert_eq!(layer.len(), model.wavelengths().len());
@@ -385,12 +381,12 @@ fn portra_400_loads_and_keeps_a_gray_near_neutral() {
         spread < 0.03,
         "Portra reference gray is not near neutral: {pixel:?}"
     );
-    // The hand-tuned print curve holds this gray open, short of a crushed
-    // shadow and short of a blown highlight.
+    // The paper's laboratory aim prints middle gray as an 18 % reflector,
+    // about 0.46 once sRGB-encoded.
     for &channel in pixel {
         assert!(
-            (0.45..0.62).contains(&channel),
-            "reference gray left the open midtone: {pixel:?}"
+            (0.42..0.50).contains(&channel),
+            "reference gray missed the paper aim: {pixel:?}"
         );
     }
 }
@@ -410,24 +406,25 @@ fn velvia_is_a_parametric_approximation_with_fine_grain() {
         source.contains("not a 3d lut"),
         "source should say this is not a LUT: {source}"
     );
-    // Velvia 50 is a finer film than Portra 400: lower rms in every layer
-    // across the midtones, and smaller dye clouds.
+    // Velvia 50 is a finer film than Portra 400: smaller dye clouds, and a
+    // developed middle gray shows well under Portra's luma noise. The two
+    // print their density through curves of different contrast, so the
+    // comparison is on the developed image, not on the rms tables.
     let grain = stock.parameters().grain().expect("velvia has grain");
     let portra_path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stocks/portra400.stock.toml");
     let portra = Stock::load(&portra_path).unwrap();
     let portra_grain = portra.parameters().grain().unwrap();
     for layer in 0..3 {
-        for density in [0.4, 0.8, 1.2, 1.7] {
-            let velvia_rms = grain.layers()[layer].eval(density);
-            let portra_rms = portra_grain.layers()[layer].eval(density);
-            assert!(
-                velvia_rms > 0.0 && velvia_rms < 0.5 * portra_rms,
-                "layer {layer} at density {density}: {velvia_rms} vs Portra {portra_rms}"
-            );
-        }
+        assert!(grain.layers()[layer].eval(1.2) > 0.0);
         assert!(grain.size_mm()[layer] < portra_grain.size_mm()[layer]);
     }
+    let velvia_noise = gray_luma_noise(stock.parameters());
+    let portra_noise = gray_luma_noise(portra.parameters());
+    assert!(
+        velvia_noise > 0.0 && velvia_noise < 0.6 * portra_noise,
+        "middle-gray luma noise {velvia_noise} vs Portra {portra_noise}"
+    );
     assert!(stock.parameters().halation().is_none());
     let FilmModel::Parametric(model) = stock.parameters().film() else {
         panic!("velvia is parametric");
@@ -542,6 +539,105 @@ fn process_is_a_spectral_key_that_must_match_the_curves() {
         load_text(&unknown).unwrap_err(),
         StockError::Parse { .. }
     ));
+}
+
+#[test]
+fn scan_responses_and_print_dyes_are_spectral_keys() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stocks");
+    let portra = Stock::load(root.join("portra400.stock.toml")).unwrap();
+    let FilmModel::Spectral(model) = portra.parameters().film() else {
+        panic!("portra is spectral");
+    };
+
+    // Both tables survive the writer.
+    let written = load_text(&portra.to_toml()).unwrap();
+    let FilmModel::Spectral(reread) = written.parameters().film() else {
+        panic!("portra is spectral");
+    };
+    assert_eq!(reread.scan_responses(), model.scan_responses());
+    assert_eq!(reread.print_dye_density(), model.print_dye_density());
+
+    // A scan needs dyes to read, and a response needs some weight.
+    let responses = model.scan_responses().unwrap().clone();
+    let bare = rawstock_core::stock::Spectral::new(
+        model.wavelengths().to_vec(),
+        model.sensitivities().clone(),
+        None,
+        model.curves().clone(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(matches!(
+        bare.clone()
+            .with_scan_responses(responses.clone())
+            .unwrap_err(),
+        ModelError::ScanWithoutDye
+    ));
+    let dyed = rawstock_core::stock::Spectral::new(
+        model.wavelengths().to_vec(),
+        model.sensitivities().clone(),
+        model.dye_density().cloned(),
+        model.curves().clone(),
+        None,
+        None,
+    )
+    .unwrap();
+    let mut dark = responses.clone();
+    dark[1] = vec![0.0; dark[1].len()];
+    assert!(matches!(
+        dyed.with_scan_responses(dark).unwrap_err(),
+        ModelError::ScanResponse
+    ));
+    let mut negative = model.print_dye_density().unwrap().clone();
+    negative[2][0] = -0.1;
+    assert!(matches!(
+        bare.with_print_dyes(negative).unwrap_err(),
+        ModelError::PrintDyeDensity
+    ));
+
+    // Parametric stocks take neither table.
+    let samples = "red = [1.0]\ngreen = [1.0]\nblue = [1.0]\n";
+    for table in ["scan_response", "print_dye_density"] {
+        let parametric = format!("{}\n[{table}]\n{samples}", neutral_text());
+        match load_text(&parametric).unwrap_err() {
+            StockError::NotParametric { field } => assert_eq!(field, table),
+            other => panic!("{table}: {other}"),
+        }
+    }
+}
+
+#[test]
+fn portra_paper_white_is_display_white() {
+    // A scene far above middle gray leaves a dense negative, the paper
+    // unexposed, and the print at its own white.
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stocks/portra400.stock.toml");
+    let mut parameters = Stock::load(&path).unwrap().parameters().clone();
+    parameters.set_exposure_ev(0.0).unwrap();
+    let developed = Pipeline::new(parameters).develop(&gray_image(4000.0));
+    for &channel in developed.pixels() {
+        assert!(channel > 0.99, "paper white: {:?}", developed.pixels());
+    }
+}
+
+/// Standard deviation of developed luma over a flat middle gray.
+///
+/// The frame is 2048 pixels wide, so a pixel is finer than the 48 µm
+/// granularity aperture and the grain is not averaged away.
+fn gray_luma_noise(parameters: &Parameters) -> f32 {
+    let (width, height) = (2048u32, 96u32);
+    let image = LinearImage::new(width, height, vec![0.18; (width * height * 3) as usize]).unwrap();
+    let developed = Pipeline::new(parameters.clone()).develop(&image);
+    let luma: Vec<f32> = developed
+        .pixels()
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|pixel| 0.2126 * pixel[0] + 0.7152 * pixel[1] + 0.0722 * pixel[2])
+        .collect();
+    let mean = luma.iter().sum::<f32>() / luma.len() as f32;
+    let variance = luma.iter().map(|value| (value - mean).powi(2)).sum::<f32>() / luma.len() as f32;
+    variance.sqrt()
 }
 
 fn gray_image(level: f32) -> LinearImage {

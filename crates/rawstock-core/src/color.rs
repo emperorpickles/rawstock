@@ -14,10 +14,12 @@ use rawler::imgop::sensor::Demosaic;
 use rawler::imgop::sensor::xtrans::markesteijn::XTransMarkesteijnDemosaic;
 use rawler::imgop::{Point, Rect};
 use rawler::rawimage::RawPhotometricInterpretation;
+use rayon::prelude::*;
 use thiserror::Error;
 
 use crate::decode::{CfaKind, RawImage};
 use crate::matrices;
+use crate::workers::Workers;
 
 /// Failure while developing a RAW file to scene-linear ACEScg or writing it.
 #[derive(Debug, Error)]
@@ -51,6 +53,20 @@ pub enum DevelopError {
         actual: usize,
         /// Samples required by the dimensions.
         expected: usize,
+    },
+
+    /// A full develop installed over a quick one is not the frame the quick
+    /// develop promised.
+    #[error("full develop is {actual_width}x{actual_height}, expected {width}x{height}")]
+    FrameMismatch {
+        /// Width the quick develop promised.
+        width: u32,
+        /// Height the quick develop promised.
+        height: u32,
+        /// Width of the full develop.
+        actual_width: u32,
+        /// Height of the full develop.
+        actual_height: u32,
     },
 
     /// The XYZ→camera matrix cannot be inverted.
@@ -256,7 +272,14 @@ impl RawImage {
     /// Bradford adaptation takes D65 to the ACES white and AP1 takes that XYZ
     /// into ACEScg. White balance is already in the samples, so the matrix
     /// sees an identity balance.
+    ///
+    /// Markesteijn runs on the capped [`Workers`] pool.
     pub fn develop_linear(&self) -> Result<LinearImage, DevelopError> {
+        Workers::install(|| self.develop_linear_here())
+    }
+
+    /// [`Self::develop_linear`] on whatever pool the caller is on.
+    fn develop_linear_here(&self) -> Result<LinearImage, DevelopError> {
         let developed = if self.cfa() == CfaKind::XTrans {
             self.demosaic_xtrans()?
         } else {
@@ -265,7 +288,7 @@ impl RawImage {
                 .map_err(|source| DevelopError::Demosaic { source })?
         };
 
-        let (width, height, mut samples) = match developed {
+        let (width, height, samples) = match developed {
             Intermediate::ThreeColor(pixels) => take_rgb(pixels)?,
             Intermediate::FourColor(_) => {
                 return Err(DevelopError::UnexpectedChannels { channels: 4 });
@@ -275,12 +298,132 @@ impl RawImage {
             }
         };
 
+        self.finish_linear(width, height, samples)
+    }
+
+    /// [`Self::develop_linear`] on a pool of its own, `threads` wide.
+    ///
+    /// A preview that renders on the shared pool while a background
+    /// demosaic runs there waits behind every Markesteijn tile. On its own
+    /// pool the two only share the cores.
+    pub fn develop_linear_on(&self, threads: usize) -> Result<LinearImage, DevelopError> {
+        Workers::install_separate(threads, || self.develop_linear_here())
+    }
+
+    /// A third-size develop of an X-Trans frame, for the first preview.
+    ///
+    /// Every 3×3 window of the X-Trans pattern holds five green photosites
+    /// and at least one red and one blue. Each block's per-color means are
+    /// one RGB pixel, so this takes a fraction of a second where Markesteijn
+    /// takes seconds. A preview downsampled from it is within about 0.5% of
+    /// one downsampled from Markesteijn. The
+    /// frame is the one [`Self::develop_linear`] returns, a third the size.
+    /// `None` for a sensor that is not X-Trans.
+    pub fn develop_quick_linear(&self) -> Result<Option<QuickDevelop>, DevelopError> {
+        if self.cfa() != CfaKind::XTrans {
+            return Ok(None);
+        }
+        let scaled = RawDevelop::new_with(&[ProcessingStep::Rescale])
+            .develop_intermediate(self.decoded())
+            .map_err(|source| DevelopError::Demosaic { source })?;
+        let Intermediate::Monochrome(mosaic) = scaled else {
+            return Err(DevelopError::UnexpectedChannels { channels: 0 });
+        };
+        let RawPhotometricInterpretation::Cfa(config) = &self.decoded().photometric else {
+            return Err(DevelopError::UnexpectedChannels { channels: 0 });
+        };
+        let frame = self.xtrans_frame(mosaic.rect());
+        let (full_width, full_height) = (frame.d.w, frame.d.h);
+        let width = full_width / 3;
+        let height = full_height / 3;
+        if width == 0 || height == 0 {
+            return Err(DevelopError::Dimension { value: 0 });
+        }
+        let mut samples = vec![0.0_f32; width * height * 3];
+        Workers::install(|| {
+            samples
+                .par_chunks_mut(width * 3)
+                .enumerate()
+                .for_each(|(row, out)| {
+                    for column in 0..width {
+                        let mut sum = [0.0_f32; 3];
+                        let mut count = [0_u32; 3];
+                        for dy in 0..3 {
+                            let y = frame.p.y + row * 3 + dy;
+                            for dx in 0..3 {
+                                let x = frame.p.x + column * 3 + dx;
+                                let color = config.cfa.color_at(y, x).min(2);
+                                sum[color] += mosaic.data[y * mosaic.width + x];
+                                count[color] += 1;
+                            }
+                        }
+                        for channel in 0..3 {
+                            out[column * 3 + channel] = if count[channel] == 0 {
+                                0.0
+                            } else {
+                                sum[channel] / count[channel] as f32
+                            };
+                        }
+                    }
+                });
+        });
+        let image = self.finish_linear(
+            u32::try_from(width).map_err(|_| DevelopError::Dimension { value: width })?,
+            u32::try_from(height).map_err(|_| DevelopError::Dimension { value: height })?,
+            samples,
+        )?;
+        Ok(Some(QuickDevelop {
+            image,
+            full_width: u32::try_from(full_width)
+                .map_err(|_| DevelopError::Dimension { value: full_width })?,
+            full_height: u32::try_from(full_height)
+                .map_err(|_| DevelopError::Dimension { value: full_height })?,
+        }))
+    }
+
+    /// White balance, highlight recovery, and the ACEScg matrix, on
+    /// demosaiced camera RGB.
+    fn finish_linear(
+        &self,
+        width: u32,
+        height: u32,
+        mut samples: Vec<f32>,
+    ) -> Result<LinearImage, DevelopError> {
         let white_balance = normalized_white_balance(self.as_shot_wb())?;
         recover_highlights(&mut samples, white_balance);
         let transform = acescg_transform(self.camera_matrix(), [1.0, 1.0, 1.0, 0.0])?;
         apply_transform(&mut samples, transform);
         LinearImage::new(width, height, samples)
     }
+
+    /// The X-Trans frame a develop returns, in full-sensor coordinates: the
+    /// camera's default crop when it sits inside the active area, else the
+    /// active area.
+    fn xtrans_frame(&self, full: Rect) -> Rect {
+        let decoded = self.decoded();
+        let active = decoded.active_area.unwrap_or(full);
+        match decoded.crop_area {
+            Some(crop)
+                if crop.p.x >= active.p.x
+                    && crop.p.y >= active.p.y
+                    && crop.p.x + crop.d.w <= active.p.x + active.d.w
+                    && crop.p.y + crop.d.h <= active.p.y + active.d.h =>
+            {
+                crop
+            }
+            _ => active,
+        }
+    }
+}
+
+/// A fast, smaller develop of a frame, and the size of its full develop.
+pub struct QuickDevelop {
+    /// Scene-linear ACEScg at a third of the full size.
+    pub image: LinearImage,
+    /// Width [`RawImage::develop_linear`] will return.
+    pub full_width: u32,
+    /// Height [`RawImage::develop_linear`] will return.
+    pub full_height: u32,
 }
 
 impl RawImage {
@@ -312,19 +455,13 @@ impl RawImage {
         );
         // Then the camera's default crop, which sits in full-sensor
         // coordinates, so the result matches the camera's own JPEG framing.
-        let Some(crop) = decoded.crop_area else {
-            return Ok(Intermediate::ThreeColor(rgb));
-        };
-        let inside = crop.p.x >= active.p.x
-            && crop.p.y >= active.p.y
-            && crop.p.x + crop.d.w <= active.p.x + active.d.w
-            && crop.p.y + crop.d.h <= active.p.y + active.d.h;
-        if !inside {
+        let frame = self.xtrans_frame(full);
+        if frame == active {
             return Ok(Intermediate::ThreeColor(rgb));
         }
         let local = Rect::new(
-            Point::new(crop.p.x - active.p.x, crop.p.y - active.p.y),
-            crop.d,
+            Point::new(frame.p.x - active.p.x, frame.p.y - active.p.y),
+            frame.d,
         );
         Ok(Intermediate::ThreeColor(rgb.crop(local)))
     }

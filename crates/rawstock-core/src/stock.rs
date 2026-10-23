@@ -58,6 +58,13 @@ pub struct Parametric {
 /// Falling curves make a reversal (slide) film. The dyes are then the image,
 /// so the scan hands the print stage the negated slide density and the
 /// usual inversion views the slide directly.
+///
+/// A negative is read by a densitometer or printer, not an eye. With
+/// [`Self::with_scan_responses`] the dye scan uses those red, green, and blue
+/// responses (Status M for a published negative) instead of the observer.
+/// With [`Self::with_print_dyes`] the print stage forms each paper density
+/// from its own dye spectrum and views the print under D65, instead of
+/// treating the three print densities as ideal ACEScg dyes.
 #[derive(Debug, Clone)]
 pub struct Spectral {
     wavelengths: Vec<f32>,
@@ -67,12 +74,23 @@ pub struct Spectral {
     dye_density: Option<[Vec<f32>; 3]>,
     /// Scan weights. `None` when the stock has no dye curves.
     observer: Option<Observer>,
+    /// Densitometer responses that replace the eye in the scan, when set.
+    scan_responses: Option<[Vec<f32>; 3]>,
+    /// Paper dye spectra and the D65 observer that views the print, when set.
+    print_dyes: Option<PrintDyes>,
     /// Subtracted from the scanned density so `reference_log_exposure` prints neutral.
     scan_balance: [f32; 3],
     reference_log_exposure: Option<f32>,
     curves: [Curve; 3],
     coupling: Option<[[f32; 3]; 3]>,
     process: Process,
+}
+
+/// Spectral density of the print's three dyes, viewed under D65.
+#[derive(Debug, Clone)]
+struct PrintDyes {
+    dyes: [Vec<f32>; 3],
+    observer: Observer,
 }
 
 /// How a film is processed, which decides how its density is viewed.
@@ -180,6 +198,22 @@ pub enum ModelError {
     /// A reference log exposure was set without dye curves to balance.
     #[error("reference log exposure is only valid with dye density curves")]
     ReferenceWithoutDye,
+
+    /// A scan response was negative, non-finite, the wrong length, or empty.
+    #[error(
+        "scan response samples must be finite and non-negative, match the wavelength grid, and not all be zero"
+    )]
+    ScanResponse,
+
+    /// Scan responses were set without dye curves to read.
+    #[error("scan responses are only valid with dye density curves")]
+    ScanWithoutDye,
+
+    /// A print dye-density sample was negative, non-finite, or the wrong length.
+    #[error(
+        "print dye density samples must be finite and non-negative and match the wavelength grid"
+    )]
+    PrintDyeDensity,
 
     /// The wavelength grid missed the visible observer, so dye density cannot be scanned.
     #[error("wavelength grid does not meet the visible scan observer")]
@@ -432,23 +466,65 @@ impl Spectral {
             sensitivity,
             dye_density,
             observer,
+            scan_responses: None,
+            print_dyes: None,
             scan_balance: [0.0; 3],
             reference_log_exposure,
             curves,
             coupling,
             process,
         };
-        if let Some(log_h) = reference_log_exposure {
-            let density = [
-                model.curves[0].eval(log_h),
-                model.curves[1].eval(log_h),
-                model.curves[2].eval(log_h),
-            ];
-            let effective = model.scanned_density(density);
-            let mean = (effective[0] + effective[1] + effective[2]) / 3.0;
-            model.scan_balance = effective.map(|channel| channel - mean);
-        }
+        model.rebalance();
         Ok(model)
+    }
+
+    /// Read the dyes with these red, green, and blue responses, not the eye.
+    ///
+    /// Each response is finite, non-negative, on the stock's grid, and has
+    /// some weight there. The stock must have dye curves. Responses are
+    /// normalized so clear film reads 1, and the scan balance is recomputed.
+    pub fn with_scan_responses(mut self, responses: [Vec<f32>; 3]) -> Result<Self, ModelError> {
+        if self.dye_density.is_none() {
+            return Err(ModelError::ScanWithoutDye);
+        }
+        if !samples_fit(&responses, self.wavelengths.len()) {
+            return Err(ModelError::ScanResponse);
+        }
+        self.observer = Some(
+            Observer::from_responses(&self.wavelengths, &responses)
+                .ok_or(ModelError::ScanResponse)?,
+        );
+        self.scan_responses = Some(responses);
+        self.rebalance();
+        Ok(self)
+    }
+
+    /// Form the print from these paper dye spectra, viewed under D65.
+    ///
+    /// Each dye is finite, non-negative, and on the stock's grid. A print
+    /// density of zero in every channel is the paper white, ACEScg `(1, 1, 1)`.
+    pub fn with_print_dyes(mut self, dyes: [Vec<f32>; 3]) -> Result<Self, ModelError> {
+        if !samples_fit(&dyes, self.wavelengths.len()) {
+            return Err(ModelError::PrintDyeDensity);
+        }
+        let observer = Observer::acescg_d65(&self.wavelengths).ok_or(ModelError::Observer)?;
+        self.print_dyes = Some(PrintDyes { dyes, observer });
+        Ok(self)
+    }
+
+    /// Recompute the scan balance from `reference_log_exposure`.
+    fn rebalance(&mut self) {
+        self.scan_balance = [0.0; 3];
+        if let Some(log_h) = self.reference_log_exposure {
+            let density = [
+                self.curves[0].eval(log_h),
+                self.curves[1].eval(log_h),
+                self.curves[2].eval(log_h),
+            ];
+            let effective = self.scanned_density(density);
+            let mean = (effective[0] + effective[1] + effective[2]) / 3.0;
+            self.scan_balance = effective.map(|channel| channel - mean);
+        }
     }
 
     /// Shared wavelength grid, in nanometres.
@@ -474,6 +550,16 @@ impl Spectral {
     /// Log-exposure mixing, when the layers are not independent.
     pub fn coupling(&self) -> Option<[[f32; 3]; 3]> {
         self.coupling
+    }
+
+    /// Densitometer responses the scan reads the dyes with, when set.
+    pub fn scan_responses(&self) -> Option<&[Vec<f32>; 3]> {
+        self.scan_responses.as_ref()
+    }
+
+    /// Spectral density of the print's dyes, when the print is spectral.
+    pub fn print_dye_density(&self) -> Option<&[Vec<f32>; 3]> {
+        self.print_dyes.as_ref().map(|print| &print.dyes)
     }
 
     /// Log exposure the spectral print balances to a neutral, when set.
@@ -506,14 +592,29 @@ impl Spectral {
             dyes[1].iter().map(|sample| sample * scales[1]).collect(),
             dyes[2].iter().map(|sample| sample * scales[2]).collect(),
         ];
-        Self::new(
-            self.wavelengths.clone(),
-            self.sensitivity.clone(),
-            Some(scaled),
-            self.curves.clone(),
-            self.coupling,
-            self.reference_log_exposure,
-        )
+        let mut model = self.clone();
+        model.dye_density = Some(scaled);
+        model.rebalance();
+        Ok(model)
+    }
+
+    /// Display-referred ACEScg of one pixel's print densities.
+    ///
+    /// `None` when the print is not spectral. `transmittance` is scratch
+    /// space, one sample per wavelength.
+    pub(crate) fn print_pixel(
+        &self,
+        print: [f32; 3],
+        transmittance: &mut [f32],
+    ) -> Option<[f32; 3]> {
+        let paper = self.print_dyes.as_ref()?;
+        for (index, sample) in transmittance.iter_mut().enumerate() {
+            let optical = paper.dyes[0][index] * print[0]
+                + paper.dyes[1][index] * print[1]
+                + paper.dyes[2][index] * print[2];
+            *sample = 10f32.powf(-optical);
+        }
+        Some(paper.observer.apply(transmittance))
     }
 
     fn density_controlled(
@@ -662,6 +763,16 @@ pub(crate) struct SpectralTables<'a> {
     pub weighted_sensitivity: &'a [Vec<f32>; 3],
     /// Present when the stock has dye spectra.
     pub scan: Option<ScanTables<'a>>,
+    /// Present when the print has its own dye spectra.
+    pub print: Option<PrintTables<'a>>,
+}
+
+/// The spectral print's inputs on the stock's wavelength grid.
+#[cfg(feature = "gpu")]
+#[derive(Clone, Copy)]
+pub(crate) struct PrintTables<'a> {
+    pub dyes: &'a [Vec<f32>; 3],
+    pub observer: &'a [Vec<f32>; 3],
 }
 
 /// The dye scan's inputs on the stock's wavelength grid.
@@ -690,10 +801,15 @@ impl Spectral {
             }),
             _ => None,
         };
+        let print = self.print_dyes.as_ref().map(|print| PrintTables {
+            dyes: &print.dyes,
+            observer: print.observer.rows(),
+        });
         SpectralTables {
             wavelengths: &self.wavelengths,
             weighted_sensitivity: &self.weighted_sensitivity,
             scan,
+            print,
         }
     }
 }
@@ -741,19 +857,28 @@ impl FilmModel {
         }
     }
 
+    /// Spectral density of the print's dyes, when the print is spectral.
+    pub fn print_dye_density(&self) -> Option<&[Vec<f32>; 3]> {
+        match self {
+            Self::Parametric(_) => None,
+            Self::Spectral(model) => model.print_dye_density(),
+        }
+    }
+
     /// The first stage a change from `self` to `next` has to recompute.
     ///
     /// [`Stage::Encode`](crate::render::Stage::Encode) means the two models
-    /// agree. Dye-only edits stay at the dye scan, so grain is kept.
+    /// agree. Dye-only edits stay at the dye scan, so grain is kept, and
+    /// print-dye edits stay at the print.
     pub(crate) fn edit_stage(&self, next: &Self) -> crate::render::Stage {
-        if self.same_density_inputs(next) {
-            if self.same_dyes(next) {
-                crate::render::Stage::Encode
-            } else {
-                crate::render::Stage::DyeScan
-            }
-        } else {
+        if !self.same_density_inputs(next) {
             crate::render::Stage::Density
+        } else if !self.same_dyes(next) {
+            crate::render::Stage::DyeScan
+        } else if self.print_dye_density() != next.print_dye_density() {
+            crate::render::Stage::Print
+        } else {
+            crate::render::Stage::Encode
         }
     }
 
@@ -777,6 +902,7 @@ impl FilmModel {
             (Self::Parametric(_), Self::Parametric(_)) => true,
             (Self::Spectral(left), Self::Spectral(right)) => {
                 left.dye_density == right.dye_density
+                    && left.scan_responses == right.scan_responses
                     && left.reference_log_exposure == right.reference_log_exposure
             }
             _ => false,
@@ -1108,7 +1234,7 @@ impl Grain {
     /// The field does not depend on the granularity tables. [`Self::mix_field`]
     /// applies RMS. A crop uses the full frame's pitch, so the same film-plane
     /// coordinate gets the same cloud. Clouds smaller than a pixel are
-    /// deposited into that pixel. Resolved clouds are gaussian stamps filtered
+    /// drawn per pixel, as their summed mass. Resolved clouds are gaussian stamps filtered
     /// by the scanner aperture, padded so the crop matches the full frame.
     pub(crate) fn unit_field(
         &self,
@@ -1552,6 +1678,12 @@ struct StockFile {
     /// Per-layer spectral dye density. Optional on a spectral stock.
     #[serde(default)]
     dye_density: Option<RgbSamples>,
+    /// Densitometer responses for the dye scan. Needs `dye_density`.
+    #[serde(default)]
+    scan_response: Option<RgbSamples>,
+    /// Spectral density of the print's dyes. Optional on a spectral stock.
+    #[serde(default)]
+    print_dye_density: Option<RgbSamples>,
     /// Log exposure the spectral print balances to neutral.
     #[serde(default, deserialize_with = "de_option_f32")]
     reference_log_exposure: Option<f32>,
@@ -1793,17 +1925,34 @@ impl Stock {
                     .as_ref()
                     .map(|samples| rgb_samples("dye_density", samples, wavelengths.len()))
                     .transpose()?;
-                FilmModel::Spectral(Box::new(
-                    Spectral::new(
-                        wavelengths,
-                        sensitivity,
-                        dye_density,
-                        [red, green, blue],
-                        coupling,
-                        file.reference_log_exposure,
-                    )
-                    .map_err(StockError::Model)?,
-                ))
+                let scan_response = file
+                    .scan_response
+                    .as_ref()
+                    .map(|samples| rgb_samples("scan_response", samples, wavelengths.len()))
+                    .transpose()?;
+                let print_dyes = file
+                    .print_dye_density
+                    .as_ref()
+                    .map(|samples| rgb_samples("print_dye_density", samples, wavelengths.len()))
+                    .transpose()?;
+                let mut model = Spectral::new(
+                    wavelengths,
+                    sensitivity,
+                    dye_density,
+                    [red, green, blue],
+                    coupling,
+                    file.reference_log_exposure,
+                )
+                .map_err(StockError::Model)?;
+                if let Some(responses) = scan_response {
+                    model = model
+                        .with_scan_responses(responses)
+                        .map_err(StockError::Model)?;
+                }
+                if let Some(dyes) = print_dyes {
+                    model = model.with_print_dyes(dyes).map_err(StockError::Model)?;
+                }
+                FilmModel::Spectral(Box::new(model))
             }
         };
         let mut parameters = Parameters::new(file.exposure_ev, film, file.print_exposure, print)
@@ -2017,6 +2166,16 @@ fn reject_spectral_fields(file: &StockFile) -> Result<(), StockError> {
             field: "dye_density",
         });
     }
+    if file.scan_response.is_some() {
+        return Err(StockError::NotParametric {
+            field: "scan_response",
+        });
+    }
+    if file.print_dye_density.is_some() {
+        return Err(StockError::NotParametric {
+            field: "print_dye_density",
+        });
+    }
     if file.reference_log_exposure.is_some() {
         return Err(StockError::NotParametric {
             field: "reference_log_exposure",
@@ -2046,7 +2205,13 @@ fn rgb_samples(
                     ("sensitivity", "blue") => "sensitivity.blue",
                     ("dye_density", "red") => "dye_density.red",
                     ("dye_density", "green") => "dye_density.green",
-                    _ => "dye_density.blue",
+                    ("dye_density", "blue") => "dye_density.blue",
+                    ("scan_response", "red") => "scan_response.red",
+                    ("scan_response", "green") => "scan_response.green",
+                    ("scan_response", "blue") => "scan_response.blue",
+                    ("print_dye_density", "red") => "print_dye_density.red",
+                    ("print_dye_density", "green") => "print_dye_density.green",
+                    _ => "print_dye_density.blue",
                 },
                 len: values.len(),
                 expected,
@@ -2167,6 +2332,16 @@ fn integrate(wavelengths: &[f32], values: &[f32]) -> f32 {
     total
 }
 
+/// Three finite, non-negative spectra of `len` samples each.
+fn samples_fit(channels: &[Vec<f32>; 3], len: usize) -> bool {
+    channels.iter().all(|channel| {
+        channel.len() == len
+            && channel
+                .iter()
+                .all(|sample| sample.is_finite() && *sample >= 0.0)
+    })
+}
+
 fn mix(matrix: [[f32; 3]; 3], value: [f32; 3]) -> [f32; 3] {
     [
         matrix[0][0] * value[0] + matrix[0][1] * value[1] + matrix[0][2] * value[2],
@@ -2247,6 +2422,14 @@ impl StockText {
             if let Some(dyes) = model.dye_density() {
                 text.line("");
                 text.rgb_table("dye_density", dyes);
+            }
+            if let Some(responses) = model.scan_responses() {
+                text.line("");
+                text.rgb_table("scan_response", responses);
+            }
+            if let Some(dyes) = model.print_dye_density() {
+                text.line("");
+                text.rgb_table("print_dye_density", dyes);
             }
         }
         text.out.push('\n');

@@ -78,8 +78,16 @@ GPL-3.0-or-later can link this shell. No new crate goes into
 
 ### What is cached
 
-Opening a file runs decode, demosaic, and ACEScg once. That full-resolution
-ACEScg image stays for the life of the file. Changing a stock does not
+Opening a file runs decode, demosaic, and ACEScg once. An X-Trans file
+opens on a third-size develop first (`RawImage::develop_quick_linear`, each
+3×3 block's per-color means), which takes about 0.2 s where Markesteijn
+takes about 5 s. The fit proxy is built from it, so the first preview does
+not wait. Markesteijn runs on a thread of its own, on a separate pool half as wide
+as the capped `Workers` pool (at most 4 threads, one core always free), so
+the preview's grain is not queued behind its tiles, and
+`PreviewSession::install_full` swaps it in when the worker is idle or when a
+100% view or export needs it. That full-resolution ACEScg image stays for
+the life of the file. Changing a stock does not
 touch it. White balance is already baked into that image, which is the
 CLI's behavior.
 
@@ -115,7 +123,8 @@ Grain is why 100% exists. `size_mm` is the primary dye-cloud sigma
 (Portra is 0.018, 0.013, and 0.010 mm). On the X-S10 those clouds are
 about 3.3, 2.4, and 1.8 pixels, and the shared field uses their geometric
 mean. On the 1440 proxy the same clouds are smaller than a pixel, so the
-fit view is for tone and color. The 100% view is for grain. The fit view
+proxy draws each pixel's summed grain directly, with the export's
+statistics but not its individual clouds. The fit view is for tone and color. The 100% view is for grain. The fit view
 says so on screen. The 48 µm aperture only sets amplitude (`rms / 1000`
 while that window covers at least one pixel). It is not a tile. The 720 px
 drag proxy puts that window just under one pixel, so amplitude there is a
@@ -346,7 +355,10 @@ a decimal that round-trips through `f32`.
 ## Core API
 
 All of this stays in `rawstock-core`. `#![forbid(unsafe_code)]` stays. No
-egui, Tauri, wgpu, tokio, or rayon dependency. No `std::thread`. File
+egui, Tauri, or tokio dependency. wgpu is behind the `gpu` feature. Rayon
+(already linked through rawler) runs grain and the quick develop on the
+capped `Workers` pool, at most 4 threads with one core free; nothing else
+in core starts a thread. File
 dialogs and the worker live in `apps/desktop`. The session takes an owned
 `LinearImage` and a `Parameters` value, so a wasm host can build both
 from memory.
@@ -448,8 +460,11 @@ orients that buffer for display.
 ### Decode on the worker
 
 The open message carries a path. The worker calls `RawImage::open` and
-`develop_linear`, builds the session, and drops the `RawImage`. The UI
-thread never holds sensor samples. `RawImage` does not have to be `Send`.
+`develop_linear`, builds the session, and drops the `RawImage`. For X-Trans
+it builds a staged session on the quick develop and moves the `RawImage`
+to the demosaic thread, so `RawImage` has to be `Send`. The UI thread never
+holds sensor samples. The GPU device opens on its own thread when the
+worker starts, so the first decode does not wait for it.
 `LinearImage` and `Parameters` do, because the worker owns them; they
 already are, and new fields need to stay `Send` (no `Rc`, no UI handles).
 

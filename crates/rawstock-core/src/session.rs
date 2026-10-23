@@ -93,6 +93,9 @@ pub struct PreviewSession {
     /// Demosaic size, kept so a turn can report the sensor frame.
     sensor_width: u32,
     sensor_height: u32,
+    /// `true` while `full` is a quick develop standing in for the full one.
+    /// See [`Self::staged`].
+    staged: bool,
     /// Camera tag plus manual quarter-turns. Already baked into `full`.
     view: FrameOrientation,
     full: LinearImage,
@@ -322,6 +325,7 @@ impl PreviewSession {
         Ok(Self {
             sensor_width,
             sensor_height,
+            staged: false,
             view,
             full,
             proxy_long_edge,
@@ -336,6 +340,53 @@ impl PreviewSession {
             #[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
             gpu: None,
         })
+    }
+
+    /// Session on a quick develop while the full one is still running.
+    ///
+    /// The fit proxy is built from `quick` right away, so the first preview
+    /// does not wait for the demosaic. Dimensions already report the full
+    /// frame. [`Self::render_region`] and [`Self::render_full`] need the full
+    /// image: install it with [`Self::install_full`] first. Until then they
+    /// return [`Cancelled`].
+    pub fn staged(
+        quick: crate::color::QuickDevelop,
+        orientation: Orientation,
+        proxy_long_edge: u32,
+    ) -> Result<Self, DevelopError> {
+        let mut session = Self::new(quick.image, orientation, proxy_long_edge)?;
+        session.sensor_width = quick.full_width;
+        session.sensor_height = quick.full_height;
+        session.staged = true;
+        Ok(session)
+    }
+
+    /// `true` until [`Self::install_full`] replaces a quick develop.
+    pub fn is_staged(&self) -> bool {
+        self.staged
+    }
+
+    /// Replace the quick develop with the full one, keeping the stock,
+    /// edits, A/B baseline, and turns. The proxy is rebuilt from it.
+    pub fn install_full(&mut self, mut linear: LinearImage) -> Result<(), DevelopError> {
+        if (linear.width(), linear.height()) != (self.sensor_width, self.sensor_height) {
+            return Err(DevelopError::FrameMismatch {
+                width: self.sensor_width,
+                height: self.sensor_height,
+                actual_width: linear.width(),
+                actual_height: linear.height(),
+            });
+        }
+        linear.apply_orientation(self.view.composed());
+        let proxy = linear.area_downsample(self.proxy_long_edge)?;
+        self.full = linear;
+        self.proxy = proxy;
+        self.staged = false;
+        self.proxy_cache = FrameCache::fresh();
+        self.baseline_proxy = FrameCache::fresh();
+        self.region = None;
+        self.baseline_region = None;
+        Ok(())
     }
 
     /// Render on `gpu` from now on, or on the CPU with `None`.
@@ -355,8 +406,15 @@ impl PreviewSession {
         self.gpu.as_ref()
     }
 
-    /// Width and height of the oriented working image.
+    /// Width and height of the oriented working image. While staged, the
+    /// full frame's.
     pub fn dimensions(&self) -> (u32, u32) {
+        if self.staged {
+            return self
+                .view
+                .composed()
+                .dimensions(self.sensor_width, self.sensor_height);
+        }
         (self.full.width(), self.full.height())
     }
 
@@ -690,6 +748,9 @@ impl PreviewSession {
         &mut self,
         control: &mut dyn DevelopControl,
     ) -> Result<SrgbImage, Cancelled> {
+        if self.staged {
+            return Err(Cancelled);
+        }
         let parameters = self.loaded().parameters.clone();
         #[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
         if let Some(image) = self.gpu_render(&parameters, &self.full, None, control)? {
@@ -703,6 +764,9 @@ impl PreviewSession {
         &mut self,
         control: &mut dyn DevelopControl,
     ) -> Result<SrgbImage, Cancelled> {
+        if self.staged {
+            return Err(Cancelled);
+        }
         let parameters = self.baseline().parameters.clone();
         #[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
         if let Some(image) = self.gpu_render(&parameters, &self.full, None, control)? {
@@ -796,6 +860,9 @@ impl PreviewSession {
         scan: ScanMode,
         control: &mut dyn DevelopControl,
     ) -> Result<SrgbImage, Cancelled> {
+        if self.staged {
+            return Err(Cancelled);
+        }
         let parameters = self.stock(baseline).parameters.clone();
         let rect = rect.clamped(self.full.width(), self.full.height());
         let (origin_x, origin_y, width, height) = (rect.x, rect.y, rect.width, rect.height);
@@ -1179,12 +1246,7 @@ fn render_tail(
     }
     if printed.is_none() {
         let scanned = dye.as_ref().expect("dye");
-        *printed = Some(render::print_buffer(
-            scanned,
-            parameters.print_exposure(),
-            parameters.print_curve(),
-            control,
-        )?);
+        *printed = Some(render::print_buffer(scanned, parameters, control)?);
         *image = None;
     }
     if image.is_none() {
@@ -1218,7 +1280,8 @@ fn first_dirty(previous: &Parameters, next: &Parameters) -> Stage {
     if film_stage == Stage::DyeScan {
         return Stage::DyeScan;
     }
-    if previous.print_exposure() != next.print_exposure()
+    if film_stage == Stage::Print
+        || previous.print_exposure() != next.print_exposure()
         || !curve_eq(previous.print_curve(), next.print_curve())
     {
         return Stage::Print;
@@ -1539,13 +1602,8 @@ mod tests {
     }
 
     fn quantize(stock: &Stock, density: &[f32]) -> [u8; 3] {
-        let linear = crate::render::print_buffer(
-            density,
-            stock.parameters().print_exposure(),
-            stock.parameters().print_curve(),
-            &mut NopControl,
-        )
-        .unwrap();
+        let linear =
+            crate::render::print_buffer(density, stock.parameters(), &mut NopControl).unwrap();
         let image =
             crate::render::encode_buffer(linear, 1, 1, Fidelity::Exact, &mut NopControl).unwrap();
         let rgb = image.to_rgb8();

@@ -362,12 +362,7 @@ impl Pipeline {
         )?;
         let (scanned, fidelity) =
             dye_buffer(&grained, &self.parameters.film, image.width(), control)?;
-        let linear = print_buffer(
-            &scanned,
-            self.parameters.print_exposure,
-            &self.parameters.print_curve,
-            control,
-        )?;
+        let linear = print_buffer(&scanned, &self.parameters, control)?;
         encode_buffer(linear, image.width(), image.height(), fidelity, control)
     }
 }
@@ -562,12 +557,19 @@ pub(crate) fn dye_buffer(
 
 pub(crate) fn print_buffer(
     density: &[f32],
-    print_exposure: f32,
-    curve: &Curve,
+    parameters: &Parameters,
     control: &mut dyn DevelopControl,
 ) -> Result<Vec<f32>, Cancelled> {
     begin(Stage::Print, 1, control)?;
-    let linear = print_scan(print_exposure, curve, density);
+    let linear = match parameters.film() {
+        FilmModel::Spectral(film) if film.print_dye_density().is_some() => print_dyes(
+            parameters.print_exposure,
+            &parameters.print_curve,
+            film,
+            density,
+        ),
+        _ => print_scan(parameters.print_exposure, &parameters.print_curve, density),
+    };
     finish(Stage::Print, 1, control)?;
     Ok(linear)
 }
@@ -622,6 +624,30 @@ fn print_scan(print_exposure: f32, curve: &Curve, density: &[f32]) -> Vec<f32> {
             10f32.powf(-print_density)
         })
         .collect()
+}
+
+/// [`print_scan`] with the paper's own dyes.
+///
+/// Each channel's print curve gives that dye's print density, as before. The
+/// three dye spectra are then summed and viewed under D65 instead of being
+/// taken as ideal ACEScg primaries, so a dye's side absorptions dull the
+/// colors it should not touch, as on real paper.
+fn print_dyes(
+    print_exposure: f32,
+    curve: &Curve,
+    film: &crate::stock::Spectral,
+    density: &[f32],
+) -> Vec<f32> {
+    let mut transmittance = vec![0.0f32; film.wavelengths().len()];
+    let mut linear = Vec::with_capacity(density.len());
+    for pixel in density.as_chunks::<3>().0 {
+        let print = pixel.map(|value| curve.eval(print_exposure - value));
+        linear.extend(
+            film.print_pixel(print, &mut transmittance)
+                .expect("print dyes were checked"),
+        );
+    }
+    linear
 }
 
 fn quantize_u8(samples: &[f32]) -> Vec<u8> {

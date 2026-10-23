@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use rawstock_core::color::LinearImage;
+use rawstock_core::color::{LinearImage, QuickDevelop};
 use rawstock_core::decode::Orientation;
 use rawstock_core::render::{DevelopControl, Fidelity, NopControl, Parameters, Pipeline, Stage};
 use rawstock_core::session::{DisplayRect, PreviewSession, ScanMode};
@@ -656,4 +656,57 @@ fn timed<T>(label: &str, body: impl FnOnce() -> T) -> T {
     let value = body();
     eprintln!("{label}: {:.3}s", started.elapsed().as_secs_f64());
     value
+}
+
+#[test]
+fn staged_session_previews_first_and_keeps_edits_when_the_full_frame_lands() {
+    let full = frame(90, 60);
+    let quick = QuickDevelop {
+        image: full.area_downsample(30).unwrap(),
+        full_width: 90,
+        full_height: 60,
+    };
+    let mut session = PreviewSession::staged(quick, Orientation::Rotate90, 24).unwrap();
+    session.set_parameters(parameters(true, true));
+    assert!(session.is_staged());
+    // Dimensions are the full frame's, turned by the camera tag.
+    assert_eq!(session.sensor_dimensions(), (90, 60));
+    assert_eq!(session.display_dimensions(), (60, 90));
+    assert!(session.render_proxy(&mut NopControl).is_ok());
+    let rect = DisplayRect {
+        x: 4,
+        y: 4,
+        width: 16,
+        height: 16,
+    };
+    assert!(
+        session
+            .render_region(rect, ScanMode::Exact, &mut NopControl)
+            .is_err()
+    );
+    assert!(session.render_full(&mut NopControl).is_err());
+
+    session.set_exposure_ev(0.75).unwrap();
+    session.rotate_clockwise().unwrap();
+    assert!(session.install_full(frame(60, 90)).is_err());
+    session.install_full(full.clone()).unwrap();
+    assert!(!session.is_staged());
+    assert_eq!(session.display_dimensions(), (90, 60));
+    assert_eq!(session.parameters().exposure_ev(), 0.75);
+
+    // The same file opened on the full frame and edited the same way.
+    let mut direct = PreviewSession::new(full, Orientation::Rotate90, 24).unwrap();
+    direct.set_parameters(parameters(true, true));
+    direct.set_exposure_ev(0.75).unwrap();
+    direct.rotate_clockwise().unwrap();
+    let staged = session
+        .render_region(rect, ScanMode::Exact, &mut NopControl)
+        .unwrap();
+    let expected = direct
+        .render_region(rect, ScanMode::Exact, &mut NopControl)
+        .unwrap();
+    assert_eq!(staged.pixels(), expected.pixels());
+    let staged = session.render_proxy(&mut NopControl).unwrap();
+    let expected = direct.render_proxy(&mut NopControl).unwrap();
+    assert_eq!(staged.pixels(), expected.pixels());
 }
