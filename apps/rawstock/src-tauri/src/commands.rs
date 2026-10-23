@@ -79,9 +79,11 @@ fn develop_preview(
     long_edge: u32,
     compare: bool,
 ) -> Result<JobStarted, AppError> {
-    dispatch(&app, |stub| {
+    let started = dispatch(&app, |stub| {
         stub.develop_preview(&image_id, &settings, long_edge, compare)
-    })
+    })?;
+    log_develop(&app, "develop_preview", started.job_id, &image_id);
+    Ok(started)
 }
 
 #[tauri::command]
@@ -90,7 +92,17 @@ fn develop_full(
     image_id: String,
     settings: EditSettings,
 ) -> Result<JobStarted, AppError> {
-    dispatch(&app, |stub| stub.develop_full(&image_id, &settings))
+    let started = dispatch(&app, |stub| stub.develop_full(&image_id, &settings))?;
+    log_develop(&app, "develop_full", started.job_id, &image_id);
+    Ok(started)
+}
+
+/// One log line per develop job, so a pan can be checked for zero develops.
+fn log_develop(app: &AppHandle, command: &str, job_id: u64, image_id: &str) {
+    state::log_info(
+        &app.state::<AppState>().log_dir,
+        &format!("{command} job {job_id} image {image_id}"),
+    );
 }
 
 #[tauri::command]
