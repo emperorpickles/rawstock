@@ -773,6 +773,14 @@ pub struct CacheEvictedEvent {
     pub reason: CacheReason,
 }
 
+/// The open photo's full develop replaced the quick one the first preview
+/// came from. The fit preview should be developed again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageRefinedEvent {
+    pub image_id: String,
+}
+
 /// OS file open, a second instance, or a drop.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -800,6 +808,7 @@ pub enum ContractEvent {
     ThumbnailReady(ThumbnailReadyEvent),
     CacheReady(CacheReadyEvent),
     CacheEvicted(CacheEvictedEvent),
+    ImageRefined(ImageRefinedEvent),
 }
 
 impl ContractEvent {
@@ -812,6 +821,7 @@ impl ContractEvent {
             Self::ThumbnailReady(_) => "thumbnail:ready",
             Self::CacheReady(_) => "cache:ready",
             Self::CacheEvicted(_) => "cache:evicted",
+            Self::ImageRefined(_) => "image:refined",
         }
     }
 

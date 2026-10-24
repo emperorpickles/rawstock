@@ -223,6 +223,11 @@ export interface CacheEvictedEvent {
   reason: CacheReason;
 }
 
+/** The full develop replaced the quick one the first preview came from. */
+export interface ImageRefinedEvent {
+  imageId: string;
+}
+
 export interface OpenRequested {
   paths: string[];
 }

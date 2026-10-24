@@ -45,6 +45,10 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   thread renders the full frame with turns and crop, writes
   `<dest>.partial`, and the board renames it only while the job is live.
   Straighten is still recorded but not developed.
+- 1.0 app CA in the fit preview (#106): the quick X-Trans develop now
+  corrects lateral CA and defringes, and when Markesteijn lands the develop
+  thread emits `image:refined` so the fit preview is developed again from
+  the full frame.
 - Unsigned alpha bundles of the 1.0 app (#93): `.github/workflows/alpha.yml`
   on a `v*` tag or by hand drafts a release with a Windows NSIS installer,
   a universal macOS `.dmg`, and checksums. Stocks ship inside the bundle.

@@ -337,8 +337,10 @@ impl RawImage {
     /// takes seconds. A preview downsampled from it is within about 0.5% of
     /// one downsampled from Markesteijn. The
     /// frame is the one [`Self::develop_linear`] returns, a third the size.
-    /// Chromatic aberration is not corrected: at a third the size it is a
-    /// fraction of a pixel. `None` for a sensor that is not X-Trans.
+    /// Chromatic aberration is corrected as in [`Self::develop_linear`],
+    /// measured on this frame: at a third the size it is a third of a pixel,
+    /// which a saturated stock still shows as pink and blue outlines on a
+    /// screen-sized preview. `None` for a sensor that is not X-Trans.
     pub fn develop_quick_linear(&self) -> Result<Option<QuickDevelop>, DevelopError> {
         if self.cfa() != CfaKind::XTrans {
             return Ok(None);
@@ -387,11 +389,21 @@ impl RawImage {
                     }
                 });
         });
-        let image = self.finish_linear(
+        let correct = self.corrects_chromatic_aberration();
+        if correct {
+            Workers::install(|| {
+                let lateral_ca = LateralCa::estimate(width, height, &samples);
+                lateral_ca.apply(width, height, &mut samples);
+            });
+        }
+        let mut image = self.finish_linear(
             u32::try_from(width).map_err(|_| DevelopError::Dimension { value: width })?,
             u32::try_from(height).map_err(|_| DevelopError::Dimension { value: height })?,
             samples,
         )?;
+        if correct {
+            Workers::install(|| Defringe::apply(width, height, &mut image.pixels));
+        }
         Ok(Some(QuickDevelop {
             image,
             full_width: u32::try_from(full_width)

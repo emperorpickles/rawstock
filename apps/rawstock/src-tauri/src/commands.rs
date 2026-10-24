@@ -125,6 +125,7 @@ fn submit_develop(
         developer.submit(DevelopRequest {
             job_id,
             kind,
+            image_id: image_id.to_string(),
             path: PathBuf::from(path),
             settings,
             long_edge,
@@ -230,6 +231,7 @@ fn export_image(
         developer.submit(DevelopRequest {
             job_id: started.job_id,
             kind: JobKind::Export,
+            image_id: image_id.clone(),
             path: PathBuf::from(path),
             settings,
             long_edge: 0,

@@ -178,6 +178,25 @@ test("fit develops the proxy only", async () => {
   assert.equal(host.count("develop_preview"), 1);
 });
 
+test("a refined image develops its fit preview again, once", async () => {
+  const { host, review } = harness();
+  review.open("img", settings());
+  await flush();
+  done(review, host.last("develop_preview"));
+  await flush();
+  assert.equal(host.count("develop_preview"), 1);
+  review.refined({ imageId: "other" });
+  await flush();
+  assert.equal(host.count("develop_preview"), 1, "another image is ignored");
+  review.refined({ imageId: "img" });
+  await flush();
+  assert.equal(host.count("develop_preview"), 2);
+  done(review, host.last("develop_preview"));
+  await flush();
+  assert.equal(host.count("develop_preview"), 2);
+  assert.equal(host.count("develop_full"), 0);
+});
+
 test("100% develops once, then panning sends no develop", async () => {
   const { host, review, view } = harness();
   review.open("img", settings());
