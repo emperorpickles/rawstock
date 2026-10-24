@@ -132,7 +132,9 @@ fn custom_white_balance_redevelops_without_a_demosaic() {
         let ratio = |image: &LinearImage| {
             let (red, blue) = image
                 .pixels()
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .fold((0.0_f64, 0.0_f64), |(red, blue), pixel| {
                     (red + f64::from(pixel[0]), blue + f64::from(pixel[2]))
                 });
