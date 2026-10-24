@@ -644,8 +644,11 @@ export class ReviewController {
       return;
     }
     const compareBefore = this.compare && before.key !== after.key;
+    // At 100% and 200% a resize only changes what is visible, so a proxy for
+    // the current settings is kept until the view returns to fit.
+    const zoomed = this.zoom !== "fit";
     const previewFor = (side: SideState) =>
-      (side.previewKey !== side.key || side.previewEdge !== this.longEdge) &&
+      (side.previewKey !== side.key || (!zoomed && side.previewEdge !== this.longEdge)) &&
       side.failedPreview !== `${side.key}@${this.longEdge}`;
     // The adjust panel starts after-side previews. Asking for one here would
     // only block the before side, which still has to wait for a free slot.
@@ -657,7 +660,6 @@ export class ReviewController {
           : null;
     this.schedule("preview", previewTarget);
 
-    const zoomed = this.zoom !== "fit";
     const fullFor = (side: SideState) =>
       side.fullKey !== side.key && side.failedFull !== side.key && !this.landedFor(side);
     const fullTarget: Side | null =

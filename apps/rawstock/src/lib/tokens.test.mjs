@@ -21,6 +21,20 @@ test("theme defaults to warm and survives a json round trip", () => {
   assert.equal(Preferences.normalize({ ...defaults, appearance: { ...defaults.appearance, theme: "sepia" } }).appearance.theme, "warm");
 });
 
+test("a collapsed filmstrip survives a round trip and odd values read as shown", () => {
+  const defaults = Preferences.defaults();
+  assert.equal(defaults.layout.filmstripCollapsed, false);
+  const collapsed = Preferences.withFilmstrip(defaults, true);
+  assert.equal(defaults.layout.filmstripCollapsed, false, "the input is not changed");
+  const loaded = Preferences.normalize(JSON.parse(JSON.stringify(collapsed)));
+  assert.equal(loaded.layout.filmstripCollapsed, true);
+  const { layout: _layout, ...older } = defaults;
+  assert.equal(Preferences.normalize(older).layout.filmstripCollapsed, false);
+  const odd = Preferences.normalize({ ...defaults, layout: { filmstripCollapsed: "yes", height: 3 } });
+  assert.equal(odd.layout.filmstripCollapsed, false);
+  assert.equal(odd.layout.height, 3);
+});
+
 test("applying a theme sets data-theme and leaves the surround neutral", () => {
   const root = {
     dataset: {},

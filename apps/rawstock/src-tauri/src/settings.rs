@@ -5,7 +5,8 @@
 //! Missing keys fall back to defaults. Unknown keys, including whole
 //! namespaces a later version adds, are kept on save, so another issue
 //! can add its own keys without a migration. `export` is this version's
-//! namespace: last JPEG quality and folder.
+//! namespace: last JPEG quality and folder. `layout` holds window layout,
+//! such as whether the filmstrip is collapsed.
 
 use std::path::{Path, PathBuf};
 
@@ -88,6 +89,16 @@ pub struct Onboarding {
     pub extra: Map<String, Value>,
 }
 
+/// Window layout that persists across restarts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Layout {
+    /// The filmstrip under the viewer is folded down to its header.
+    pub filmstrip_collapsed: bool,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
 /// Last JPEG export. Quality defaults to 92. The folder is the last one
 /// the user exported into, not a catalog.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -119,6 +130,7 @@ pub struct AppSettings {
     pub recent: RecentPrefs,
     pub onboarding: Onboarding,
     pub export: ExportPrefs,
+    pub layout: Layout,
     /// Namespaces this version does not know. Kept verbatim.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -133,6 +145,7 @@ impl Default for AppSettings {
             recent: RecentPrefs::default(),
             onboarding: Onboarding::default(),
             export: ExportPrefs::default(),
+            layout: Layout::default(),
             extra: Map::new(),
         }
     }
@@ -324,6 +337,7 @@ mod tests {
         assert!(!store.get().onboarding.completed);
         assert_eq!(store.get().export.quality, 92);
         assert_eq!(store.get().export.last_folder, None);
+        assert!(!store.get().layout.filmstrip_collapsed);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -361,6 +375,7 @@ mod tests {
         next.onboarding.completed = true;
         next.export.quality = 80;
         next.export.last_folder = Some("/exports".to_string());
+        next.layout.filmstrip_collapsed = true;
         store.set(next.clone()).unwrap();
         assert!(!dir.join("settings.json.tmp").exists());
 
@@ -373,6 +388,7 @@ mod tests {
         assert!(text.contains("\"defaultStockId\": \"velvia\""));
         assert!(text.contains("\"quality\": 80"));
         assert!(text.contains("\"lastFolder\": \"/exports\""));
+        assert!(text.contains("\"filmstripCollapsed\": true"));
         let _ = std::fs::remove_dir_all(dir);
     }
 

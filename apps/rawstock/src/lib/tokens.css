@@ -2,7 +2,8 @@
  * Design tokens for every rawstock 1.0 screen.
  * `data-theme` on the document root picks the palette. The viewer surround
  * is not a theme token: Preferences sets `--surround` inline, and it stays
- * a neutral grey in both themes.
+ * a neutral grey in both themes. `--mat` is the 2 px neutral mat under
+ * filmstrip thumbnails; Preferences never changes it.
  */
 
 :root,
@@ -43,6 +44,7 @@
   --font-mono: "JetBrains Mono", ui-monospace, monospace;
   --gutter: 8px;
   --surround: #2e2e2e;
+  --mat: #2e2e2e;
   --surround-ink: #f2f2f2;
   color-scheme: dark;
   font-family: var(--font-ui);

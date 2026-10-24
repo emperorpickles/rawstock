@@ -27,6 +27,7 @@ test("Ctrl+Y is redo on Windows only, and the other modifier never fires", () =>
   const ctrlY = { key: "y", metaKey: false, ctrlKey: true, shiftKey: false, altKey: false };
   assert.equal(Shortcuts.match(ctrlY, "windows"), "redo");
   assert.equal(Shortcuts.match(ctrlY, "other"), null);
+  assert.equal(Shortcuts.match({ ...ctrlY, ctrlKey: false }, "windows"), "split");
   const ctrlO = { key: "o", metaKey: false, ctrlKey: true, shiftKey: false, altKey: false };
   assert.equal(Shortcuts.match(ctrlO, "mac"), null);
   assert.equal(Shortcuts.match({ ...ctrlO, altKey: true }, "windows"), null);
@@ -41,6 +42,7 @@ test("the cheat sheet shows Cmd on macOS and Ctrl on Windows", () => {
   assert.equal(row(mac, "redo"), "Cmd+Shift+Z");
   assert.equal(row(windows, "redo"), "Ctrl+Shift+Z or Ctrl+Y");
   assert.equal(row(mac, "clipping"), "J");
+  assert.equal(row(windows, "split"), "Y");
   assert.equal(row(mac, "cheat-sheet"), "?");
   assert.equal(row(windows, "filmstrip-next"), "Right Arrow");
   const actions = new Set(SHORTCUTS.map((spec) => spec.action));
