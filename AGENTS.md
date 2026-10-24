@@ -38,7 +38,11 @@ Implemented order:
    (`RawImage::set_chromatic_aberration_correction`, CLI
    `--no-ca-correction`, the tuner's CA fix button).
 2. **White balance, then ACEScg.** As-shot white balance is in camera RGB,
-   baked into the camera → ACEScg matrix. ACEScg (scene-linear AP1) is the
+   baked into the camera → ACEScg matrix. A custom temperature and tint
+   (`white_balance.rs`) replace those multipliers through the camera
+   matrix, and agree with them at the as-shot reading. `CameraImage` keeps
+   the demosaiced camera RGB so the balance can change without a demosaic.
+   ACEScg (scene-linear AP1) is the
    working space. **Exposure (`exposure_ev`) is a stop scale after that
    conversion, still in ACEScg, before halation.** It does not run before
    the working space. `dump-linear` does not apply it.

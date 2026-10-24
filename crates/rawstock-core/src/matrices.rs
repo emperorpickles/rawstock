@@ -231,7 +231,7 @@ pub(crate) fn apply(matrix: [[f64; 3]; 3], value: [f64; 3]) -> [f64; 3] {
     ]
 }
 
-fn xy_to_xyz(xy: [f64; 2]) -> [f64; 3] {
+pub(crate) fn xy_to_xyz(xy: [f64; 2]) -> [f64; 3] {
     let (x, y) = (xy[0], xy[1]);
     [x / y, 1.0, (1.0 - x - y) / y]
 }
@@ -248,7 +248,7 @@ fn multiply(left: [[f64; 3]; 3], right: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
     out
 }
 
-fn inverse(matrix: [[f64; 3]; 3]) -> Option<[[f64; 3]; 3]> {
+pub(crate) fn inverse(matrix: [[f64; 3]; 3]) -> Option<[[f64; 3]; 3]> {
     let det = determinant(matrix);
     if !det.is_finite() || det.abs() < 1.0e-12 {
         return None;

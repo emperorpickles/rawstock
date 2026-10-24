@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { EditSettings, StockSummary } from "./contract";
+  import type { AsShotWhiteBalance, EditSettings, StockSummary } from "./contract";
   import { Adjustments } from "./adjust";
   import { CropMath } from "./geometry";
   import type { AspectId } from "./geometry";
@@ -12,6 +12,7 @@
     frameWidth = 0,
     frameHeight = 0,
     horizon = false,
+    asShot = undefined,
     onpreview,
     oncommit,
     onhorizon,
@@ -22,6 +23,8 @@
     frameWidth?: number;
     frameHeight?: number;
     horizon?: boolean;
+    /** The file's as-shot light. `undefined` while it is read, `null` when the file cannot take a custom balance. */
+    asShot?: AsShotWhiteBalance | null;
     onpreview: (settings: EditSettings) => void;
     oncommit: (settings: EditSettings) => void;
     onhorizon: (on: boolean) => void;
@@ -44,6 +47,16 @@
   );
   const looks = $derived(Adjustments.scanOptions(settings.scan.look));
   const dyeNames = ["Red dye", "Green dye", "Blue dye"] as const;
+  const customWb = $derived(settings.whiteBalance.mode === "custom");
+  const wbValues = $derived(asShot ? Adjustments.whiteBalanceValues(settings, asShot) : null);
+  const temperatureScale = $derived(
+    asShot
+      ? { ...Adjustments.temperatureScale, defaultValue: asShot.temperatureK }
+      : Adjustments.temperatureScale,
+  );
+  const tintScale = $derived(
+    asShot ? { ...Adjustments.tintScale, defaultValue: asShot.tint } : Adjustments.tintScale,
+  );
 
   function send(next: EditSettings, commit: boolean) {
     if (commit) {
@@ -70,15 +83,47 @@
     oncommit={(exposureEv) => send(Adjustments.exposure(settings, exposureEv), true)}
   />
 
-  <div class="group">
-    <p class="name" id="wb-label">White balance</p>
-    {#if settings.whiteBalance.mode === "custom"}
-      <p class="note">Custom white balance is saved. This build develops as shot.</p>
-      <p class="readout" aria-labelledby="wb-label">
-        {settings.whiteBalance.temperatureK.toFixed(0)} K, tint {settings.whiteBalance.tint.toFixed(1)}
+  <div class="group" role="group" aria-labelledby="wb-label">
+    <div class="heading">
+      <p class="name" id="wb-label">White balance</p>
+      {#if asShot}
+        <button
+          type="button"
+          disabled={disabled || !customWb}
+          aria-pressed={!customWb}
+          onclick={() => send(Adjustments.asShotWhiteBalance(settings), true)}
+        >
+          As shot
+        </button>
+      {/if}
+    </div>
+    {#if asShot && wbValues}
+      <Slider
+        label="Temperature"
+        value={wbValues.temperatureK}
+        scale={temperatureScale}
+        {disabled}
+        onpreview={(kelvin) => send(Adjustments.temperature(settings, asShot, kelvin), false)}
+        oncommit={(kelvin) => send(Adjustments.temperature(settings, asShot, kelvin), true)}
+      />
+      <Slider
+        label="Tint"
+        value={wbValues.tint}
+        scale={tintScale}
+        {disabled}
+        onpreview={(tint) => send(Adjustments.tint(settings, asShot, tint), false)}
+        oncommit={(tint) => send(Adjustments.tint(settings, asShot, tint), true)}
+      />
+    {:else if asShot === null}
+      <p class="note">
+        This file cannot take a custom white balance, so it develops as shot.
+      </p>
+    {:else if settings.whiteBalance.mode === "custom"}
+      <p class="readout">
+        {settings.whiteBalance.temperatureK.toFixed(0)} K, tint {settings.whiteBalance.tint.toFixed(0)}
       </p>
     {:else}
-      <p class="readout" aria-labelledby="wb-label">As shot</p>
+      <p class="readout">As shot</p>
     {/if}
   </div>
 
@@ -245,6 +290,13 @@
 
   .group {
     margin: 0 0 0.65rem;
+  }
+
+  .heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.45rem;
   }
 
   .name,
