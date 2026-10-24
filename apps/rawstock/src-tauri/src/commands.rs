@@ -12,7 +12,7 @@ use crate::contract::{
     AppError, EditSettings, ExportOptions, JobKind, JobStarted, OpenOutcome, SaveResult,
     StockSummary,
 };
-use crate::develop::DevelopRequest;
+use crate::develop::{DevelopRequest, ExportTarget};
 use crate::files::classify_inputs;
 use crate::menu::{self, on_menu_event};
 use crate::settings::{AppSettings, SettingsChanged};
@@ -128,6 +128,7 @@ fn submit_develop(
             path: PathBuf::from(path),
             settings,
             long_edge,
+            export: None,
         });
     }
 }
@@ -215,9 +216,30 @@ fn export_image(
     settings: EditSettings,
     options: ExportOptions,
 ) -> Result<JobStarted, AppError> {
-    dispatch(&app, |stub| {
+    let started = dispatch(&app, |stub| {
         stub.export_image(&image_id, &settings, &options)
-    })
+    })?;
+    let state = app.state::<AppState>();
+    let (path, destination) = {
+        let stub = lock(&state.stub);
+        (stub.image_path(&image_id), stub.output_path(started.job_id))
+    };
+    if let (Some(path), Some(destination), Some(developer)) =
+        (path, destination, lock(&state.developer).as_ref())
+    {
+        developer.submit(DevelopRequest {
+            job_id: started.job_id,
+            kind: JobKind::Export,
+            path: PathBuf::from(path),
+            settings,
+            long_edge: 0,
+            export: Some(ExportTarget {
+                destination: PathBuf::from(destination),
+                quality: u8::try_from(options.quality).unwrap_or(92),
+            }),
+        });
+    }
+    Ok(started)
 }
 
 #[tauri::command]

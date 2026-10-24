@@ -39,7 +39,12 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
 - 1.0 app real develop (#87): `develop.rs` replaces the stub for previews
   and full frames with a `PreviewSession` (quick X-Trans open, Markesteijn
   in the background, GPU with CPU fallback), cancelled between rows via
-  the job board. Export is still the stub.
+  the job board.
+- 1.0 app export (#41, #101): Grok's dialog (quality, save path,
+  overwrite confirmation, cancel) now writes a real JPEG. The develop
+  thread renders the full frame with turns and crop, writes
+  `<dest>.partial`, and the board renames it only while the job is live.
+  Straighten is still recorded but not developed.
 - Unsigned alpha bundles of the 1.0 app (#93): `.github/workflows/alpha.yml`
   on a `v*` tag or by hand drafts a release with a Windows NSIS installer,
   a universal macOS `.dmg`, and checksums. Stocks ship inside the bundle.
@@ -53,9 +58,6 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
 
 ## In flight
 
-- **#41** — 1.0 JPEG export dialog (`agent: grok`, PR #95 on
-  `grok/export-dialog`, ready, builds on #86). Quality, save path, overwrite
-  confirmation, and cancel. The develop service still does not write pixels.
 - **#17** — Provia simulation fit (`agent: grok`, `stage: holding`).
   Waiting on more Provia RAF+JPEG pairs from Caleb. Pairs already in hand
   are held out. Do not commit them.

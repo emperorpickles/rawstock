@@ -9,12 +9,14 @@
 //!
 //! Jobs stay on the [`crate::jobs::ContractStub`] board: supersede, cancel
 //! and image switches end them there, and the render checks the board
-//! between rows. Export is still the stub.
+//! between rows. An export is a full develop written as a JPEG to a
+//! partial file, which the board renames to the destination only while the
+//! job is live. Exports run in the order they were asked for.
 //!
 //! The edit maps onto the stock as it ships: exposure and print exposure
 //! are offsets from the stock's own values, dye scales and grain amount are
 //! multipliers, and halation overrides the stock's threshold, radius, and
-//! red weight. Crop, straighten, contrast, grain size, scan looks and custom
+//! red weight. An export also applies the crop. Straighten, contrast, grain size, scan looks and custom
 //! white balance are recorded on the edit but not developed yet.
 
 use std::collections::HashMap;
@@ -26,13 +28,14 @@ use std::time::Duration;
 use rawstock_core::color::LinearImage;
 use rawstock_core::decode::RawImage;
 use rawstock_core::gpu::Gpu;
-use rawstock_core::render::{DevelopControl, Parameters, SrgbImage, Stage};
+use rawstock_core::render::{DevelopControl, Jpeg, Parameters, SrgbImage, Stage};
 use rawstock_core::session::PreviewSession;
 use rawstock_core::stock::{ModelError, Stock};
 use rawstock_core::workers::Workers;
 use tauri::{AppHandle, Manager};
 
 use crate::contract::{AppError, EditSettings, JobKind};
+use crate::export_dest;
 use crate::frame;
 use crate::state::{self, AppState, lock};
 use crate::worker;
@@ -48,6 +51,15 @@ pub struct DevelopRequest {
     pub path: PathBuf,
     pub settings: EditSettings,
     pub long_edge: u32,
+    /// Set for an export.
+    pub export: Option<ExportTarget>,
+}
+
+/// Where an export's JPEG goes, and its quality.
+#[derive(Debug, Clone)]
+pub struct ExportTarget {
+    pub destination: PathBuf,
+    pub quality: u8,
 }
 
 /// Sends requests to the develop thread.
@@ -140,16 +152,21 @@ struct Service {
 }
 
 impl Service {
-    /// Newest request of each kind, previews first. The board has already
-    /// cancelled the older ones.
+    /// Newest preview and full develop, previews first, then every export
+    /// in order. The board has already cancelled the older develops and
+    /// never supersedes an export.
     fn latest(queue: Vec<DevelopRequest>) -> Vec<DevelopRequest> {
+        let (exports, develops): (Vec<_>, Vec<_>) = queue
+            .into_iter()
+            .partition(|request| request.kind == JobKind::Export);
         let mut kept: Vec<DevelopRequest> = Vec::new();
-        for request in queue.into_iter().rev() {
+        for request in develops.into_iter().rev() {
             if !kept.iter().any(|seen| seen.kind == request.kind) {
                 kept.push(request);
             }
         }
         kept.sort_by_key(|request| request.kind != JobKind::Preview);
+        kept.extend(exports);
         kept
     }
 
@@ -157,7 +174,17 @@ impl Service {
         if !self.live(request.job_id) {
             return;
         }
-        match self.develop(request) {
+        let developed = self.develop(request);
+        if let (Some(target), Ok(Some(image))) = (&request.export, &developed) {
+            let events = match ExportFile::write(image, &request.settings, target) {
+                Ok((partial, width, height)) => lock(&self.app.state::<AppState>().stub)
+                    .finish_export(request.job_id, &partial, width, height),
+                Err(detail) => self.failed(request, &detail),
+            };
+            worker::emit(&self.app, &events);
+            return;
+        }
+        match developed {
             Ok(Some(image)) => {
                 let (width, height) = (image.width(), image.height());
                 let packed = frame::pack(width, height, &Rgba::from(&image));
@@ -183,20 +210,31 @@ impl Service {
                 }
             }
             Err(detail) => {
-                let state = self.app.state::<AppState>();
-                state::log_detail(
-                    &state.log_dir,
-                    &format!("develop {}: {detail}", request.path.display()),
-                );
-                let error = AppError::internal(
-                    "This photo could not be developed. The last preview is still on screen.",
-                );
-                let events = lock(&state.stub)
-                    .fail_job(request.job_id, error)
-                    .unwrap_or_default();
+                let events = self.failed(request, &detail);
                 worker::emit(&self.app, &events);
             }
         }
+    }
+
+    /// Log `detail` and fail the job with a sentence for the user.
+    fn failed(
+        &self,
+        request: &DevelopRequest,
+        detail: &str,
+    ) -> Vec<crate::contract::ContractEvent> {
+        let state = self.app.state::<AppState>();
+        state::log_detail(
+            &state.log_dir,
+            &format!("develop {}: {detail}", request.path.display()),
+        );
+        let message = if request.export.is_some() {
+            "This photo could not be exported. The RAW photo is not changed."
+        } else {
+            "This photo could not be developed. The last preview is still on screen."
+        };
+        lock(&state.stub)
+            .fail_job(request.job_id, AppError::internal(message))
+            .unwrap_or_default()
     }
 
     /// `Ok(None)` when the job was cancelled on the way.
@@ -232,13 +270,13 @@ impl Service {
                 }
                 open.session.render_proxy(&mut control).ok()
             }
-            JobKind::Full => {
+            JobKind::Full | JobKind::Export => {
                 if !open.take_full(true, &control)? {
                     return Ok(None);
                 }
                 open.session.render_full(&mut control).ok()
             }
-            JobKind::Thumbnails | JobKind::Export => None,
+            JobKind::Thumbnails => None,
         };
         Ok(image)
     }
@@ -413,6 +451,64 @@ impl Demosaic {
     }
 }
 
+/// The cropped JPEG of an export, written beside its destination.
+struct ExportFile;
+
+impl ExportFile {
+    /// Encode and write `<destination>.partial`. Returns the partial and
+    /// the JPEG's size.
+    fn write(
+        image: &SrgbImage,
+        settings: &EditSettings,
+        target: &ExportTarget,
+    ) -> Result<(PathBuf, u32, u32), String> {
+        Self::write_rgb8(
+            image.to_rgb8(),
+            image.width(),
+            image.height(),
+            settings,
+            target,
+        )
+    }
+
+    fn write_rgb8(
+        rgb: Vec<u8>,
+        width: u32,
+        height: u32,
+        settings: &EditSettings,
+        target: &ExportTarget,
+    ) -> Result<(PathBuf, u32, u32), String> {
+        let (width, height, rgb) = match settings.geometry.crop {
+            Some(crop) => Self::crop(&rgb, width, height, [crop.x, crop.y, crop.w, crop.h]),
+            None => (width, height, rgb),
+        };
+        let bytes =
+            Jpeg::encode(&rgb, width, height, target.quality).map_err(|error| error.to_string())?;
+        let partial = export_dest::partial_path(&target.destination);
+        std::fs::write(&partial, bytes)
+            .map_err(|error| format!("{}: {error}", partial.display()))?;
+        Ok((partial, width, height))
+    }
+
+    /// Crop RGB8 rows to `[x, y, w, h]` in normalised coordinates of the
+    /// upright frame, rounding outward like the thumbnail crop.
+    fn crop(rgb: &[u8], width: u32, height: u32, rect: [f64; 4]) -> (u32, u32, Vec<u8>) {
+        let [x, y, w, h] = rect;
+        let left = ((x * f64::from(width)).floor() as u32).min(width.saturating_sub(1));
+        let top = ((y * f64::from(height)).floor() as u32).min(height.saturating_sub(1));
+        let right = ((x + w) * f64::from(width)).ceil().min(f64::from(width)) as u32;
+        let bottom = ((y + h) * f64::from(height)).ceil().min(f64::from(height)) as u32;
+        let columns = right.max(left + 1) - left;
+        let rows = bottom.max(top + 1) - top;
+        let mut out = Vec::with_capacity(columns as usize * rows as usize * 3);
+        for row in top..top + rows {
+            let start = (row as usize * width as usize + left as usize) * 3;
+            out.extend_from_slice(&rgb[start..start + columns as usize * 3]);
+        }
+        (columns, rows, out)
+    }
+}
+
 /// Cancels a render when the board has ended or cancelled its job.
 struct BoardControl<'a> {
     live: Box<dyn Fn() -> bool + 'a>,
@@ -451,6 +547,7 @@ mod tests {
             path: PathBuf::from("/photos/a.RAF"),
             settings: EditSettings::default(),
             long_edge: 720,
+            export: None,
         }
     }
 
@@ -492,5 +589,45 @@ mod tests {
         ]);
         let ids: Vec<u64> = kept.iter().map(|request| request.job_id).collect();
         assert_eq!(ids, [4, 2]);
+
+        let kept = Service::latest(vec![
+            request(1, JobKind::Export),
+            request(2, JobKind::Preview),
+            request(3, JobKind::Export),
+        ]);
+        let ids: Vec<u64> = kept.iter().map(|request| request.job_id).collect();
+        assert_eq!(ids, [2, 1, 3]);
+    }
+
+    #[test]
+    fn export_crops_and_writes_only_the_partial() {
+        let rgb: Vec<u8> = (0..4 * 2).flat_map(|i| [i as u8; 3]).collect();
+        let (width, height, cropped) = ExportFile::crop(&rgb, 4, 2, [0.5, 0.5, 0.5, 0.5]);
+        assert_eq!((width, height), (2, 1));
+        assert_eq!(cropped, [6, 6, 6, 7, 7, 7]);
+
+        let directory =
+            std::env::temp_dir().join(format!("rawstock-export-file-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let destination = directory.join("out.jpg");
+        let mut settings = EditSettings::default();
+        settings.geometry.crop = Some(crate::contract::CropRect {
+            x: 0.0,
+            y: 0.0,
+            w: 0.5,
+            h: 0.5,
+        });
+        let target = ExportTarget {
+            destination: destination.clone(),
+            quality: 80,
+        };
+        let (partial, width, height) =
+            ExportFile::write_rgb8(vec![128; 8 * 6 * 3], 8, 6, &settings, &target).unwrap();
+        assert_eq!((width, height), (4, 3));
+        assert_eq!(partial, export_dest::partial_path(&destination));
+        assert!(!destination.exists());
+        let bytes = std::fs::read(&partial).unwrap();
+        assert_eq!(&bytes[..2], &[0xff, 0xd8]);
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 }
