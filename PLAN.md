@@ -105,6 +105,10 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   magenta), a faint neutral halation, and the defringe no longer
   desaturates saturated reds into gray outlines. Its Status M scan was
   removed again (too-red skin, too-green foliage).
+- **#117** — Defringe recolors a fringe with the color of the dark side
+  around it instead of gray, so red signs lose their gray letter outlines
+  (`agent: claude`, `stage: ready`, waiting on Caleb's look review). Part
+  of #98.
 - **#79** — Scale-correct grain and silver grain (`agent: claude`, `stage:
   ready`, waiting on Caleb's look review). The field is calibrated through
   the 48 µm aperture, so a preview matches the export shrunk to its size;
