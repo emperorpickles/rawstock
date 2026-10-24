@@ -48,10 +48,20 @@ export interface StockRef {
   revision: number;
 }
 
-/** `custom` is recorded for a later backend. This build develops as-shot only. */
+/** As shot, or a custom light. Custom is developed from camera RGB. */
 export type WhiteBalance =
   | { mode: "asShot" }
   | { mode: "custom"; temperatureK: number; tint: number };
+
+/**
+ * The light a file recorded, as the custom sliders read it. Custom at these
+ * values develops the same as as-shot. `as_shot_white_balance` returns
+ * `null` for a file that cannot take a custom balance.
+ */
+export interface AsShotWhiteBalance {
+  temperatureK: number;
+  tint: number;
+}
 
 export interface DyeEdit {
   scales: [number, number, number];

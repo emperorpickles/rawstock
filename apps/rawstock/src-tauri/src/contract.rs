@@ -6,8 +6,9 @@
 //! written. Older sidecars load through `#[serde(default)]`: grain
 //! multipliers default to 1, and halation overrides default to unset.
 //!
-//! White balance keeps the `custom` variant. The develop service will apply
-//! it later; this build records it and develops as-shot only.
+//! A `custom` white balance is a light temperature and tint, developed from
+//! camera RGB. `as_shot_white_balance` gives the sliders the file's own
+//! reading, at which custom develops the same as as-shot.
 //!
 //! Pixel bytes are not JSON. See [`crate::frame`].
 
@@ -125,8 +126,8 @@ pub struct StockRef {
     pub revision: u32,
 }
 
-/// As-shot white balance, or a custom temperature the backend does not
-/// apply yet. `custom` stays in the type so #39 can send it.
+/// As-shot white balance, or a custom light temperature and tint. Custom
+/// is developed from camera RGB: see `rawstock_core::white_balance`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 #[serde(
     tag = "mode",
@@ -140,6 +141,24 @@ pub enum WhiteBalance {
         temperature_k: f64,
         tint: f64,
     },
+}
+
+/// The light a file recorded as shot, as the custom sliders read it.
+/// Custom at these values develops the same as as-shot.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AsShotWhiteBalance {
+    pub temperature_k: f64,
+    pub tint: f64,
+}
+
+impl From<rawstock_core::white_balance::Temperature> for AsShotWhiteBalance {
+    fn from(temperature: rawstock_core::white_balance::Temperature) -> Self {
+        Self {
+            temperature_k: temperature.kelvin,
+            tint: temperature.tint,
+        }
+    }
 }
 
 /// Spectral dye-scale overrides. Absent on parametric stocks.
