@@ -1,10 +1,12 @@
 //! Process-wide shell state. The develop board is the contract stub.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 
+use crate::contract::AsShotWhiteBalance;
 use crate::develop::Developer;
 use crate::jobs::ContractStub;
 use crate::recent::RecentFiles;
@@ -29,6 +31,9 @@ pub struct AppState {
     pub thumbnailer: Mutex<Option<Thumbnailer>>,
     /// The real preview and full develop. Set once the app has started.
     pub developer: Mutex<Option<Developer>>,
+    /// As-shot light per opened RAW, recorded when the develop thread
+    /// decodes it. `None`: the file cannot take a custom white balance.
+    pub as_shot: Mutex<HashMap<PathBuf, Option<AsShotWhiteBalance>>>,
 }
 
 impl AppState {
@@ -47,6 +52,7 @@ impl AppState {
             wake: Mutex::new(None),
             thumbnailer: Mutex::new(None),
             developer: Mutex::new(None),
+            as_shot: Mutex::new(HashMap::new()),
         }
     }
 }

@@ -8,6 +8,7 @@
   import { Adjustments } from "./lib/adjust";
   import { appError, defaultSettings } from "./lib/contract";
   import type {
+    AsShotWhiteBalance,
     CancelledEvent,
     CropRect,
     DoneEvent,
@@ -134,6 +135,8 @@
    * the viewer frames them, so a crop or straighten never develops again.
    */
   let previewKeys = { requested: "", settled: "" };
+  /** As-shot light of the photo it was read for. `value` is `null` when the file cannot take a custom balance. */
+  let asShot = $state<{ imageId: string; value: AsShotWhiteBalance | null } | null>(null);
   let viewLongEdge = $state(720);
   let closing = false;
   let previewBusy = false;
@@ -169,6 +172,9 @@
     return `The stock "${settings.stock.id}" is not installed. Choose another stock. The photo was not changed.`;
   });
   const adjustmentsDisabled = $derived(!selected || selectedImage?.error != null);
+  const selectedAsShot = $derived(
+    asShot && asShot.imageId === selected ? asShot.value : selectedImage?.error ? null : undefined,
+  );
   const browserStocks = $derived(StockBrowser.visible(stocks, import.meta.env.DEV));
 
   $effect(() => {
@@ -297,6 +303,7 @@
               return;
             }
             reviewer?.done(event);
+            void loadAsShot(event.imageId);
           } else if (event.kind === "full") {
             reviewer?.done(event);
           }
@@ -882,6 +889,22 @@
     }
   }
 
+  /**
+   * Read the photo's as-shot light once its first preview is up, so the
+   * develop thread has already decoded it and the read is a lookup.
+   */
+  async function loadAsShot(imageId: string) {
+    if (!host || asShot?.imageId === imageId) {
+      return;
+    }
+    try {
+      const value = await host.asShotWhiteBalance(imageId);
+      asShot = { imageId, value };
+    } catch {
+      // Left unread: the next preview asks again.
+    }
+  }
+
   async function requestThumbnails(
     imageId: string,
     key: string,
@@ -1054,6 +1077,7 @@
       frameWidth={review?.width || selectedImage?.width || 0}
       frameHeight={review?.height || selectedImage?.height || 0}
       {horizon}
+      asShot={selectedAsShot}
       onstock={chooseStock}
       onpreview={applyPreview}
       oncommit={applyCommit}

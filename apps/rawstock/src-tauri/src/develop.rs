@@ -20,8 +20,15 @@
 //! geometry edit never develops again: the viewer draws the edit's quarter
 //! turns, straighten and crop itself, and its pan regions are in that
 //! frame. An export frames the developed JPEG with the same
-//! [`rawstock_core::geometry::Framing`]. Contrast, grain size, scan looks
-//! and custom white balance are recorded on the edit but not developed yet.
+//! [`rawstock_core::geometry::Framing`]. Contrast, grain size and scan
+//! looks are recorded on the edit but not developed yet.
+//!
+//! White balance is developed from camera RGB. The session keeps the
+//! demosaiced camera RGB of the open photo beside its ACEScg frame, so a
+//! custom temperature and tint re-convert instead of decoding again: the
+//! fit proxy at once, the full frame when a full develop or export next
+//! needs it. That buffer is freed with the session when another photo
+//! opens.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -29,16 +36,17 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::Duration;
 
-use rawstock_core::color::LinearImage;
+use rawstock_core::color::CameraImage;
 use rawstock_core::decode::RawImage;
 use rawstock_core::gpu::Gpu;
 use rawstock_core::render::{DevelopControl, Jpeg, Parameters, SrgbImage, Stage};
 use rawstock_core::session::PreviewSession;
 use rawstock_core::stock::{ModelError, Stock};
+use rawstock_core::white_balance::{Temperature, WhiteBalance, WhiteBalanceSolver};
 use rawstock_core::workers::Workers;
 use tauri::{AppHandle, Manager};
 
-use crate::contract::{AppError, EditSettings, JobKind};
+use crate::contract::{self, AppError, EditSettings, JobKind};
 use crate::export_dest;
 use crate::frame;
 use crate::state::{self, AppState, lock};
@@ -139,13 +147,15 @@ impl GpuStart {
 }
 
 /// The photo the session was built from.
-struct Opened {
+pub(crate) struct Opened {
     path: PathBuf,
     ca_correction: bool,
     session: PreviewSession,
     /// Markesteijn still running for a staged session.
-    full: Option<Receiver<Result<LinearImage, String>>>,
+    full: Option<Receiver<Result<FullDevelop, String>>>,
     stock_id: String,
+    /// The file's as-shot light, when it can take a custom balance.
+    as_shot: Option<Temperature>,
 }
 
 struct Service {
@@ -250,11 +260,18 @@ impl Service {
         if !reuse {
             self.open = None;
             let gpu = self.gpu.device();
-            self.open = Some(Opened::decode(
-                &request.path,
-                settings.lens.ca_correction,
-                gpu,
-            )?);
+            // One line per decode, so a white balance drag can be checked
+            // for none: only a new photo or the CA switch decodes again.
+            state::log_info(
+                &self.app.state::<AppState>().log_dir,
+                &format!("develop decode {}", request.path.display()),
+            );
+            let opened = Opened::decode(&request.path, settings.lens.ca_correction, gpu)?;
+            lock(&self.app.state::<AppState>().as_shot).insert(
+                request.path.clone(),
+                opened.as_shot.map(contract::AsShotWhiteBalance::from),
+            );
+            self.open = Some(opened);
         }
         let parameters = self.stock(&settings.stock.id)?;
         let open = self.open.as_mut().expect("opened above");
@@ -318,19 +335,33 @@ impl Opened {
         let mut raw = RawImage::open(path).map_err(|error| error.to_string())?;
         raw.set_chromatic_aberration_correction(ca_correction);
         let orientation = raw.orientation();
+        let as_shot = WhiteBalanceSolver::new(raw.camera_matrix(), raw.as_shot_wb())
+            .and_then(|solver| solver.as_shot());
         let quick = raw
-            .develop_quick_linear()
+            .develop_quick_camera()
             .map_err(|error| error.to_string())?;
+        // Opened as shot. `apply` converts again for a custom balance,
+        // which only touches the proxy until a full frame is asked for.
         let (mut session, full) = match quick {
             Some(quick) => {
-                let session = PreviewSession::staged(quick, orientation, OPEN_EDGE)
-                    .map_err(|error| error.to_string())?;
+                let session = PreviewSession::staged_camera(
+                    quick,
+                    WhiteBalance::AsShot,
+                    orientation,
+                    OPEN_EDGE,
+                )
+                .map_err(|error| error.to_string())?;
                 (session, Some(Demosaic::spawn(raw)?))
             }
             None => {
-                let linear = raw.develop_linear().map_err(|error| error.to_string())?;
-                let session = PreviewSession::new(linear, orientation, OPEN_EDGE)
-                    .map_err(|error| error.to_string())?;
+                let camera = raw.develop_camera().map_err(|error| error.to_string())?;
+                let session = PreviewSession::with_camera(
+                    camera,
+                    WhiteBalance::AsShot,
+                    orientation,
+                    OPEN_EDGE,
+                )
+                .map_err(|error| error.to_string())?;
                 (session, None)
             }
         };
@@ -341,6 +372,7 @@ impl Opened {
             session,
             full,
             stock_id: String::new(),
+            as_shot,
         })
     }
 
@@ -350,7 +382,7 @@ impl Opened {
         let Some(receiver) = &self.full else {
             return Ok(true);
         };
-        let linear = loop {
+        let (camera, as_shot) = loop {
             match receiver.try_recv() {
                 Ok(result) => break result?,
                 Err(TryRecvError::Disconnected) => {
@@ -367,7 +399,7 @@ impl Opened {
         };
         self.full = None;
         self.session
-            .install_full(linear)
+            .install_full_camera(camera, Some(as_shot))
             .map_err(|error| error.to_string())?;
         Ok(true)
     }
@@ -379,6 +411,16 @@ impl Opened {
         if self.stock_id != settings.stock.id {
             session.set_parameters(stock);
             self.stock_id = settings.stock.id.clone();
+        }
+        // A file that cannot take the edit's custom balance develops as
+        // shot. The adjust panel says so; `as_shot_white_balance` is `null`.
+        if session
+            .set_white_balance(Self::balance(settings.white_balance))
+            .is_err()
+        {
+            session
+                .set_white_balance(WhiteBalance::AsShot)
+                .map_err(|error| error.to_string())?;
         }
         let base = session.baseline_parameters().clone();
         let fail = |error: ModelError| error.to_string();
@@ -430,11 +472,30 @@ impl Opened {
     }
 }
 
+impl Opened {
+    /// The edit's white balance in core's terms.
+    pub(crate) fn balance(balance: contract::WhiteBalance) -> WhiteBalance {
+        match balance {
+            contract::WhiteBalance::AsShot => WhiteBalance::AsShot,
+            contract::WhiteBalance::Custom {
+                temperature_k,
+                tint,
+            } => WhiteBalance::Custom(Temperature {
+                kelvin: temperature_k,
+                tint,
+            }),
+        }
+    }
+}
+
+/// Full-size camera RGB, and the same frame developed as shot.
+type FullDevelop = (CameraImage, rawstock_core::color::LinearImage);
+
 /// Markesteijn for a staged session, on its own thread.
 struct Demosaic;
 
 impl Demosaic {
-    fn spawn(raw: RawImage) -> Result<Receiver<Result<LinearImage, String>>, String> {
+    fn spawn(raw: RawImage) -> Result<Receiver<Result<FullDevelop, String>>, String> {
         let (tx, rx) = mpsc::channel();
         thread::Builder::new()
             .name("rawstock-demosaic".to_string())
@@ -442,7 +503,14 @@ impl Demosaic {
                 // Half the capped pool, so a preview rendering meanwhile
                 // keeps the total near the cap.
                 let threads = (Workers::threads() / 2).max(1);
-                let _ = tx.send(raw.develop_linear_on(threads).map_err(|e| e.to_string()));
+                // Converted as shot here too, so installing it does not
+                // hold up the develop thread. A custom balance converts
+                // again, lazily.
+                let developed = raw.develop_camera_on(threads).and_then(|camera| {
+                    let as_shot = camera.develop_on(WhiteBalance::AsShot, threads)?;
+                    Ok((camera, as_shot))
+                });
+                let _ = tx.send(developed.map_err(|e| e.to_string()));
             })
             .map_err(|error| error.to_string())?;
         Ok(rx)
@@ -535,7 +603,7 @@ mod tests {
             let value = 0.02 + (index % 64) as f32 / 128.0;
             pixels.extend_from_slice(&[value, value * 0.8, value * 0.6]);
         }
-        let linear = LinearImage::new(64, 48, pixels).unwrap();
+        let linear = rawstock_core::color::LinearImage::new(64, 48, pixels).unwrap();
         let mut session =
             PreviewSession::new(linear, rawstock_core::decode::Orientation::Normal, 32).unwrap();
         let directory = crate::stocks::directory();

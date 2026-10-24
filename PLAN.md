@@ -51,6 +51,13 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   handles and draw-a-horizon work zoomed, by mouse and keyboard, with a
   grid while straightening. Geometry edits never develop again: frames
   stay in camera orientation and the viewer frames them.
+- 1.0 app custom white balance (#88): temperature and tint map through the
+  camera matrix (`white_balance.rs`), and custom at the file's as-shot
+  reading is bit-identical to as shot. The session keeps the demosaiced
+  camera RGB, so a change converts the fit proxy at once (about 2 ms on a
+  24 MP RAF) and the full frame only when a 100% view or export needs it.
+  Preview, full, export and thumbnails all use it. Files that cannot take
+  one develop as shot and the panel says so.
 - Unsigned alpha bundles of the 1.0 app (#93): `.github/workflows/alpha.yml`
   on a `v*` tag or by hand drafts a release with a Windows NSIS installer,
   a universal macOS `.dmg`, and checksums. Stocks ship inside the bundle.

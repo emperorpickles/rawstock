@@ -8,10 +8,11 @@
 //! [`Self::render_full`] use the exact scan. The tuner asks for that full
 //! frame once per settings state and pans the bitmap in the window.
 
-use crate::color::{DevelopError, LinearImage};
+use crate::color::{CameraImage, DevelopError, LinearImage, QuickDevelop};
 use crate::decode::{FrameOrientation, Orientation};
 use crate::render::{self, Cancelled, DevelopControl, Fidelity, Parameters, SrgbImage, Stage};
 use crate::stock::{FilmModel, Grain, Halation, ModelError};
+use crate::white_balance::WhiteBalance;
 
 /// Long edge of the fit proxy while a control is moving.
 pub const DRAG_LONG_EDGE: u32 = 720;
@@ -88,7 +89,9 @@ pub struct HalationControls {
 /// `new` does not copy a stock in. Call [`Self::set_parameters`] before
 /// rendering. The full ACEScg buffer stays until the session is dropped;
 /// switching stocks does not decode again. Turning the image reuses that
-/// buffer and rebuilds the proxy.
+/// buffer and rebuilds the proxy. A session built from camera RGB
+/// ([`Self::with_camera`]) also keeps that, so the white balance can change
+/// without a demosaic.
 pub struct PreviewSession {
     /// Demosaic size, kept so a turn can report the sensor frame.
     sensor_width: u32,
@@ -108,9 +111,28 @@ pub struct PreviewSession {
     region: Option<RegionCache>,
     baseline_region: Option<RegionCache>,
     dye_lut: Option<DyeLut>,
+    /// Camera RGB behind `full`, when the session was built from it. Only
+    /// then can the white balance change.
+    camera: Option<CameraSource>,
     /// Renders on this device when set, and on the CPU when it fails.
     #[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
     gpu: Option<crate::gpu::Gpu>,
+}
+
+/// Demosaiced camera RGB kept beside the ACEScg buffers, so a white
+/// balance change re-converts instead of demosaicing again.
+///
+/// The fit proxy is converted from [`Self::proxy`], a few hundred thousand
+/// pixels, so a slider tick stays fast. The full frame is converted again
+/// only when a full render or a 100% crop next needs it.
+struct CameraSource {
+    /// Sensor orientation, the size `full` was developed at.
+    image: CameraImage,
+    /// `image` area-downsampled to the proxy's size, sensor orientation.
+    proxy: CameraImage,
+    balance: WhiteBalance,
+    /// `full` was converted with an older balance.
+    full_stale: bool,
 }
 
 #[derive(Clone)]
@@ -328,20 +350,132 @@ impl PreviewSession {
         orientation: Orientation,
         proxy_long_edge: u32,
     ) -> Result<Self, DevelopError> {
+        let mut session = Self::new_unproxied(linear, orientation, proxy_long_edge);
+        session.proxy = session.full.area_downsample(proxy_long_edge)?;
+        Ok(session)
+    }
+
+    /// Session on demosaiced camera RGB, developed with `balance`.
+    ///
+    /// Like [`Self::new`], but the camera RGB is kept, so
+    /// [`Self::set_white_balance`] can change the balance without a
+    /// demosaic. The fit proxy is converted from a downsample of the camera
+    /// RGB, for as-shot and custom alike.
+    pub fn with_camera(
+        camera: CameraImage,
+        balance: WhiteBalance,
+        orientation: Orientation,
+        proxy_long_edge: u32,
+    ) -> Result<Self, DevelopError> {
+        let linear = camera.develop(balance)?;
+        let mut session = Self::new_unproxied(linear, orientation, proxy_long_edge);
+        session.attach(camera, balance)?;
+        Ok(session)
+    }
+
+    /// [`Self::staged`] on a quick camera-RGB develop. See
+    /// [`Self::with_camera`]. Install the full one with
+    /// [`Self::install_full_camera`].
+    pub fn staged_camera(
+        quick: QuickDevelop<CameraImage>,
+        balance: WhiteBalance,
+        orientation: Orientation,
+        proxy_long_edge: u32,
+    ) -> Result<Self, DevelopError> {
+        let mut session = Self::with_camera(quick.image, balance, orientation, proxy_long_edge)?;
+        session.sensor_width = quick.full_width;
+        session.sensor_height = quick.full_height;
+        session.staged = true;
+        Ok(session)
+    }
+
+    /// [`Self::install_full`] from full-size camera RGB, kept for later
+    /// white balance changes.
+    ///
+    /// `as_shot` is `camera` already developed as shot, as a background
+    /// thread can do while the quick develop is on screen. It is used when
+    /// the session is still as shot. Otherwise the full frame converts on
+    /// the next full render or 100% crop, and only the proxy converts now.
+    pub fn install_full_camera(
+        &mut self,
+        camera: CameraImage,
+        as_shot: Option<LinearImage>,
+    ) -> Result<(), DevelopError> {
+        let balance = self.white_balance();
+        let (sensor_width, sensor_height) = (self.sensor_width, self.sensor_height);
+        if (camera.width(), camera.height()) != (sensor_width, sensor_height) {
+            return Err(DevelopError::FrameMismatch {
+                width: sensor_width,
+                height: sensor_height,
+                actual_width: camera.width(),
+                actual_height: camera.height(),
+            });
+        }
+        let ready = match as_shot {
+            Some(linear) if balance == WhiteBalance::AsShot => {
+                self.check_full_size(&linear)?;
+                Some(linear)
+            }
+            _ => None,
+        };
+        let stale = ready.is_none();
+        if let Some(mut linear) = ready {
+            linear.apply_orientation(self.view.composed());
+            self.full = linear;
+        }
+        self.staged = false;
+        self.attach(camera, balance)?;
+        if let Some(camera) = &mut self.camera {
+            camera.full_stale = stale;
+        }
+        Ok(())
+    }
+
+    /// The balance the source was developed with. As shot for a session
+    /// built from scene-linear ACEScg.
+    pub fn white_balance(&self) -> WhiteBalance {
+        self.camera
+            .as_ref()
+            .map_or(WhiteBalance::AsShot, |camera| camera.balance)
+    }
+
+    /// Develop the kept camera RGB with `balance`. The stock, edits, A/B
+    /// baseline, and turns stay; every cached stage is dropped.
+    ///
+    /// Only the fit proxy converts now. The full frame converts on the next
+    /// [`Self::render_full`] or 100% crop. Fails with
+    /// [`DevelopError::CustomWhiteBalance`] for a session without camera
+    /// RGB, or a balance this camera cannot take, and then nothing changes.
+    pub fn set_white_balance(&mut self, balance: WhiteBalance) -> Result<(), DevelopError> {
+        if balance == self.white_balance() {
+            return Ok(());
+        }
+        let Some(camera) = &mut self.camera else {
+            return Err(DevelopError::CustomWhiteBalance);
+        };
+        let mut proxy = camera.proxy.develop(balance)?;
+        proxy.apply_orientation(self.view.composed());
+        camera.balance = balance;
+        camera.full_stale = true;
+        self.proxy = proxy;
+        self.drop_caches();
+        Ok(())
+    }
+
+    fn new_unproxied(linear: LinearImage, orientation: Orientation, proxy_long_edge: u32) -> Self {
         let sensor_width = linear.width();
         let sensor_height = linear.height();
         let view = FrameOrientation::new(orientation);
         let mut full = linear;
         full.apply_orientation(view.composed());
-        let proxy = full.area_downsample(proxy_long_edge)?;
-        Ok(Self {
+        Self {
             sensor_width,
             sensor_height,
             staged: false,
             view,
+            proxy: LinearImage::new(0, 0, Vec::new()).expect("an empty image is valid"),
             full,
             proxy_long_edge,
-            proxy,
             current: None,
             baseline: None,
             proxy_cache: FrameCache::fresh(),
@@ -349,9 +483,77 @@ impl PreviewSession {
             region: None,
             baseline_region: None,
             dye_lut: None,
+            camera: None,
             #[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
             gpu: None,
-        })
+        }
+    }
+
+    /// Keep `camera` (the source `full` came from) and rebuild the proxy
+    /// from it.
+    fn attach(&mut self, camera: CameraImage, balance: WhiteBalance) -> Result<(), DevelopError> {
+        let proxy = camera.area_downsample(self.proxy_long_edge)?;
+        self.camera = Some(CameraSource {
+            image: camera,
+            proxy,
+            balance,
+            full_stale: false,
+        });
+        self.rebuild_proxy()
+    }
+
+    /// The fit proxy from the camera RGB when the session keeps it, else
+    /// from the full frame. Stage caches are dropped.
+    fn rebuild_proxy(&mut self) -> Result<(), DevelopError> {
+        self.proxy = match &self.camera {
+            Some(camera) => {
+                let mut proxy = camera.proxy.develop(camera.balance)?;
+                proxy.apply_orientation(self.view.composed());
+                proxy
+            }
+            None => self.full.area_downsample(self.proxy_long_edge)?,
+        };
+        self.drop_caches();
+        Ok(())
+    }
+
+    fn drop_caches(&mut self) {
+        self.proxy_cache = FrameCache::fresh();
+        self.baseline_proxy = FrameCache::fresh();
+        self.region = None;
+        self.baseline_region = None;
+    }
+
+    /// Convert the full frame again if the white balance moved since.
+    fn refresh_full(&mut self) -> Result<(), Cancelled> {
+        let Some(camera) = &mut self.camera else {
+            return Ok(());
+        };
+        if !camera.full_stale {
+            return Ok(());
+        }
+        // `set_white_balance` already converted the proxy with this balance,
+        // so this can only fail if memory does.
+        let mut full = camera
+            .image
+            .develop(camera.balance)
+            .map_err(|_| Cancelled)?;
+        full.apply_orientation(self.view.composed());
+        self.full = full;
+        camera.full_stale = false;
+        Ok(())
+    }
+
+    fn check_full_size(&self, linear: &LinearImage) -> Result<(), DevelopError> {
+        if (linear.width(), linear.height()) != (self.sensor_width, self.sensor_height) {
+            return Err(DevelopError::FrameMismatch {
+                width: self.sensor_width,
+                height: self.sensor_height,
+                actual_width: linear.width(),
+                actual_height: linear.height(),
+            });
+        }
+        Ok(())
     }
 
     /// Session on a quick develop while the full one is still running.
@@ -379,26 +581,15 @@ impl PreviewSession {
     }
 
     /// Replace the quick develop with the full one, keeping the stock,
-    /// edits, A/B baseline, and turns. The proxy is rebuilt from it.
+    /// edits, A/B baseline, and turns. The proxy is rebuilt from it. Kept
+    /// camera RGB is dropped: `linear` is the new source.
     pub fn install_full(&mut self, mut linear: LinearImage) -> Result<(), DevelopError> {
-        if (linear.width(), linear.height()) != (self.sensor_width, self.sensor_height) {
-            return Err(DevelopError::FrameMismatch {
-                width: self.sensor_width,
-                height: self.sensor_height,
-                actual_width: linear.width(),
-                actual_height: linear.height(),
-            });
-        }
+        self.check_full_size(&linear)?;
         linear.apply_orientation(self.view.composed());
-        let proxy = linear.area_downsample(self.proxy_long_edge)?;
         self.full = linear;
-        self.proxy = proxy;
         self.staged = false;
-        self.proxy_cache = FrameCache::fresh();
-        self.baseline_proxy = FrameCache::fresh();
-        self.region = None;
-        self.baseline_region = None;
-        Ok(())
+        self.camera = None;
+        self.rebuild_proxy()
     }
 
     /// Render on `gpu` from now on, or on the CPU with `None`.
@@ -418,16 +609,12 @@ impl PreviewSession {
         self.gpu.as_ref()
     }
 
-    /// Width and height of the oriented working image. While staged, the
-    /// full frame's.
+    /// Width and height of the oriented working image: the full frame's,
+    /// also while staged or before a white balance change converts it.
     pub fn dimensions(&self) -> (u32, u32) {
-        if self.staged {
-            return self
-                .view
-                .composed()
-                .dimensions(self.sensor_width, self.sensor_height);
-        }
-        (self.full.width(), self.full.height())
+        self.view
+            .composed()
+            .dimensions(self.sensor_width, self.sensor_height)
     }
 
     /// Width and height of the demosaiced frame, before orientation.
@@ -472,12 +659,7 @@ impl PreviewSession {
         let delta = self.view.delta_to(next);
         self.full.apply_orientation(delta);
         self.view = next;
-        self.proxy = self.full.area_downsample(self.proxy_long_edge)?;
-        self.proxy_cache = FrameCache::fresh();
-        self.baseline_proxy = FrameCache::fresh();
-        self.region = None;
-        self.baseline_region = None;
-        Ok(())
+        self.rebuild_proxy()
     }
 
     /// Proxy width and height at the current long edge.
@@ -490,12 +672,22 @@ impl PreviewSession {
         self.proxy_long_edge
     }
 
-    /// Replace the fit proxy. The full ACEScg image is unchanged.
+    /// Replace the fit proxy. The full ACEScg image is unchanged. With kept
+    /// camera RGB, the proxy is converted from a downsample of it.
     pub fn set_proxy_long_edge(&mut self, long_edge: u32) -> Result<(), DevelopError> {
         if long_edge == self.proxy_long_edge {
             return Ok(());
         }
-        self.proxy = self.full.area_downsample(long_edge)?;
+        self.proxy = match &mut self.camera {
+            Some(camera) => {
+                let shrunk = camera.image.area_downsample(long_edge)?;
+                let mut proxy = shrunk.develop(camera.balance)?;
+                proxy.apply_orientation(self.view.composed());
+                camera.proxy = shrunk;
+                proxy
+            }
+            None => self.full.area_downsample(long_edge)?,
+        };
         self.proxy_long_edge = long_edge;
         self.proxy_cache = FrameCache::fresh();
         self.baseline_proxy = FrameCache::fresh();
@@ -763,6 +955,7 @@ impl PreviewSession {
         if self.staged {
             return Err(Cancelled);
         }
+        self.refresh_full()?;
         let parameters = self.loaded().parameters.clone();
         #[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
         if let Some(image) = self.gpu_render(&parameters, &self.full, None, control)? {
@@ -779,6 +972,7 @@ impl PreviewSession {
         if self.staged {
             return Err(Cancelled);
         }
+        self.refresh_full()?;
         let parameters = self.baseline().parameters.clone();
         #[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
         if let Some(image) = self.gpu_render(&parameters, &self.full, None, control)? {
@@ -875,6 +1069,7 @@ impl PreviewSession {
         if self.staged {
             return Err(Cancelled);
         }
+        self.refresh_full()?;
         let parameters = self.stock(baseline).parameters.clone();
         let rect = rect.clamped(self.full.width(), self.full.height());
         let (origin_x, origin_y, width, height) = (rect.x, rect.y, rect.width, rect.height);

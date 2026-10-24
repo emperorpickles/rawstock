@@ -26,4 +26,5 @@ pub mod render;
 pub mod session;
 mod spectrum;
 pub mod stock;
+pub mod white_balance;
 pub mod workers;

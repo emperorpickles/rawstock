@@ -21,6 +21,7 @@ use crate::decode::{CfaKind, RawImage};
 use crate::defringe::Defringe;
 use crate::lateral_ca::LateralCa;
 use crate::matrices;
+use crate::white_balance::{WhiteBalance, WhiteBalanceSolver};
 use crate::workers::Workers;
 
 /// Failure while developing a RAW file to scene-linear ACEScg or writing it.
@@ -78,6 +79,11 @@ pub enum DevelopError {
     /// As-shot white balance has no positive finite RGB coefficients.
     #[error("as-shot white balance is missing")]
     MissingWhiteBalance,
+
+    /// A custom white balance is out of range, or this file's color matrix
+    /// cannot map one to camera multipliers.
+    #[error("custom white balance is not available for this file")]
+    CustomWhiteBalance,
 
     /// The OpenEXR writer rejected the image.
     #[error("failed to write OpenEXR")]
@@ -288,6 +294,24 @@ impl RawImage {
 
     /// [`Self::develop_linear`] on whatever pool the caller is on.
     fn develop_linear_here(&self) -> Result<LinearImage, DevelopError> {
+        self.develop_camera_here()?.convert(WhiteBalance::AsShot)
+    }
+
+    /// Demosaic and correct chromatic aberration, but stop in camera RGB,
+    /// before white balance. [`CameraImage::develop`] finishes it with any
+    /// white balance, as often as needed, without demosaicing again.
+    /// `develop_camera()?.develop(WhiteBalance::AsShot)` is
+    /// [`Self::develop_linear`].
+    pub fn develop_camera(&self) -> Result<CameraImage, DevelopError> {
+        Workers::install(|| self.develop_camera_here())
+    }
+
+    /// [`Self::develop_camera`] on a pool of its own, `threads` wide.
+    pub fn develop_camera_on(&self, threads: usize) -> Result<CameraImage, DevelopError> {
+        Workers::install_separate(threads, || self.develop_camera_here())
+    }
+
+    fn develop_camera_here(&self) -> Result<CameraImage, DevelopError> {
         let developed = if self.cfa() == CfaKind::XTrans {
             self.demosaic_xtrans()?
         } else {
@@ -308,16 +332,12 @@ impl RawImage {
 
         // ProRAW arrives already corrected by the phone.
         let correct = self.corrects_chromatic_aberration() && self.cfa() != CfaKind::LinearDng;
-        let (columns, rows) = (width as usize, height as usize);
         if correct {
+            let (columns, rows) = (width as usize, height as usize);
             let lateral_ca = LateralCa::estimate(columns, rows, &samples);
             lateral_ca.apply(columns, rows, &mut samples);
         }
-        let mut linear = self.finish_linear(width, height, samples)?;
-        if correct {
-            Defringe::apply(columns, rows, &mut linear.pixels);
-        }
-        Ok(linear)
+        CameraImage::from_raw(self, width, height, samples, correct)
     }
 
     /// [`Self::develop_linear`] on a pool of its own, `threads` wide.
@@ -340,6 +360,19 @@ impl RawImage {
     /// Chromatic aberration is not corrected: at a third the size it is a
     /// fraction of a pixel. `None` for a sensor that is not X-Trans.
     pub fn develop_quick_linear(&self) -> Result<Option<QuickDevelop>, DevelopError> {
+        let Some(quick) = self.develop_quick_camera()? else {
+            return Ok(None);
+        };
+        Ok(Some(QuickDevelop {
+            image: quick.image.develop(WhiteBalance::AsShot)?,
+            full_width: quick.full_width,
+            full_height: quick.full_height,
+        }))
+    }
+
+    /// [`Self::develop_quick_linear`], stopped in camera RGB before white
+    /// balance, like [`Self::develop_camera`].
+    pub fn develop_quick_camera(&self) -> Result<Option<QuickDevelop<CameraImage>>, DevelopError> {
         if self.cfa() != CfaKind::XTrans {
             return Ok(None);
         }
@@ -387,10 +420,12 @@ impl RawImage {
                     }
                 });
         });
-        let image = self.finish_linear(
+        let image = CameraImage::from_raw(
+            self,
             u32::try_from(width).map_err(|_| DevelopError::Dimension { value: width })?,
             u32::try_from(height).map_err(|_| DevelopError::Dimension { value: height })?,
             samples,
+            false,
         )?;
         Ok(Some(QuickDevelop {
             image,
@@ -399,21 +434,6 @@ impl RawImage {
             full_height: u32::try_from(full_height)
                 .map_err(|_| DevelopError::Dimension { value: full_height })?,
         }))
-    }
-
-    /// White balance, highlight recovery, and the ACEScg matrix, on
-    /// demosaiced camera RGB.
-    fn finish_linear(
-        &self,
-        width: u32,
-        height: u32,
-        mut samples: Vec<f32>,
-    ) -> Result<LinearImage, DevelopError> {
-        let white_balance = normalized_white_balance(self.as_shot_wb())?;
-        recover_highlights(&mut samples, white_balance);
-        let transform = acescg_transform(self.camera_matrix(), [1.0, 1.0, 1.0, 0.0])?;
-        apply_transform(&mut samples, transform);
-        LinearImage::new(width, height, samples)
     }
 
     /// The X-Trans frame a develop returns, in full-sensor coordinates: the
@@ -437,13 +457,170 @@ impl RawImage {
 }
 
 /// A fast, smaller develop of a frame, and the size of its full develop.
-pub struct QuickDevelop {
-    /// Scene-linear ACEScg at a third of the full size.
-    pub image: LinearImage,
+pub struct QuickDevelop<Image = LinearImage> {
+    /// Scene-linear ACEScg ([`LinearImage`]) or camera RGB ([`CameraImage`])
+    /// at a third of the full size.
+    pub image: Image,
     /// Width [`RawImage::develop_linear`] will return.
     pub full_width: u32,
     /// Height [`RawImage::develop_linear`] will return.
     pub full_height: u32,
+}
+
+/// Demosaiced camera RGB before white balance: black and white levels
+/// normalized, chromatic aberration registered, nothing else.
+///
+/// [`Self::develop`] finishes it to ACEScg for a [`WhiteBalance`]. Keeping
+/// this buffer is what lets a white balance change skip the decode and the
+/// demosaic.
+#[derive(Clone)]
+pub struct CameraImage {
+    width: u32,
+    height: u32,
+    pixels: Vec<f32>,
+    camera_matrix: [[f32; 3]; 4],
+    as_shot_wb: [f32; 4],
+    /// Desaturate blue/purple fringes after the ACEScg conversion. Only a
+    /// full-size, CA-corrected develop sets it: the defringe radius is in
+    /// sensor pixels.
+    defringe: bool,
+}
+
+impl std::fmt::Debug for CameraImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CameraImage")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("pixels", &self.pixels.len())
+            .field("defringe", &self.defringe)
+            .finish()
+    }
+}
+
+impl CameraImage {
+    /// Camera RGB from interleaved samples, with the file's XYZ → camera
+    /// matrix and as-shot multipliers (RGBE order), as [`RawImage`] reports
+    /// them. No defringe runs on it.
+    pub fn new(
+        width: u32,
+        height: u32,
+        pixels: Vec<f32>,
+        camera_matrix: [[f32; 3]; 4],
+        as_shot_wb: [f32; 4],
+    ) -> Result<Self, DevelopError> {
+        let expected = width as usize * height as usize * 3;
+        if pixels.len() != expected {
+            return Err(DevelopError::Samples {
+                actual: pixels.len(),
+                expected,
+            });
+        }
+        Ok(Self {
+            width,
+            height,
+            pixels,
+            camera_matrix,
+            as_shot_wb,
+            defringe: false,
+        })
+    }
+
+    fn from_raw(
+        raw: &RawImage,
+        width: u32,
+        height: u32,
+        pixels: Vec<f32>,
+        defringe: bool,
+    ) -> Result<Self, DevelopError> {
+        let mut image = Self::new(width, height, pixels, raw.camera_matrix(), raw.as_shot_wb())?;
+        image.defringe = defringe;
+        Ok(image)
+    }
+
+    /// Width in pixels.
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Height in pixels.
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Maps temperature and tint to this camera's multipliers. `None` when
+    /// the file cannot take a custom white balance: its color matrix does
+    /// not invert, or it recorded no as-shot balance.
+    pub fn white_balance_solver(&self) -> Option<WhiteBalanceSolver> {
+        WhiteBalanceSolver::new(self.camera_matrix, self.as_shot_wb)
+    }
+
+    /// White balance, highlight recovery, the ACEScg matrix, and the
+    /// defringe, on the capped [`Workers`] pool. See
+    /// [`RawImage::develop_linear`].
+    ///
+    /// [`WhiteBalance::AsShot`] is what [`RawImage::develop_linear`] returns.
+    pub fn develop(&self, balance: WhiteBalance) -> Result<LinearImage, DevelopError> {
+        Workers::install(|| self.clone().convert(balance))
+    }
+
+    /// [`Self::develop`] on a pool of its own, `threads` wide, for a
+    /// conversion in the background. See [`RawImage::develop_linear_on`].
+    pub fn develop_on(
+        &self,
+        balance: WhiteBalance,
+        threads: usize,
+    ) -> Result<LinearImage, DevelopError> {
+        Workers::install_separate(threads, || self.clone().convert(balance))
+    }
+
+    /// Area-downsample so the longer side is `long_edge`, as
+    /// [`LinearImage::area_downsample`] does. The defringe is dropped at a
+    /// reduced size, as it is for a quick develop.
+    pub fn area_downsample(&self, long_edge: u32) -> Result<Self, DevelopError> {
+        if long_edge == 0 {
+            return Err(DevelopError::EmptyProxy);
+        }
+        let (width, height) = LinearImage::proxy_dimensions(self.width, self.height, long_edge);
+        if width == self.width && height == self.height {
+            return Ok(self.clone());
+        }
+        Ok(Self {
+            width,
+            height,
+            pixels: area_box(&self.pixels, self.width, self.height, width, height),
+            camera_matrix: self.camera_matrix,
+            as_shot_wb: self.as_shot_wb,
+            defringe: false,
+        })
+    }
+
+    /// [`Self::develop`] on whatever pool the caller is on, consuming the
+    /// buffer.
+    fn convert(mut self, balance: WhiteBalance) -> Result<LinearImage, DevelopError> {
+        let white_balance = match balance {
+            WhiteBalance::AsShot => normalized_white_balance(self.as_shot_wb)?,
+            WhiteBalance::Custom(_) => self
+                .white_balance_solver()
+                .and_then(|solver| solver.multipliers(balance))
+                .ok_or(DevelopError::CustomWhiteBalance)?,
+        };
+        let transform = acescg_transform(self.camera_matrix, [1.0, 1.0, 1.0, 0.0])?;
+        let cap = white_balance[0].min(white_balance[1]).min(white_balance[2]) as f32;
+        let wb = white_balance.map(|channel| channel as f32);
+        self.pixels.par_chunks_mut(3 * 4096).for_each(|chunk| {
+            recover_highlights(chunk, wb, cap);
+            apply_transform(chunk, transform);
+        });
+        let mut linear = LinearImage::new(self.width, self.height, self.pixels)?;
+        if self.defringe {
+            Defringe::apply(
+                linear.width as usize,
+                linear.height as usize,
+                &mut linear.pixels,
+            );
+        }
+        Ok(linear)
+    }
 }
 
 impl RawImage {
@@ -604,15 +781,14 @@ fn normalized_white_balance(as_shot_wb: [f32; 4]) -> Result<[f64; 3], DevelopErr
 /// Clip photosites to the white level, apply white balance, then clip to the
 /// first channel that would have clipped on a neutral.
 ///
-/// `white_balance` is green-normalized. A fully exposed neutral is `(1, 1, 1)`
+/// `wb` is green-normalized and `cap` is its smallest multiplier. A fully
+/// exposed neutral is `(1, 1, 1)`
 /// on the sensor. Multiplying by a balance whose red or blue coefficient is
 /// above 1, then by the color matrix, leaves green short and the highlight
 /// encodes magenta. Cutting every balanced channel at `min(white_balance)`
 /// pulls that neutral back to camera white. A colorful pixel that only clips
 /// one channel stays colorful: only the channels past the cap move.
-fn recover_highlights(samples: &mut [f32], white_balance: [f64; 3]) {
-    let wb = white_balance.map(|channel| channel as f32);
-    let cap = wb[0].min(wb[1]).min(wb[2]);
+fn recover_highlights(samples: &mut [f32], wb: [f32; 3], cap: f32) {
     for pixel in samples.as_chunks_mut::<3>().0 {
         for channel in 0..3 {
             let sensor = pixel[channel];
@@ -767,9 +943,11 @@ mod tests {
         ];
         let balance = normalized_white_balance([1.6953642, 1.0, 2.3509934, f32::NAN]).unwrap();
         let matrix = acescg_transform(xyz_to_camera, [1.0, 1.0, 1.0, 0.0]).unwrap();
+        let wb = balance.map(|channel| channel as f32);
+        let cap = wb[0].min(wb[1]).min(wb[2]);
 
         let mut white = vec![1.4, 1.2, 1.8];
-        recover_highlights(&mut white, balance);
+        recover_highlights(&mut white, wb, cap);
         apply_transform(&mut white, matrix);
         assert_white([white[0], white[1], white[2]]);
         let encoded = encode_srgb(&white);
@@ -780,7 +958,7 @@ mod tests {
         // A red that only just clips stays red. Baking the balance into the
         // matrix and clipping after it paints this pixel magenta.
         let mut red = vec![1.0, 0.25, 0.20];
-        recover_highlights(&mut red, balance);
+        recover_highlights(&mut red, wb, cap);
         apply_transform(&mut red, matrix);
         assert!(
             red[0] > red[1] + 0.15 && red[0] > red[2] + 0.05,
@@ -790,7 +968,7 @@ mod tests {
         // A gray below the cap is only white-balanced, not crushed.
         let level = 0.4_f32;
         let mut gray = vec![level / balance[0] as f32, level, level / balance[2] as f32];
-        recover_highlights(&mut gray, balance);
+        recover_highlights(&mut gray, wb, cap);
         for channel in &gray {
             assert!((channel - level).abs() < 1.0e-5, "{gray:?}");
         }

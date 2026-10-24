@@ -3,9 +3,10 @@
 //! One thread decodes the photo once, keeps a small ACEScg copy, and runs
 //! every requested stock over it. A thumbnail shows tone and colour only:
 //! grain and halation are off, because neither means anything at this
-//! size. Exposure, rotation, straighten, crop, and the CA switch come from
-//! the edit; the framing is the export's. White balance is not applied
-//! yet; this build develops as shot, as the main preview does.
+//! size. Exposure, white balance, rotation, straighten, crop, and the CA
+//! switch come from the edit; the framing is the export's. The kept copy is
+//! camera RGB, so a white balance change converts it again without a
+//! decode.
 //!
 //! The job itself lives on the [`crate::jobs::ContractStub`] board, so cancel,
 //! supersede, and image switches end it the same way as any other job.
@@ -15,13 +16,15 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 
-use rawstock_core::color::LinearImage;
+use rawstock_core::color::{CameraImage, LinearImage};
 use rawstock_core::decode::{Orientation, RawImage};
 use rawstock_core::render::Pipeline;
 use rawstock_core::stock::Stock;
+use rawstock_core::white_balance::WhiteBalance;
 use tauri::{AppHandle, Manager};
 
 use crate::contract::{AppError, EditSettings};
+use crate::develop::Opened;
 use crate::frame;
 use crate::state::{self, AppState, lock};
 use crate::worker;
@@ -155,13 +158,14 @@ impl Thumbnailer {
     }
 }
 
-/// The open photo at [`SOURCE_EDGE`], scene-linear ACEScg, as the sensor
-/// sees it. Orientation is applied per request so a turn needs no decode.
+/// The open photo at [`SOURCE_EDGE`], camera RGB before white balance, as
+/// the sensor sees it. White balance and orientation are applied per
+/// request, so neither needs a decode.
 struct Source {
     path: PathBuf,
     ca_correction: bool,
     camera: Orientation,
-    linear: LinearImage,
+    rgb: CameraImage,
 }
 
 impl Source {
@@ -171,27 +175,33 @@ impl Source {
         let mut raw = RawImage::open(path).map_err(|error| error.to_string())?;
         raw.set_chromatic_aberration_correction(ca_correction);
         let camera = raw.orientation();
-        let linear = match raw
-            .develop_quick_linear()
+        let rgb = match raw
+            .develop_quick_camera()
             .map_err(|error| error.to_string())?
         {
             Some(quick) => quick.image,
-            None => raw.develop_linear().map_err(|error| error.to_string())?,
+            None => raw.develop_camera().map_err(|error| error.to_string())?,
         };
-        let linear = linear
+        let rgb = rgb
             .area_downsample(SOURCE_EDGE)
             .map_err(|error| error.to_string())?;
         Ok(Self {
             path: path.to_path_buf(),
             ca_correction,
             camera,
-            linear,
+            rgb,
         })
     }
 
     /// Oriented, framed, and shrunk to `long_edge`.
     fn framed(&self, settings: &EditSettings, long_edge: u32) -> Result<LinearImage, String> {
-        let mut image = self.linear.clone();
+        // As shot when the file cannot take the custom balance, like the
+        // main develop.
+        let mut image = self
+            .rgb
+            .develop(Opened::balance(settings.white_balance))
+            .or_else(|_| self.rgb.develop(WhiteBalance::AsShot))
+            .map_err(|error| error.to_string())?;
         image.apply_orientation(self.camera);
         ThumbnailRender::frame(&image, settings)?
             .area_downsample(long_edge.clamp(1, MAX_EDGE))

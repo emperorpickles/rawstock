@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use rawstock_core::color::{LinearImage, QuickDevelop};
+use rawstock_core::color::{CameraImage, LinearImage, QuickDevelop};
 use rawstock_core::decode::Orientation;
 use rawstock_core::render::{DevelopControl, Fidelity, NopControl, Parameters, Pipeline, Stage};
 use rawstock_core::session::{DisplayRect, PreviewSession, ScanMode};
@@ -10,6 +10,7 @@ use rawstock_core::stock::{
     Curve, FilmModel, Grain, Granularity, Halation, ModelError, Parametric, Stock, StockMeta,
     StockModel,
 };
+use rawstock_core::white_balance::{Temperature, WhiteBalance};
 
 struct Log {
     stages: Vec<Stage>,
@@ -711,4 +712,127 @@ fn staged_session_previews_first_and_keeps_edits_when_the_full_frame_lands() {
     let staged = session.render_proxy(&mut NopControl).unwrap();
     let expected = direct.render_proxy(&mut NopControl).unwrap();
     assert_eq!(staged.pixels(), expected.pixels());
+}
+
+/// Fujifilm X-T3 D65 matrix and an as-shot daylight balance.
+const XT3: [[f32; 3]; 4] = [
+    [1.3426, -0.6334, -0.1177],
+    [-0.4244, 1.2136, 0.2371],
+    [-0.0580, 0.1303, 0.5980],
+    [0.0, 0.0, 0.0],
+];
+const AS_SHOT: [f32; 4] = [1.93, 1.0, 1.87, 0.0];
+
+fn camera_frame(width: u32, height: u32) -> CameraImage {
+    let mut pixels = Vec::with_capacity(width as usize * height as usize * 3);
+    for index in 0..width as usize * height as usize {
+        let level = 0.02 + (index % 23) as f32 * 0.04;
+        pixels.extend([level / 1.9, level, level / 1.8]);
+    }
+    CameraImage::new(width, height, pixels, XT3, AS_SHOT).unwrap()
+}
+
+#[test]
+fn white_balance_changes_the_proxy_now_and_the_full_frame_when_asked() {
+    let tungsten = WhiteBalance::Custom(Temperature {
+        kelvin: 3_200.0,
+        tint: 5.0,
+    });
+    let camera = camera_frame(90, 60);
+    let quick = QuickDevelop {
+        image: camera.area_downsample(30).unwrap(),
+        full_width: 90,
+        full_height: 60,
+    };
+    let mut session =
+        PreviewSession::staged_camera(quick, WhiteBalance::AsShot, Orientation::Rotate90, 24)
+            .unwrap();
+    session.set_parameters(parameters(true, true));
+    let as_shot = session.render_proxy(&mut NopControl).unwrap();
+    session.set_white_balance(tungsten).unwrap();
+    assert_eq!(session.white_balance(), tungsten);
+    let warm = session.render_proxy(&mut NopControl).unwrap();
+    assert_ne!(as_shot.pixels(), warm.pixels());
+    session.rotate_clockwise().unwrap();
+    assert!(
+        session
+            .install_full_camera(camera_frame(60, 90), None)
+            .is_err()
+    );
+    session.install_full_camera(camera.clone(), None).unwrap();
+    assert!(!session.is_staged());
+
+    // The same frame opened with that balance, turned the same way.
+    let mut direct =
+        PreviewSession::with_camera(camera.clone(), tungsten, Orientation::Rotate90, 24).unwrap();
+    direct.set_parameters(parameters(true, true));
+    direct.rotate_clockwise().unwrap();
+    let rect = DisplayRect {
+        x: 4,
+        y: 4,
+        width: 16,
+        height: 16,
+    };
+    for (left, right) in [
+        (
+            session.render_proxy(&mut NopControl).unwrap(),
+            direct.render_proxy(&mut NopControl).unwrap(),
+        ),
+        (
+            session.render_full(&mut NopControl).unwrap(),
+            direct.render_full(&mut NopControl).unwrap(),
+        ),
+    ] {
+        assert_eq!(left.pixels(), right.pixels());
+    }
+
+    // Back to as shot: the proxy converts now, the full frame on demand,
+    // and both match a session that never left as shot.
+    session.set_white_balance(WhiteBalance::AsShot).unwrap();
+    let mut plain =
+        PreviewSession::with_camera(camera, WhiteBalance::AsShot, Orientation::Rotate90, 24)
+            .unwrap();
+    plain.set_parameters(parameters(true, true));
+    plain.rotate_clockwise().unwrap();
+    assert_eq!(
+        session
+            .render_region(rect, ScanMode::Exact, &mut NopControl)
+            .unwrap()
+            .pixels(),
+        plain
+            .render_region(rect, ScanMode::Exact, &mut NopControl)
+            .unwrap()
+            .pixels()
+    );
+    assert_eq!(
+        session.render_proxy(&mut NopControl).unwrap().pixels(),
+        plain.render_proxy(&mut NopControl).unwrap().pixels()
+    );
+}
+
+#[test]
+fn white_balance_needs_camera_rgb_and_a_reachable_light() {
+    let mut linear = session(24, 8, false, false);
+    assert!(linear.set_white_balance(WhiteBalance::AsShot).is_ok());
+    let custom = WhiteBalance::Custom(Temperature {
+        kelvin: 5_000.0,
+        tint: 0.0,
+    });
+    assert!(linear.set_white_balance(custom).is_err());
+
+    let mut camera = PreviewSession::with_camera(
+        camera_frame(24, 8),
+        WhiteBalance::AsShot,
+        Orientation::Normal,
+        16,
+    )
+    .unwrap();
+    camera.set_parameters(parameters(false, false));
+    let out_of_range = WhiteBalance::Custom(Temperature {
+        kelvin: 100.0,
+        tint: 0.0,
+    });
+    assert!(camera.set_white_balance(out_of_range).is_err());
+    assert_eq!(camera.white_balance(), WhiteBalance::AsShot);
+    assert!(camera.set_white_balance(custom).is_ok());
 }
