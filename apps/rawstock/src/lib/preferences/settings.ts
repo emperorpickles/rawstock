@@ -17,6 +17,12 @@ export interface ExportPrefs {
   [key: string]: unknown;
 }
 
+/** Window layout that persists across restarts. */
+export interface LayoutPrefs {
+  filmstripCollapsed: boolean;
+  [key: string]: unknown;
+}
+
 export interface AppSettings {
   version: number;
   appearance: {
@@ -29,6 +35,7 @@ export interface AppSettings {
   recent: { limit: number; [key: string]: unknown };
   onboarding: { completed: boolean; [key: string]: unknown };
   export: ExportPrefs;
+  layout: LayoutPrefs;
   [namespace: string]: unknown;
 }
 
@@ -54,6 +61,7 @@ export class Preferences {
       recent: { limit: 10 },
       onboarding: { completed: false },
       export: { quality: 92, lastFolder: null },
+      layout: { filmstripCollapsed: false },
     };
   }
 
@@ -67,6 +75,7 @@ export class Preferences {
    */
   static normalize(settings: AppSettings): AppSettings {
     const saved = settings.export ?? { quality: 92, lastFolder: null };
+    const layout = settings.layout ?? { filmstripCollapsed: false };
     const folder = typeof saved.lastFolder === "string" ? saved.lastFolder.trim() : "";
     return {
       ...settings,
@@ -79,6 +88,7 @@ export class Preferences {
         quality: ExportPlan.savedQuality(saved.quality),
         lastFolder: folder || null,
       },
+      layout: { ...layout, filmstripCollapsed: layout.filmstripCollapsed === true },
     };
   }
 
@@ -89,6 +99,11 @@ export class Preferences {
     root.style.setProperty("--surround-ink", colors.ink);
     root.dataset.reduceMotion = settings.appearance.reduceMotion;
     root.dataset.theme = ThemeSetting.parse(settings.appearance.theme);
+  }
+
+  /** `settings` with the filmstrip collapsed or shown. */
+  static withFilmstrip(settings: AppSettings, collapsed: boolean): AppSettings {
+    return { ...settings, layout: { ...settings.layout, filmstripCollapsed: collapsed } };
   }
 
   /** The stock a newly opened image starts on. */

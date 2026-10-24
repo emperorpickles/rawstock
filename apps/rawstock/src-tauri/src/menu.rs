@@ -30,6 +30,7 @@ pub fn menu_hit(id: &str) -> MenuHit {
         "fit" => MenuHit::Action("fit"),
         "zoom-100" => MenuHit::Action("zoom-100"),
         "zoom-200" => MenuHit::Action("zoom-200"),
+        "split" => MenuHit::Action("split"),
         "before-after" => MenuHit::Action("before-after"),
         "clipping" => MenuHit::Action("clipping"),
         "about" => MenuHit::Action("about"),
@@ -132,6 +133,7 @@ fn install_menu(app: &AppHandle, paths: &[String]) -> tauri::Result<()> {
     let fit = item(app, "fit", "Fit", Some("CmdOrCtrl+0"))?;
     let zoom_100 = item(app, "zoom-100", "100%", Some("CmdOrCtrl+1"))?;
     let zoom_200 = item(app, "zoom-200", "200%", Some("CmdOrCtrl+2"))?;
+    let split = item(app, "split", "Split", None)?;
     let before_after = item(app, "before-after", "Before/After", None)?;
     let clipping = item(app, "clipping", "Clipping", None)?;
     let sep_view = PredefinedMenuItem::separator(app)?;
@@ -197,6 +199,7 @@ fn install_menu(app: &AppHandle, paths: &[String]) -> tauri::Result<()> {
             &zoom_100,
             &zoom_200,
             &sep_view,
+            &split,
             &before_after,
             &clipping,
         ],
@@ -307,6 +310,7 @@ mod tests {
         assert_eq!(menu_hit("open"), MenuHit::Action("open"));
         assert_eq!(menu_hit("redo-y"), MenuHit::Action("redo"));
         assert_eq!(menu_hit("zoom-100"), MenuHit::Action("zoom-100"));
+        assert_eq!(menu_hit("split"), MenuHit::Action("split"));
         assert_eq!(menu_hit("preferences"), MenuHit::Action("preferences"));
         assert_eq!(menu_hit("show-log"), MenuHit::Action("show-log"));
         assert_eq!(menu_hit("welcome"), MenuHit::Action("welcome"));

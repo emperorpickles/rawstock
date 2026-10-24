@@ -202,6 +202,30 @@ test("100% develops once, then panning sends no develop", async () => {
   assert.equal(host.calls.length, before, "no command while panning a texture");
 });
 
+test("resizing the viewer at 100% develops nothing until fit", async () => {
+  const { host, review, view } = harness();
+  review.open("img", settings());
+  await flush();
+  done(review, host.last("develop_preview"));
+  review.setZoom(1);
+  await flush();
+  const full = host.last("develop_full");
+  done(review, full);
+  ready(review, full);
+  await flush();
+  const before = host.calls.length;
+  // The filmstrip collapses, then the window grows.
+  review.setLongEdge(1300);
+  review.setLongEdge(2400);
+  await flush();
+  assert.equal(host.calls.length, before, "no develop while zoomed");
+  assert.equal(view().after.exact, true);
+  review.setZoom("fit");
+  await flush();
+  assert.equal(host.count("develop_full"), 1);
+  assert.equal(host.last("develop_preview").longEdge, 2560);
+});
+
 test("a settings change at 100% sends exactly one develop_full and keeps the old frame up", async () => {
   const { host, review, view } = harness();
   review.open("img", settings());

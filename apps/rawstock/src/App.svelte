@@ -753,6 +753,9 @@
       case "zoom-200":
         zoom = 2;
         break;
+      case "split":
+        split = !split;
+        break;
       case "before-after":
         compare = !compare;
         break;
@@ -816,6 +819,13 @@
       stock: { id: stock.id, revision: stock.revision },
     });
     notice = `${stock.name}, revision ${stock.revision}`;
+  }
+
+  /** Folds the strip at once, then saves it so the next launch matches. */
+  function collapseFilmstrip(collapsed: boolean) {
+    const next = Prefs.withFilmstrip(appSettings, collapsed);
+    appSettings = next;
+    void changeAppSettings(next);
   }
 
   async function changeAppSettings(next: AppSettings) {
@@ -970,7 +980,7 @@
     <button type="button" aria-pressed={zoom === "fit"} aria-keyshortcuts="{modLabel}+0" onclick={() => (zoom = "fit")}>Fit</button>
     <button type="button" aria-pressed={zoom === 1} aria-keyshortcuts="{modLabel}+1" onclick={() => (zoom = 1)}>100%</button>
     <button type="button" aria-pressed={zoom === 2} aria-keyshortcuts="{modLabel}+2" onclick={() => (zoom = 2)}>200%</button>
-    <button type="button" aria-pressed={split} onclick={() => (split = !split)}>Split</button>
+    <button type="button" aria-pressed={split} aria-keyshortcuts="Y" onclick={() => (split = !split)}>Split</button>
     <button type="button" aria-pressed={compare} aria-keyshortcuts={"\\"} onclick={() => (compare = !compare)}>Before/After</button>
     <button type="button" aria-pressed={clipping} aria-keyshortcuts="J" onclick={() => (clipping = !clipping)}>Clipping</button>
   </header>
@@ -1001,29 +1011,37 @@
   {/if}
 
   <div class="workspace">
-    <Filmstrip images={images} selected={selected} onselect={(id) => void activate(id)} />
-    <Viewer
-      view={review}
-      active={selected !== "" && !openProblem}
-      {zoom}
-      {split}
-      showBefore={compare}
-      {clipping}
-      fileName={selectedImage?.fileName ?? ""}
-      problem={openProblem}
-      {dropActive}
-      onopen={() => void perform("open")}
-      edit={settings.geometry}
-      {horizon}
-      onzoom={(next) => (zoom = next)}
-      onregion={viewChanged}
-      oncrop={editCrop}
-      onstraighten={editStraighten}
-      onsize={(edge) => {
-        viewLongEdge = Math.max(1, Math.round(edge));
-        reviewer?.setLongEdge(viewLongEdge);
-      }}
-    />
+    <div class="stage">
+      <Viewer
+        view={review}
+        active={selected !== "" && !openProblem}
+        {zoom}
+        {split}
+        showBefore={compare}
+        {clipping}
+        fileName={selectedImage?.fileName ?? ""}
+        problem={openProblem}
+        {dropActive}
+        onopen={() => void perform("open")}
+        edit={settings.geometry}
+        {horizon}
+        onzoom={(next) => (zoom = next)}
+        onregion={viewChanged}
+        oncrop={editCrop}
+        onstraighten={editStraighten}
+        onsize={(edge) => {
+          viewLongEdge = Math.max(1, Math.round(edge));
+          reviewer?.setLongEdge(viewLongEdge);
+        }}
+      />
+      <Filmstrip
+        {images}
+        {selected}
+        collapsed={appSettings.layout?.filmstripCollapsed === true}
+        onselect={(id) => void activate(id)}
+        oncollapse={collapseFilmstrip}
+      />
+    </div>
     <SidePanel
       stocks={browserStocks}
       {thumbnails}
