@@ -15,27 +15,20 @@ const stock = (id, name, category, model = "parametric", revision = 1) => ({
 const catalog = [
   stock("velvia", "Velvia", "fujiSim"),
   stock("portra400", "Kodak Portra 400", "colorNegative", "spectral", 5),
-  stock("neutral", "Neutral", "colorNegative"),
+  stock("neutral", "Neutral", "reference"),
   stock("ilford-hp5-plus", "Ilford HP5 Plus", "bw", "spectral", 4),
   stock("provia", "Provia", "fujiSim"),
 ];
 
-test("the shipped app hides the development stock", () => {
-  assert.deepEqual(
-    StockBrowser.visible(catalog, false).map((item) => item.id),
-    ["velvia", "portra400", "ilford-hp5-plus", "provia"],
-  );
-  assert.equal(StockBrowser.visible(catalog, true).length, catalog.length);
-});
-
 test("groups keep a fixed order, sort names, and drop empty categories", () => {
-  const groups = StockBrowser.groups(StockBrowser.visible(catalog, false));
+  const groups = StockBrowser.groups(catalog);
   assert.deepEqual(
     groups.map((group) => group.label),
-    ["Color negative", "Black and white", "Fuji simulation"],
+    ["Reference", "Color negative", "Black and white", "Fuji simulation"],
   );
+  assert.deepEqual(groups[0].stocks.map((item) => item.id), ["neutral"]);
   assert.deepEqual(
-    groups[2].stocks.map((item) => item.id),
+    groups[3].stocks.map((item) => item.id),
     ["provia", "velvia"],
   );
 });

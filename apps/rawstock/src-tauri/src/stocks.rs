@@ -133,6 +133,7 @@ mod tests {
         assert!(velvia.controls.grain);
         assert!(!velvia.controls.dye);
         let neutral = stocks.iter().find(|stock| stock.id == "neutral").unwrap();
+        assert_eq!(neutral.category, StockCategory::Reference);
         assert!(!neutral.controls.dye);
         assert!(!neutral.controls.grain);
         assert!(!neutral.controls.contrast);
