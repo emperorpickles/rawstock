@@ -12,6 +12,21 @@ export interface FrameRect {
   height: number;
 }
 
+export interface Point {
+  x: number;
+  y: number;
+}
+
+/** A 2D affine map, in canvas `setTransform` order: x' = a·x + c·y + e. */
+export interface Affine {
+  a: number;
+  b: number;
+  c: number;
+  d: number;
+  e: number;
+  f: number;
+}
+
 const ASPECTS: readonly AspectId[] = ["original", "free", "3:2", "4:3", "1:1", "16:9"];
 
 export class GeometryView {
@@ -41,6 +56,98 @@ export class GeometryView {
       width,
       height,
     };
+  }
+}
+
+/**
+ * The edit's framing, as `rawstock_core::geometry::Framing` applies it to an
+ * export. Quarter turns rotate the camera frame clockwise. Straighten turns
+ * that frame about its centre, clockwise for a positive angle, and scales
+ * it so the rotated image still covers the whole turned frame. The crop is
+ * normalised in that frame. One frame unit is one export pixel.
+ */
+export class Framing {
+  /** The smallest scale at which the rotated image covers the frame. */
+  static coverScale(degrees: number, width: number, height: number): number {
+    if (Math.abs(degrees) < 1e-6 || !(width > 0) || !(height > 0)) {
+      return 1;
+    }
+    const radians = (Math.abs(degrees) * Math.PI) / 180;
+    const sin = Math.sin(radians);
+    const cos = Math.cos(radians);
+    return Math.max(cos + (sin * height) / width, cos + (sin * width) / height);
+  }
+
+  /** Camera-frame pixels to turned, straightened frame units. */
+  static imageToFrame(imageWidth: number, imageHeight: number, quarterTurns: number, degrees: number): Affine {
+    const turns = ((quarterTurns % 4) + 4) % 4;
+    const frame = GeometryView.orientedSize(imageWidth, imageHeight, turns);
+    const scale = Framing.coverScale(degrees, frame.width, frame.height);
+    // Exact quarter turns, then the straighten angle.
+    const [turnCos, turnSin] = [
+      [1, 0],
+      [0, 1],
+      [-1, 0],
+      [0, -1],
+    ][turns];
+    const radians = (degrees * Math.PI) / 180;
+    const cos = Math.cos(radians);
+    const sin = Math.sin(radians);
+    const a = scale * (cos * turnCos - sin * turnSin);
+    const b = scale * (sin * turnCos + cos * turnSin);
+    const c = -b;
+    const d = a;
+    const cx = imageWidth / 2;
+    const cy = imageHeight / 2;
+    return {
+      a,
+      b,
+      c,
+      d,
+      e: frame.width / 2 - (a * cx + c * cy),
+      f: frame.height / 2 - (b * cx + d * cy),
+    };
+  }
+
+  static apply(map: Affine, point: Point): Point {
+    return { x: map.a * point.x + map.c * point.y + map.e, y: map.b * point.x + map.d * point.y + map.f };
+  }
+
+  static invert(map: Affine): Affine {
+    const det = map.a * map.d - map.b * map.c;
+    const a = map.d / det;
+    const b = -map.b / det;
+    const c = -map.c / det;
+    const d = map.a / det;
+    return { a, b, c, d, e: -(a * map.e + c * map.f), f: -(b * map.e + d * map.f) };
+  }
+
+  /** `first`, then `second`. */
+  static then(first: Affine, second: Affine): Affine {
+    return {
+      a: second.a * first.a + second.c * first.b,
+      b: second.b * first.a + second.d * first.b,
+      c: second.a * first.c + second.c * first.d,
+      d: second.b * first.c + second.d * first.d,
+      e: second.a * first.e + second.c * first.f + second.e,
+      f: second.b * first.e + second.d * first.f + second.f,
+    };
+  }
+
+  /** Whole camera-frame pixels under a frame rectangle, clipped to the image. */
+  static imageBounds(map: Affine, rect: FrameRect, imageWidth: number, imageHeight: number): FrameRect {
+    const back = Framing.invert(map);
+    const corners = [
+      { x: rect.x, y: rect.y },
+      { x: rect.x + rect.width, y: rect.y },
+      { x: rect.x, y: rect.y + rect.height },
+      { x: rect.x + rect.width, y: rect.y + rect.height },
+    ].map((corner) => Framing.apply(back, corner));
+    const x0 = Math.max(0, Math.floor(Math.min(...corners.map((p) => p.x)) + 1e-9));
+    const y0 = Math.max(0, Math.floor(Math.min(...corners.map((p) => p.y)) + 1e-9));
+    const x1 = Math.min(imageWidth, Math.ceil(Math.max(...corners.map((p) => p.x)) - 1e-9));
+    const y1 = Math.min(imageHeight, Math.ceil(Math.max(...corners.map((p) => p.y)) - 1e-9));
+    return { x: x0, y: y0, width: Math.max(0, x1 - x0), height: Math.max(0, y1 - y0) };
   }
 }
 
@@ -239,6 +346,11 @@ export class CropMath {
     }
     // Adding zero turns a horizontal line's -0 into 0.
     return Math.min(45, Math.max(-45, -degrees)) + 0;
+  }
+
+  /** The straighten angle after levelling a line drawn on a photo already turned by `base`. */
+  static levelled(base: number, horizon: number): number {
+    return Math.min(45, Math.max(-45, base + horizon)) + 0;
   }
 
   private static place(x: number, y: number, w: number, h: number): CropRect {

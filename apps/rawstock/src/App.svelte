@@ -126,6 +126,14 @@
   let committed = $state<EditSettings | null>(null);
   let resetting = $state(false);
   let horizon = $state(false);
+  /** The straighten slider is moving: the viewer shows its level grid. */
+  let straightening = $state(false);
+  /**
+   * The develop part of the last preview asked for, and of the last settled
+   * one. Geometry is not part of it: frames stay in camera orientation and
+   * the viewer frames them, so a crop or straighten never develops again.
+   */
+  let previewKeys = { requested: "", settled: "" };
   let viewLongEdge = $state(720);
   let closing = false;
   let previewBusy = false;
@@ -510,6 +518,8 @@
       }
       notice = info.fileName;
       horizon = false;
+      straightening = false;
+      previewKeys = { requested: "", settled: "" };
       if (!info.error) {
         requestPreview(current, "settle");
       }
@@ -546,6 +556,7 @@
     if (!selected || selectedImage?.error) {
       return;
     }
+    straightening = next.geometry.straightenDeg !== (committed ?? settings).geometry.straightenDeg;
     settings = next;
     history.preview(selected, next);
     requestPreview(next, "drag");
@@ -555,6 +566,7 @@
     if (!selected || selectedImage?.error) {
       return;
     }
+    straightening = false;
     settings = next;
     committed = next;
     if (history.commit(selected, next)) {
@@ -567,6 +579,14 @@
   function requestPreview(next: EditSettings, phase: "drag" | "settle") {
     if (!host || !selected || selectedImage?.error) {
       return;
+    }
+    const key = ReviewController.developKey(next);
+    if (key === previewKeys.requested && (phase === "drag" || key === previewKeys.settled)) {
+      return;
+    }
+    previewKeys.requested = key;
+    if (phase === "settle") {
+      previewKeys.settled = key;
     }
     previewPending = { settings: next, phase, imageId: selected };
     if (!previewBusy) {
@@ -1015,6 +1035,7 @@
       onopen={() => void perform("open")}
       edit={settings.geometry}
       {horizon}
+      guides={straightening}
       onzoom={(next) => (zoom = next)}
       onregion={viewChanged}
       oncrop={editCrop}

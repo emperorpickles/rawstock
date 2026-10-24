@@ -16,10 +16,12 @@
 //! The edit maps onto the stock as it ships: exposure and print exposure
 //! are offsets from the stock's own values, dye scales and grain amount are
 //! multipliers, and halation overrides the stock's threshold, radius, and
-//! red weight. Preview and full frames stay in camera orientation: the
-//! viewer draws the edit's quarter turns and crop itself, and its pan
-//! regions are in that frame. An export applies the turns, then the crop. Straighten, contrast, grain size, scan looks and custom
-//! white balance are recorded on the edit but not developed yet.
+//! red weight. Preview and full frames stay in camera orientation, so a
+//! geometry edit never develops again: the viewer draws the edit's quarter
+//! turns, straighten and crop itself, and its pan regions are in that
+//! frame. An export frames the developed JPEG with the same
+//! [`rawstock_core::geometry::Framing`]. Contrast, grain size, scan looks
+//! and custom white balance are recorded on the edit but not developed yet.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -28,7 +30,7 @@ use std::thread;
 use std::time::Duration;
 
 use rawstock_core::color::LinearImage;
-use rawstock_core::decode::{Orientation, RawImage};
+use rawstock_core::decode::RawImage;
 use rawstock_core::gpu::Gpu;
 use rawstock_core::render::{DevelopControl, Jpeg, Parameters, SrgbImage, Stage};
 use rawstock_core::session::PreviewSession;
@@ -474,36 +476,13 @@ impl ExportFile {
         settings: &EditSettings,
         target: &ExportTarget,
     ) -> Result<(PathBuf, u32, u32), String> {
-        let turns = Orientation::quarters(settings.geometry.quarter_turns);
-        let (width, height, rgb) = turns.apply_rgb(width, height, &rgb);
-        let (width, height, rgb) = match settings.geometry.crop {
-            Some(crop) => Self::crop(&rgb, width, height, [crop.x, crop.y, crop.w, crop.h]),
-            None => (width, height, rgb),
-        };
+        let (width, height, rgb) = settings.geometry.framing().apply_rgb8(width, height, &rgb);
         let bytes =
             Jpeg::encode(&rgb, width, height, target.quality).map_err(|error| error.to_string())?;
         let partial = export_dest::partial_path(&target.destination);
         std::fs::write(&partial, bytes)
             .map_err(|error| format!("{}: {error}", partial.display()))?;
         Ok((partial, width, height))
-    }
-
-    /// Crop RGB8 rows to `[x, y, w, h]` in normalised coordinates of the
-    /// upright frame, rounding outward like the thumbnail crop.
-    fn crop(rgb: &[u8], width: u32, height: u32, rect: [f64; 4]) -> (u32, u32, Vec<u8>) {
-        let [x, y, w, h] = rect;
-        let left = ((x * f64::from(width)).floor() as u32).min(width.saturating_sub(1));
-        let top = ((y * f64::from(height)).floor() as u32).min(height.saturating_sub(1));
-        let right = ((x + w) * f64::from(width)).ceil().min(f64::from(width)) as u32;
-        let bottom = ((y + h) * f64::from(height)).ceil().min(f64::from(height)) as u32;
-        let columns = right.max(left + 1) - left;
-        let rows = bottom.max(top + 1) - top;
-        let mut out = Vec::with_capacity(columns as usize * rows as usize * 3);
-        for row in top..top + rows {
-            let start = (row as usize * width as usize + left as usize) * 3;
-            out.extend_from_slice(&rgb[start..start + columns as usize * 3]);
-        }
-        (columns, rows, out)
     }
 }
 
@@ -599,11 +578,6 @@ mod tests {
 
     #[test]
     fn export_crops_and_writes_only_the_partial() {
-        let rgb: Vec<u8> = (0..4 * 2).flat_map(|i| [i as u8; 3]).collect();
-        let (width, height, cropped) = ExportFile::crop(&rgb, 4, 2, [0.5, 0.5, 0.5, 0.5]);
-        assert_eq!((width, height), (2, 1));
-        assert_eq!(cropped, [6, 6, 6, 7, 7, 7]);
-
         let directory =
             std::env::temp_dir().join(format!("rawstock-export-file-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();

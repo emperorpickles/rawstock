@@ -2,7 +2,8 @@
   import CropOverlay from "./CropOverlay.svelte";
   import type { CropRect, GeometryEdit } from "./contract";
   import type { PackedFrame } from "./frame";
-  import { CropMath, GeometryView } from "./geometry";
+  import { CropMath, Framing, GeometryView } from "./geometry";
+  import type { Affine } from "./geometry";
   import { Clipping, Divider, Viewport } from "./review/review";
   import type { Layer, Rect, ReviewView, Side, Zoom } from "./review/review";
 
@@ -18,6 +19,7 @@
     dropActive = false,
     edit = null,
     horizon = false,
+    guides = false,
     onopen,
     onzoom,
     onregion,
@@ -37,6 +39,8 @@
     dropActive?: boolean;
     edit?: GeometryEdit | null;
     horizon?: boolean;
+    /** Show the straighten grid, while the straighten slider moves. */
+    guides?: boolean;
     onopen: () => void;
     onzoom: (zoom: Zoom) => void;
     /** Visible image rectangle at 100% or 200%, in image pixels. */
@@ -74,28 +78,23 @@
   const decoding = new Set<PackedFrame>();
   const masking = new Set<PackedFrame>();
   let shown: Record<Side, Layer | null> = { after: null, before: null };
-  let line = $state<{ x: number; y: number; cx: number; cy: number } | null>(null);
+  let line = $state<{ x: number; y: number; cx: number; cy: number; base: number } | null>(null);
+  /** The framed photo on screen, in CSS pixels. The crop overlay sits on it. */
+  let frameBox = $state<{ left: number; top: number; width: number; height: number } | null>(null);
 
   const turns = $derived((((edit?.quarterTurns ?? 0) % 4) + 4) % 4);
   const straighten = $derived(edit?.straightenDeg ?? 0);
+  /** The turned, straightened frame: the export's pixels before the crop. */
   const oriented = $derived(
     view && view.width > 0 ? GeometryView.orientedSize(view.width, view.height, turns) : { width: 0, height: 0 },
+  );
+  const toFrame = $derived<Affine | null>(
+    view && view.width > 0 ? Framing.imageToFrame(view.width, view.height, turns, straighten) : null,
   );
   const shownCrop = $derived(edit?.crop ?? { x: 0, y: 0, w: 1, h: 1 });
   const lockRatio = $derived(
     CropMath.pixelRatio(CropMath.infer(edit?.crop, oriented.width, oriented.height), oriented.width, oriented.height),
   );
-  /** Fit placement of the oriented frame, in CSS pixels, matching the 8 px gutter. */
-  const cropBox = $derived.by(() => {
-    if (zoom !== "fit" || oriented.width <= 0 || viewWidth <= 0 || viewHeight <= 0) {
-      return null;
-    }
-    const ratio = window.devicePixelRatio || 1;
-    const scale = Viewport.fitScale(oriented.width, oriented.height, viewWidth * ratio, viewHeight * ratio, GUTTER * ratio);
-    const width = (oriented.width * scale) / ratio;
-    const height = (oriented.height * scale) / ratio;
-    return { left: (viewWidth - width) / 2, top: (viewHeight - height) / 2, width, height };
-  });
 
   const hasLayer = $derived(view !== null && (view.after !== null || view.before !== null));
   const zoomLabel = $derived(zoom === "fit" ? "Fit" : `${zoom * 100}%`);
@@ -127,7 +126,7 @@
 
   $effect(() => {
     // Redraw whenever anything drawn changes.
-    void [view, zoom, split, showBefore, clipping, divider, viewWidth, viewHeight, canvas, edit];
+    void [view, zoom, split, showBefore, clipping, divider, viewWidth, viewHeight, canvas, edit, toFrame];
     if (view?.imageId !== shownImage) {
       shownImage = view?.imageId ?? "";
       center = { x: 0.5, y: 0.5 };
@@ -223,15 +222,19 @@
     frameRequest = requestAnimationFrame(draw);
   }
 
+  /**
+   * Zoom and pan work in the framed photo, so 100% is one export pixel per
+   * device pixel and the pan follows the turned, straightened frame.
+   */
   function geometry() {
     const ratio = window.devicePixelRatio || 1;
     const width = Math.max(1, Math.floor(viewWidth * ratio));
     const height = Math.max(1, Math.floor(viewHeight * ratio));
-    const imageWidth = view?.width ?? 0;
-    const imageHeight = view?.height ?? 0;
+    const frameWidth = oriented.width;
+    const frameHeight = oriented.height;
     const gutter = GUTTER * ratio;
-    const scale = Viewport.scale(zoom, imageWidth, imageHeight, width, height, gutter);
-    return { ratio, width, height, imageWidth, imageHeight, gutter, scale };
+    const scale = Viewport.scale(zoom, frameWidth, frameHeight, width, height, gutter);
+    return { ratio, width, height, frameWidth, frameHeight, gutter, scale };
   }
 
   function draw() {
@@ -239,7 +242,7 @@
     if (!node || viewWidth === 0 || viewHeight === 0) {
       return;
     }
-    const { ratio, width, height, imageWidth, imageHeight, gutter, scale } = geometry();
+    const { ratio, width, height, frameWidth, frameHeight, gutter, scale } = geometry();
     if (node.width !== width || node.height !== height) {
       node.width = width;
       node.height = height;
@@ -250,12 +253,15 @@
     }
     context.setTransform(1, 0, 0, 1, 0, 0);
     context.clearRect(0, 0, width, height);
-    if (!view || imageWidth === 0 || imageHeight === 0) {
+    if (!view || !toFrame || frameWidth === 0 || frameHeight === 0) {
+      placeFrame(null);
       return;
     }
-    center = Viewport.clampCenter(center, imageWidth, imageHeight, width, height, scale, gutter);
-    const origin = Viewport.origin(center, imageWidth, imageHeight, width, height, scale);
-    const visible = Viewport.visibleRect(center, imageWidth, imageHeight, width, height, scale);
+    center = Viewport.clampCenter(center, frameWidth, frameHeight, width, height, scale, gutter);
+    const origin = Viewport.origin(center, frameWidth, frameHeight, width, height, scale);
+    const shownFrame = Viewport.visibleRect(center, frameWidth, frameHeight, width, height, scale);
+    // The camera-frame pixels under the visible part of the frame.
+    const visible = Framing.imageBounds(toFrame, shownFrame, view.width, view.height);
     if (zoom !== "fit") {
       const key = `${view.imageId}:${visible.x}:${visible.y}:${visible.width}:${visible.height}`;
       if (key !== reported) {
@@ -263,6 +269,12 @@
         onregion(visible);
       }
     }
+    placeFrame({
+      left: origin.x / ratio,
+      top: origin.y / ratio,
+      width: (frameWidth * scale) / ratio,
+      height: (frameHeight * scale) / ratio,
+    });
 
     const splitAt = Math.round(divider * width);
     const panes: Array<{ side: Side; from: number; to: number }> = showBefore
@@ -274,62 +286,46 @@
           ]
         : [{ side: "after", from: 0, to: width }];
 
-    const rotatedFit = zoom === "fit" && (turns !== 0 || straighten !== 0) && cropBox !== null;
+    const toCanvas = Framing.then(toFrame, { a: scale, b: 0, c: 0, d: scale, e: origin.x, f: origin.y });
+    // Whole pixels stay sharp only when the straighten angle is level.
+    const level = Math.abs(straighten) < 1e-6;
     for (const pane of panes) {
       const layer = current(pane.side);
       if (!layer || pane.to <= pane.from) {
         continue;
       }
+      const left = Math.max(pane.from, origin.x);
+      const right = Math.min(pane.to, origin.x + frameWidth * scale);
+      if (right <= left) {
+        continue;
+      }
       context.save();
       context.beginPath();
-      context.rect(pane.from, 0, pane.to - pane.from, height);
+      // The frame's edge is the export's edge; a straightened photo's
+      // overhang is not drawn.
+      context.rect(left, origin.y, right - left, frameHeight * scale);
       context.clip();
-      if (rotatedFit && cropBox) {
-        paintRotated(context, bitmaps.get(layer.frame), layer, ratio);
-        if (clipping) {
-          paintRotated(context, masks.get(layer.frame), layer, ratio);
-        }
-      } else {
-        paint(context, bitmaps.get(layer.frame), layer, visible, origin, scale);
-        if (clipping) {
-          paint(context, masks.get(layer.frame), layer, visible, origin, scale, true);
-        }
+      context.setTransform(toCanvas.a, toCanvas.b, toCanvas.c, toCanvas.d, toCanvas.e, toCanvas.f);
+      paint(context, bitmaps.get(layer.frame), layer, visible, level && layer.exact && scale >= 1);
+      if (clipping) {
+        paint(context, masks.get(layer.frame), layer, visible, true);
       }
       context.restore();
     }
   }
 
-  /** Straighten and quarter-turns, drawn under the upright crop at fit. */
-  function paintRotated(
-    context: CanvasRenderingContext2D,
-    bitmap: ImageBitmap | undefined,
-    layer: Layer,
-    ratio: number,
-  ) {
-    if (!bitmap || !cropBox || view === null) {
-      return;
+  function placeFrame(next: { left: number; top: number; width: number; height: number } | null) {
+    const same =
+      next === frameBox ||
+      (next !== null &&
+        frameBox !== null &&
+        Math.abs(next.left - frameBox.left) < 0.01 &&
+        Math.abs(next.top - frameBox.top) < 0.01 &&
+        Math.abs(next.width - frameBox.width) < 0.01 &&
+        Math.abs(next.height - frameBox.height) < 0.01);
+    if (!same) {
+      frameBox = next;
     }
-    const pixel = (cropBox.width * ratio) / Math.max(1, oriented.width);
-    context.save();
-    context.translate((cropBox.left + cropBox.width / 2) * ratio, (cropBox.top + cropBox.height / 2) * ratio);
-    context.rotate((straighten * Math.PI) / 180);
-    context.rotate((turns * Math.PI) / 2);
-    context.scale(pixel, pixel);
-    context.imageSmoothingEnabled = !(layer.exact && pixel >= 1);
-    // The proxy is the whole unrotated frame. Stretch it to the file size,
-    // then the scale above fits that into the upright crop box.
-    context.drawImage(
-      bitmap,
-      0,
-      0,
-      bitmap.width,
-      bitmap.height,
-      -view.width / 2,
-      -view.height / 2,
-      view.width,
-      view.height,
-    );
-    context.restore();
   }
 
   /** The newest decoded layer for a side, else the one already on screen. */
@@ -342,14 +338,13 @@
     return layer && bitmaps.has(layer.frame) ? layer : null;
   }
 
+  /** The part of a layer under `visible`, drawn in camera-frame pixels. */
   function paint(
     context: CanvasRenderingContext2D,
     bitmap: ImageBitmap | undefined,
     layer: Layer,
     visible: Rect,
-    origin: { x: number; y: number },
-    scale: number,
-    nearest = false,
+    nearest: boolean,
   ) {
     if (!bitmap) {
       return;
@@ -361,49 +356,37 @@
     const fx = layer.frame.width / layer.rect.width;
     const fy = layer.frame.height / layer.rect.height;
     // Full-resolution pixels are never smoothed at 100% and 200%.
-    context.imageSmoothingEnabled = !nearest && !(layer.exact && scale >= 1);
+    context.imageSmoothingEnabled = !nearest;
     context.imageSmoothingQuality = "high";
-    const tilted = view !== null && (turns !== 0 || straighten !== 0);
-    if (tilted && view) {
-      const cx = origin.x + (view.width * scale) / 2;
-      const cy = origin.y + (view.height * scale) / 2;
-      context.save();
-      context.translate(cx, cy);
-      context.rotate((straighten * Math.PI) / 180);
-      context.rotate((turns * Math.PI) / 2);
-      context.translate(-cx, -cy);
-    }
     context.drawImage(
       bitmap,
       (area.x - layer.rect.x) * fx,
       (area.y - layer.rect.y) * fy,
       area.width * fx,
       area.height * fy,
-      origin.x + area.x * scale,
-      origin.y + area.y * scale,
-      area.width * scale,
-      area.height * scale,
+      area.x,
+      area.y,
+      area.width,
+      area.height,
     );
-    if (tilted) {
-      context.restore();
-    }
   }
 
   function panBy(dx: number, dy: number) {
-    const { ratio, imageWidth, imageHeight, scale } = geometry();
-    if (imageWidth === 0 || imageHeight === 0) {
+    const { ratio, frameWidth, frameHeight, scale } = geometry();
+    if (frameWidth === 0 || frameHeight === 0) {
       return;
     }
     center = {
-      x: center.x - (dx * ratio) / (imageWidth * scale),
-      y: center.y - (dy * ratio) / (imageHeight * scale),
+      x: center.x - (dx * ratio) / (frameWidth * scale),
+      y: center.y - (dy * ratio) / (frameHeight * scale),
     };
     redraw();
   }
 
   function pointerDown(event: PointerEvent) {
-    if (horizon && zoom === "fit" && cropBox && event.button === 0) {
-      line = { x: event.clientX, y: event.clientY, cx: event.clientX, cy: event.clientY };
+    if (horizon && frameBox && event.button === 0) {
+      // The photo on screen is already straightened by `base`.
+      line = { x: event.clientX, y: event.clientY, cx: event.clientX, cy: event.clientY, base: straighten };
       (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
       return;
     }
@@ -421,7 +404,7 @@
       line = { ...line, cx: event.clientX, cy: event.clientY };
       const degrees = CropMath.horizon(line.x, line.y, event.clientX, event.clientY);
       if (degrees != null) {
-        onstraighten?.(degrees, false);
+        onstraighten?.(CropMath.levelled(line.base, degrees), false);
       }
       return;
     }
@@ -436,9 +419,13 @@
   function pointerUp(event: PointerEvent) {
     if (line) {
       const degrees = CropMath.horizon(line.x, line.y, event.clientX, event.clientY);
+      const base = line.base;
       line = null;
       if (degrees != null) {
-        onstraighten?.(degrees, true);
+        onstraighten?.(CropMath.levelled(base, degrees), true);
+      } else if (base !== straighten) {
+        // A line too short to read puts the angle back.
+        onstraighten?.(base, false);
       }
       return;
     }
@@ -462,12 +449,12 @@
       onzoom("fit");
       return;
     }
-    const { ratio, width, height, imageWidth, imageHeight, scale } = geometry();
+    const { ratio, width, height, frameWidth, frameHeight, scale } = geometry();
     const bounds = canvas.getBoundingClientRect();
     const pointer = { x: (event.clientX - bounds.left) * ratio, y: (event.clientY - bounds.top) * ratio };
-    const fitCenter = Viewport.clampCenter(center, imageWidth, imageHeight, width, height, scale, 0);
-    const pixel = Viewport.imageAt(pointer, fitCenter, imageWidth, imageHeight, width, height, scale);
-    center = Viewport.centerKeeping(pixel, pointer, imageWidth, imageHeight, width, height, 1);
+    const fitCenter = Viewport.clampCenter(center, frameWidth, frameHeight, width, height, scale, 0);
+    const pixel = Viewport.imageAt(pointer, fitCenter, frameWidth, frameHeight, width, height, scale);
+    center = Viewport.centerKeeping(pixel, pointer, frameWidth, frameHeight, width, height, 1);
     onzoom(1);
   }
 
@@ -530,13 +517,23 @@
       onpointercancel={pointerUp}
       ondblclick={doubleClick}
     ></canvas>
-    {#if cropBox && oncrop && !horizon}
+    {#if frameBox && (line || guides)}
+      <div
+        class="guides"
+        aria-hidden="true"
+        style:left="{frameBox.left}px"
+        style:top="{frameBox.top}px"
+        style:width="{frameBox.width}px"
+        style:height="{frameBox.height}px"
+      ></div>
+    {/if}
+    {#if frameBox && hasLayer && oncrop && !horizon}
       <div
         class="edit-frame"
-        style:left="{cropBox.left}px"
-        style:top="{cropBox.top}px"
-        style:width="{cropBox.width}px"
-        style:height="{cropBox.height}px"
+        style:left="{frameBox.left}px"
+        style:top="{frameBox.top}px"
+        style:width="{frameBox.width}px"
+        style:height="{frameBox.height}px"
       >
         <CropOverlay
           crop={shownCrop}
@@ -544,6 +541,7 @@
           height={oriented.height}
           {lockRatio}
           disabled={!active}
+          movable={zoom === "fit"}
           onpreview={(crop) => oncrop(crop, false)}
           oncommit={(crop) => oncrop(crop, true)}
         />
@@ -665,8 +663,15 @@
     pointer-events: none;
   }
 
-  .edit-frame :global(.crop) {
-    pointer-events: auto;
+  /* A level grid while straightening, a fixed size on screen at any zoom. */
+  .guides {
+    position: absolute;
+    pointer-events: none;
+    background-image:
+      linear-gradient(to right, rgba(242, 242, 242, 0.35) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(242, 242, 242, 0.35) 1px, transparent 1px);
+    background-size: 48px 48px;
+    background-position: center;
   }
 
   .horizon {
