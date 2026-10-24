@@ -49,6 +49,7 @@
   import { Shortcuts } from "./lib/shortcuts";
   import SidePanel from "./lib/SidePanel.svelte";
   import { StockBrowser, ThumbnailRequests } from "./lib/stockBrowser";
+  import { StripOrder } from "./lib/strip";
   import Viewer from "./lib/Viewer.svelte";
 
   type PreviewTerminal =
@@ -122,6 +123,9 @@
   let review = $state<ReviewView | null>(null);
   /** Stock thumbnails for `thumbnailImage`, by stock id. */
   let thumbnails = $state<Record<string, PackedFrame>>({});
+  /** Filmstrip pictures by image id, replaced as better ones land. */
+  let stripFrames = $state<Record<string, PackedFrame>>({});
+  let stripSent = "";
   let thumbnailImage = "";
   /** Last committed edit. Thumbnails follow it, never a slider mid-drag. */
   let committed = $state<EditSettings | null>(null);
@@ -176,6 +180,32 @@
     asShot && asShot.imageId === selected ? asShot.value : selectedImage?.error ? null : undefined,
   );
   const browserStocks = $derived(StockBrowser.visible(stocks, import.meta.env.DEV));
+
+  // Every photo in the strip is drawn with its own edit, nearest first. The
+  // selected photo uses its committed settings, so a slider drag does not
+  // redraw the strip until it settles.
+  $effect(() => {
+    const list = images;
+    const current = selected;
+    const edit = committed;
+    const starting = Prefs.startingStock(appSettings, stocks);
+    if (!host) {
+      return;
+    }
+    const requests = StripOrder.requests(list, current, (image) => {
+      if (image.imageId === current && edit) {
+        return edit;
+      }
+      return history.current(image.imageId) ?? baselineSettings(image, starting);
+    });
+    const key = StripOrder.key(requests);
+    if (key === stripSent) {
+      return;
+    }
+    stripSent = key;
+    // The strip is a convenience: a failure leaves the empty frames.
+    void host.renderStrip(requests).catch(() => {});
+  });
 
   $effect(() => {
     const imageId = selected;
@@ -388,6 +418,14 @@
           }
         }),
         host.onThumbnail((event) => void adoptThumbnail(event)),
+        host.onStripReady(async (event) => {
+          try {
+            const frame = await host.stripFrame(event.imageId);
+            stripFrames = { ...stripFrames, [event.imageId]: frame };
+          } catch {
+            // A newer queue dropped it. The next event brings it back.
+          }
+        }),
       ]);
       cleanups.push(...unlisten);
       try {
@@ -1090,6 +1128,7 @@
         {images}
         {selected}
         collapsed={appSettings.layout?.filmstripCollapsed === true}
+        frames={stripFrames}
         onselect={(id) => void activate(id)}
         oncollapse={collapseFilmstrip}
       />

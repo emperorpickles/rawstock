@@ -606,6 +606,60 @@ impl RawImage {
     }
 }
 
+/// The camera's own JPEG preview inside a RAW file, shrunk for a strip
+/// or grid. It is the camera's rendering, not a develop: use it only as a
+/// stand-in until a developed frame is ready.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EmbeddedPreview {
+    pub width: u32,
+    pub height: u32,
+    /// Packed 8-bit sRGB, three bytes a pixel, in sensor orientation.
+    pub rgb: Vec<u8>,
+    /// How the RAW says the frame should be turned for display.
+    pub orientation: Orientation,
+}
+
+impl EmbeddedPreview {
+    /// Read the largest embedded preview of `path`, shrunk so its long side
+    /// is at most `long_edge`. The sensor data is not unpacked. `Ok(None)`
+    /// when the file carries no preview.
+    pub fn read(path: impl AsRef<Path>, long_edge: u32) -> Result<Option<Self>, DecodeError> {
+        let path = path.as_ref();
+        let backend = |source: rawler::RawlerError| DecodeError::Backend {
+            path: path.display().to_string(),
+            source,
+        };
+        let source = rawler::rawsource::RawSource::new(path)
+            .map_err(|error| backend(rawler::RawlerError::DecoderFailed(error.to_string())))?;
+        let decoder = rawler::get_decoder(&source).map_err(backend)?;
+        let params = rawler::decoders::RawDecodeParams::default();
+        // `dummy` skips the sensor data and still reports the orientation.
+        let orientation = decoder
+            .raw_image(&source, &params, true)
+            .map(|raw| orientation_from(raw.orientation))
+            .unwrap_or(Orientation::Normal);
+        let image = match decoder.preview_image(&source, &params).map_err(backend)? {
+            Some(image) => image,
+            None => match decoder.thumbnail_image(&source, &params).map_err(backend)? {
+                Some(image) => image,
+                None => return Ok(None),
+            },
+        };
+        let edge = long_edge.max(1);
+        let rgb = if image.width() > edge || image.height() > edge {
+            image.thumbnail(edge, edge).to_rgb8()
+        } else {
+            image.to_rgb8()
+        };
+        Ok(Some(Self {
+            width: rgb.width(),
+            height: rgb.height(),
+            rgb: rgb.into_raw(),
+            orientation,
+        }))
+    }
+}
+
 impl fmt::Debug for RawImage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RawImage")

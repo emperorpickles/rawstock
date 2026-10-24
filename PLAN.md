@@ -72,6 +72,10 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   and halation, as-shot white balance, scan look, and crop, straighten, and
   rotate. Warm and neutral themes. A zoomed drag develops the full frame
   once on release, and preview events that beat the command are buffered.
+- 1.0 app Darkroom layout (#91): the filmstrip runs under the viewer and
+  folds away (`layout.filmstripCollapsed`), View > Split on `Y`. Strip
+  frames (#110) show the camera's embedded JPEG at once, then each photo
+  developed with its own edit (`strip.rs`, one thread, nearest first).
 
 ## In flight
 
@@ -121,10 +125,6 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   and a clipping overlay (`J`). Logic in `apps/rawstock/src/lib/review/`.
   The backend still returns the stub's placeholder frames until the real
   develop service lands.
-- **#91** — 1.0 app Darkroom layout (`agent: claude`, `stage: ready`,
-  waiting on Caleb's look review). The filmstrip runs under the viewer and
-  folds away (saved as `layout.filmstripCollapsed`). View > Split on `Y`.
-  A resize while zoomed no longer re-develops the proxy.
 - **#52, #53** — 1.0 app presets and export queue (`agent: claude`,
   `stage: holding`) until #39 and #41 land.
 - **#63** — Lavapipe apt timeout and retry in CI (`agent: grok`). GPU

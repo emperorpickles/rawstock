@@ -2,6 +2,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import { appError } from "./contract";
+import { FrameBuffer } from "./frame";
+import type { PackedFrame } from "./frame";
+import type { StripReady, StripRequest } from "./strip";
 import type { AppSettings, SettingsChanged } from "./preferences/settings";
 import type { AppInfo } from "./help/report";
 import type {
@@ -144,6 +147,20 @@ export class Host {
 
   async requestOpen(paths: string[]): Promise<void> {
     await this.invoke("request_open", { paths });
+  }
+
+  /** Queue filmstrip frames, most wanted first. Replaces the last queue. */
+  async renderStrip(items: StripRequest[]): Promise<void> {
+    await this.invoke("render_strip", { items });
+  }
+
+  async stripFrame(imageId: string): Promise<PackedFrame> {
+    const value = await this.invoke<ArrayBuffer | Uint8Array>("strip_frame", { imageId });
+    return FrameBuffer.decode(value);
+  }
+
+  onStripReady(handler: (event: StripReady) => void): Promise<UnlistenFn> {
+    return this.on("strip:ready", handler);
   }
 
   async takeStartupOpens(): Promise<string[]> {
