@@ -16,7 +16,9 @@
 //! The edit maps onto the stock as it ships: exposure and print exposure
 //! are offsets from the stock's own values, dye scales and grain amount are
 //! multipliers, and halation overrides the stock's threshold, radius, and
-//! red weight. An export also applies the crop. Straighten, contrast, grain size, scan looks and custom
+//! red weight. Preview and full frames stay in camera orientation: the
+//! viewer draws the edit's quarter turns and crop itself, and its pan
+//! regions are in that frame. An export applies the turns, then the crop. Straighten, contrast, grain size, scan looks and custom
 //! white balance are recorded on the edit but not developed yet.
 
 use std::collections::HashMap;
@@ -26,7 +28,7 @@ use std::thread;
 use std::time::Duration;
 
 use rawstock_core::color::LinearImage;
-use rawstock_core::decode::RawImage;
+use rawstock_core::decode::{Orientation, RawImage};
 use rawstock_core::gpu::Gpu;
 use rawstock_core::render::{DevelopControl, Jpeg, Parameters, SrgbImage, Stage};
 use rawstock_core::session::PreviewSession;
@@ -422,12 +424,6 @@ impl Opened {
                 session.set_halation_red(red).map_err(fail)?;
             }
         }
-        let turns = settings.geometry.quarter_turns % 4;
-        while session.quarter_turns() != turns {
-            session
-                .rotate_clockwise()
-                .map_err(|error| error.to_string())?;
-        }
         Ok(())
     }
 }
@@ -478,6 +474,8 @@ impl ExportFile {
         settings: &EditSettings,
         target: &ExportTarget,
     ) -> Result<(PathBuf, u32, u32), String> {
+        let turns = Orientation::quarters(settings.geometry.quarter_turns);
+        let (width, height, rgb) = turns.apply_rgb(width, height, &rgb);
         let (width, height, rgb) = match settings.geometry.crop {
             Some(crop) => Self::crop(&rgb, width, height, [crop.x, crop.y, crop.w, crop.h]),
             None => (width, height, rgb),
@@ -611,6 +609,7 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let destination = directory.join("out.jpg");
         let mut settings = EditSettings::default();
+        settings.geometry.quarter_turns = 1;
         settings.geometry.crop = Some(crate::contract::CropRect {
             x: 0.0,
             y: 0.0,
@@ -623,7 +622,7 @@ mod tests {
         };
         let (partial, width, height) =
             ExportFile::write_rgb8(vec![128; 8 * 6 * 3], 8, 6, &settings, &target).unwrap();
-        assert_eq!((width, height), (4, 3));
+        assert_eq!((width, height), (3, 4));
         assert_eq!(partial, export_dest::partial_path(&destination));
         assert!(!destination.exists());
         let bytes = std::fs::read(&partial).unwrap();
