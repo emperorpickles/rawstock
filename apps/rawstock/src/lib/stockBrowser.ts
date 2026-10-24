@@ -15,24 +15,19 @@ export interface StockGroup {
 }
 
 export class StockBrowser {
-  static readonly order: StockCategory[] = ["colorNegative", "slide", "bw", "fujiSim"];
+  /** Reference (the Neutral stock) leads, so every film can be read against it. */
+  static readonly order: StockCategory[] = ["reference", "colorNegative", "slide", "bw", "fujiSim"];
 
   static readonly labels: Record<StockCategory, string> = {
+    reference: "Reference",
     colorNegative: "Color negative",
     slide: "Slide",
     bw: "Black and white",
     fujiSim: "Fuji simulation",
   };
 
-  /** Development-only stocks. The shipped app hides them. */
-  static readonly devOnly = new Set(["neutral"]);
-
   /** Grid columns in the side panel. */
   static readonly columns = 2;
-
-  static visible(stocks: StockSummary[], dev: boolean): StockSummary[] {
-    return dev ? stocks : stocks.filter((stock) => !StockBrowser.devOnly.has(stock.id));
-  }
 
   /** Categories in a fixed order, empty ones dropped, names sorted. */
   static groups(stocks: StockSummary[]): StockGroup[] {

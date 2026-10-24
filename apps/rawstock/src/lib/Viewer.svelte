@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { Snippet } from "svelte";
   import CropOverlay from "./CropOverlay.svelte";
   import type { CropRect, GeometryEdit } from "./contract";
   import type { PackedFrame } from "./frame";
@@ -26,6 +27,8 @@
     oncrop,
     onstraighten,
     onsize,
+    beforeTag,
+    afterTag,
   }: {
     view?: ReviewView | null;
     /** An image is selected and can be developed. */
@@ -49,6 +52,10 @@
     onstraighten?: (degrees: number, commit: boolean) => void;
     /** The viewer's long edge in device pixels, for the proxy size. */
     onsize: (longEdge: number) => void;
+    /** Drawn in place of the Before badge, such as the A stock picker. */
+    beforeTag?: Snippet;
+    /** Drawn in place of the After badge, such as the B stock picker. */
+    afterTag?: Snippet;
   } = $props();
 
   /** The surround's neutral gutter around the photo, in CSS pixels. */
@@ -562,10 +569,8 @@
       <p class="developing" role="status">Developing {fileName}…</p>
     {:else}
       <div class="badges top-left">
-        {#if showBefore}
-          <span class="badge strong">Before</span>
-        {:else if split}
-          <span class="badge strong">Before</span>
+        {#if showBefore || split}
+          {#if beforeTag}{@render beforeTag()}{:else}<span class="badge strong">Before</span>{/if}
         {/if}
         <span class="badge mono">{zoomLabel}</span>
         {#if statusLabel}<span class="badge" role="status">{statusLabel}</span>{/if}
@@ -573,7 +578,7 @@
       </div>
       {#if split && !showBefore}
         <div class="badges top-right">
-          <span class="badge strong">After</span>
+          {#if afterTag}{@render afterTag()}{:else}<span class="badge strong">After</span>{/if}
         </div>
         <div
           class="divider"

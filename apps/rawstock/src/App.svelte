@@ -49,6 +49,8 @@
   import { Shortcuts } from "./lib/shortcuts";
   import SidePanel from "./lib/SidePanel.svelte";
   import { StockBrowser, ThumbnailRequests } from "./lib/stockBrowser";
+  import { StockCompare } from "./lib/stockCompare";
+  import StockPick from "./lib/StockPick.svelte";
   import Viewer from "./lib/Viewer.svelte";
 
   type PreviewTerminal =
@@ -97,6 +99,8 @@
   let zoom = $state<Zoom>("fit");
   let compare = $state(false);
   let split = $state(false);
+  /** The A stock split and before/after compare against. `null` is the photo as opened. */
+  let beforeStockId = $state<string | null>(null);
   let clipping = $state(false);
   let dropActive = $state(false);
   let exportOpen = $state(false);
@@ -175,12 +179,11 @@
   const selectedAsShot = $derived(
     asShot && asShot.imageId === selected ? asShot.value : selectedImage?.error ? null : undefined,
   );
-  const browserStocks = $derived(StockBrowser.visible(stocks, import.meta.env.DEV));
 
   $effect(() => {
     const imageId = selected;
     const edit = committed;
-    const list = browserStocks;
+    const list = stocks;
     const broken = selectedImage?.error != null;
     if (!host || !imageId || !edit || broken || list.length === 0) {
       return;
@@ -211,6 +214,10 @@
 
   $effect(() => {
     reviewer?.setCompare(compare || split);
+  });
+
+  $effect(() => {
+    reviewer?.setBeforeStock(StockCompare.resolve(stocks, beforeStockId));
   });
 
   function exportEvent(imageId: string, jobId: number): boolean {
@@ -856,6 +863,14 @@
     notice = `${stock.name}, revision ${stock.revision}`;
   }
 
+  function swapCompare() {
+    const swapped = StockCompare.swap(stocks, beforeStockId, settings.stock.id);
+    if (swapped) {
+      beforeStockId = swapped.before;
+      chooseStock(swapped.after);
+    }
+  }
+
   /** Folds the strip at once, then saves it so the next launch matches. */
   function collapseFilmstrip(collapsed: boolean) {
     const next = Prefs.withFilmstrip(appSettings, collapsed);
@@ -1085,7 +1100,35 @@
           viewLongEdge = Math.max(1, Math.round(edge));
           reviewer?.setLongEdge(viewLongEdge);
         }}
-      />
+      >
+        {#snippet beforeTag()}
+          <StockPick
+            letter="A"
+            label="Stock A, the left or before side"
+            {stocks}
+            value={StockCompare.resolve(stocks, beforeStockId)?.id ?? null}
+            allowOpened
+            disabled={adjustmentsDisabled}
+            onchange={(id) => (beforeStockId = id)}
+            onswap={swapCompare}
+          />
+        {/snippet}
+        {#snippet afterTag()}
+          <StockPick
+            letter="B"
+            label="Stock B, the edit"
+            {stocks}
+            value={settings.stock.id}
+            disabled={adjustmentsDisabled}
+            onchange={(id) => {
+              const stock = stocks.find((item) => item.id === id);
+              if (stock) {
+                chooseStock(stock);
+              }
+            }}
+          />
+        {/snippet}
+      </Viewer>
       <Filmstrip
         {images}
         {selected}
@@ -1095,7 +1138,7 @@
       />
     </div>
     <SidePanel
-      stocks={browserStocks}
+      stocks={stocks}
       {thumbnails}
       {settings}
       stockId={settings.stock.id}

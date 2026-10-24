@@ -164,7 +164,7 @@
         value={settings.newImage.defaultStockId ?? ""}
         onchange={(event) => setDefaultStock(event.currentTarget.value)}
       >
-        <option value="">First stock in the list</option>
+        <option value="">Neutral (no film look)</option>
         {#each stocks as stock (stock.id)}
           <option value={stock.id}>{stock.name}</option>
         {/each}
