@@ -379,6 +379,14 @@
         }),
         host.onCacheReady((event) => reviewer?.cacheReady(event)),
         host.onCacheEvicted((event) => reviewer?.cacheEvicted(event)),
+        host.onImageRefined((event) => {
+          // The first preview came from the quick develop, without lens
+          // corrections. Develop it again from the full frame.
+          if (event.imageId === selected) {
+            requestPreview(settings, "settle");
+            reviewer?.refined(event);
+          }
+        }),
         host.onThumbnail((event) => void adoptThumbnail(event)),
       ]);
       cleanups.push(...unlisten);

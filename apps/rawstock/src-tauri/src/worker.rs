@@ -48,6 +48,7 @@ pub fn emit(app: &AppHandle, events: &[ContractEvent]) {
             ContractEvent::ThumbnailReady(payload) => app.emit("thumbnail:ready", payload),
             ContractEvent::CacheReady(payload) => app.emit("cache:ready", payload),
             ContractEvent::CacheEvicted(payload) => app.emit("cache:evicted", payload),
+            ContractEvent::ImageRefined(payload) => app.emit("image:refined", payload),
         };
         if let Err(error) = sent {
             state::log_detail(

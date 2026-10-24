@@ -19,6 +19,7 @@ import type {
   DoneEvent,
   EditSettings,
   FailedEvent,
+  ImageRefinedEvent,
   JobKind,
   JobStarted,
 } from "../contract.ts";
@@ -569,6 +570,20 @@ export class ReviewController {
       side.fullHash = "";
     }
     this.emit();
+    this.pump();
+  }
+
+  /**
+   * The backend swapped the quick develop for the full one. Fit previews
+   * are developed again; full frames already waited for it.
+   */
+  refined(event: ImageRefinedEvent): void {
+    if (event.imageId !== this.imageId) {
+      return;
+    }
+    for (const side of this.sides()) {
+      side.previewKey = "";
+    }
     this.pump();
   }
 

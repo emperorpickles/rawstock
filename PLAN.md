@@ -44,6 +44,10 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   overwrite confirmation, cancel) now writes a real JPEG. The develop
   thread renders the full frame with turns and crop, writes
   `<dest>.partial`, and the board renames it only while the job is live.
+- 1.0 app CA in the fit preview (#106): the quick X-Trans develop now
+  corrects lateral CA and defringes, and when Markesteijn lands the develop
+  thread emits `image:refined` so the fit preview is developed again from
+  the full frame.
 - 1.0 app crop and straighten (#92): `rawstock_core::geometry::Framing`
   applies quarter turns, straighten (scaled to fill, no empty corners) and
   the crop. Export and thumbnails use it, and the viewer draws the same

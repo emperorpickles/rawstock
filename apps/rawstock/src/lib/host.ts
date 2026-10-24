@@ -7,6 +7,7 @@ import type { AppInfo } from "./help/report";
 import type {
   AsShotWhiteBalance,
   CacheEvictedEvent,
+  ImageRefinedEvent,
   CacheReadyEvent,
   CancelledEvent,
   DoneEvent,
@@ -191,6 +192,10 @@ export class Host {
 
   onCacheEvicted(handler: (event: CacheEvictedEvent) => void): Promise<UnlistenFn> {
     return this.on("cache:evicted", handler);
+  }
+
+  onImageRefined(handler: (event: ImageRefinedEvent) => void): Promise<UnlistenFn> {
+    return this.on("image:refined", handler);
   }
 
   private async invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {

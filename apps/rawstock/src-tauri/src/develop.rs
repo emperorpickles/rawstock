@@ -13,6 +13,10 @@
 //! partial file, which the board renames to the destination only while the
 //! job is live. Exports run in the order they were asked for.
 //!
+//! When Markesteijn lands while no develop is waiting, the thread installs
+//! it and emits `image:refined`, so the fit preview, first drawn from the
+//! quick develop, is developed again from the full frame.
+//!
 //! The edit maps onto the stock as it ships: exposure and print exposure
 //! are offsets from the stock's own values, dye scales and grain amount are
 //! multipliers, and halation overrides the stock's threshold, radius, and
@@ -32,7 +36,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::thread;
 use std::time::Duration;
 
@@ -46,7 +50,7 @@ use rawstock_core::white_balance::{Temperature, WhiteBalance, WhiteBalanceSolver
 use rawstock_core::workers::Workers;
 use tauri::{AppHandle, Manager};
 
-use crate::contract::{self, AppError, EditSettings, JobKind};
+use crate::contract::{self, AppError, ContractEvent, EditSettings, ImageRefinedEvent, JobKind};
 use crate::export_dest;
 use crate::frame;
 use crate::state::{self, AppState, lock};
@@ -60,6 +64,7 @@ const OPEN_EDGE: u32 = 720;
 pub struct DevelopRequest {
     pub job_id: u64,
     pub kind: JobKind,
+    pub image_id: String,
     pub path: PathBuf,
     pub settings: EditSettings,
     pub long_edge: u32,
@@ -95,7 +100,22 @@ impl Developer {
                     open: None,
                     stocks: HashMap::new(),
                 };
-                while let Ok(first) = receiver.recv() {
+                loop {
+                    let first = if service.demosaic_pending() {
+                        match receiver.recv_timeout(Duration::from_millis(50)) {
+                            Ok(request) => request,
+                            Err(RecvTimeoutError::Timeout) => {
+                                service.refine();
+                                continue;
+                            }
+                            Err(RecvTimeoutError::Disconnected) => break,
+                        }
+                    } else {
+                        match receiver.recv() {
+                            Ok(request) => request,
+                            Err(_) => break,
+                        }
+                    };
                     let mut queue = vec![first];
                     queue.extend(receiver.try_iter());
                     for request in Service::latest(queue) {
@@ -148,6 +168,7 @@ impl GpuStart {
 
 /// The photo the session was built from.
 pub(crate) struct Opened {
+    image_id: String,
     path: PathBuf,
     ca_correction: bool,
     session: PreviewSession,
@@ -266,7 +287,12 @@ impl Service {
                 &self.app.state::<AppState>().log_dir,
                 &format!("develop decode {}", request.path.display()),
             );
-            let opened = Opened::decode(&request.path, settings.lens.ca_correction, gpu)?;
+            let opened = Opened::decode(
+                &request.image_id,
+                &request.path,
+                settings.lens.ca_correction,
+                gpu,
+            )?;
             lock(&self.app.state::<AppState>().as_shot).insert(
                 request.path.clone(),
                 opened.as_shot.map(contract::AsShotWhiteBalance::from),
@@ -322,6 +348,39 @@ impl Service {
         Ok(parameters)
     }
 
+    /// Markesteijn is still running for the open photo.
+    fn demosaic_pending(&self) -> bool {
+        self.open.as_ref().is_some_and(|open| open.full.is_some())
+    }
+
+    /// Install Markesteijn if it has landed, and tell the UI to develop
+    /// its preview again. A failed demosaic is logged and dropped: the next
+    /// develop of this photo decodes it again.
+    fn refine(&mut self) {
+        let Some(open) = self.open.as_mut() else {
+            return;
+        };
+        let never = BoardControl {
+            live: Box::new(|| true),
+        };
+        match open.take_full(false, &never) {
+            Ok(false) => {}
+            Ok(true) => {
+                let event = ContractEvent::ImageRefined(ImageRefinedEvent {
+                    image_id: open.image_id.clone(),
+                });
+                worker::emit(&self.app, &[event]);
+            }
+            Err(detail) => {
+                state::log_detail(
+                    &self.app.state::<AppState>().log_dir,
+                    &format!("develop {}: {detail}", open.path.display()),
+                );
+                self.open = None;
+            }
+        }
+    }
+
     /// Ends a cancelled job on the board and reports whether it still runs.
     fn live(&self, job_id: u64) -> bool {
         let (live, events) = lock(&self.app.state::<AppState>().stub).job_check(job_id);
@@ -331,7 +390,12 @@ impl Service {
 }
 
 impl Opened {
-    fn decode(path: &Path, ca_correction: bool, gpu: Option<Gpu>) -> Result<Self, String> {
+    fn decode(
+        image_id: &str,
+        path: &Path,
+        ca_correction: bool,
+        gpu: Option<Gpu>,
+    ) -> Result<Self, String> {
         let mut raw = RawImage::open(path).map_err(|error| error.to_string())?;
         raw.set_chromatic_aberration_correction(ca_correction);
         let orientation = raw.orientation();
@@ -367,6 +431,7 @@ impl Opened {
         };
         session.set_gpu(gpu);
         Ok(Self {
+            image_id: image_id.to_string(),
             path: path.to_path_buf(),
             ca_correction,
             session,
@@ -589,6 +654,7 @@ mod tests {
         DevelopRequest {
             job_id,
             kind,
+            image_id: "a".to_string(),
             path: PathBuf::from("/photos/a.RAF"),
             settings: EditSettings::default(),
             long_edge: 720,
