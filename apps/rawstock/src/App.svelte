@@ -8,6 +8,7 @@
   import { Adjustments } from "./lib/adjust";
   import { appError, defaultSettings } from "./lib/contract";
   import type {
+    AsShotWhiteBalance,
     CancelledEvent,
     CropRect,
     DoneEvent,
@@ -126,6 +127,16 @@
   let committed = $state<EditSettings | null>(null);
   let resetting = $state(false);
   let horizon = $state(false);
+  /** The straighten slider is moving: the viewer shows its level grid. */
+  let straightening = $state(false);
+  /**
+   * The develop part of the last preview asked for, and of the last settled
+   * one. Geometry is not part of it: frames stay in camera orientation and
+   * the viewer frames them, so a crop or straighten never develops again.
+   */
+  let previewKeys = { requested: "", settled: "" };
+  /** As-shot light of the photo it was read for. `value` is `null` when the file cannot take a custom balance. */
+  let asShot = $state<{ imageId: string; value: AsShotWhiteBalance | null } | null>(null);
   let viewLongEdge = $state(720);
   let closing = false;
   let previewBusy = false;
@@ -161,6 +172,9 @@
     return `The stock "${settings.stock.id}" is not installed. Choose another stock. The photo was not changed.`;
   });
   const adjustmentsDisabled = $derived(!selected || selectedImage?.error != null);
+  const selectedAsShot = $derived(
+    asShot && asShot.imageId === selected ? asShot.value : selectedImage?.error ? null : undefined,
+  );
   const browserStocks = $derived(StockBrowser.visible(stocks, import.meta.env.DEV));
 
   $effect(() => {
@@ -289,6 +303,7 @@
               return;
             }
             reviewer?.done(event);
+            void loadAsShot(event.imageId);
           } else if (event.kind === "full") {
             reviewer?.done(event);
           }
@@ -518,6 +533,8 @@
       }
       notice = info.fileName;
       horizon = false;
+      straightening = false;
+      previewKeys = { requested: "", settled: "" };
       if (!info.error) {
         requestPreview(current, "settle");
       }
@@ -554,6 +571,7 @@
     if (!selected || selectedImage?.error) {
       return;
     }
+    straightening = next.geometry.straightenDeg !== (committed ?? settings).geometry.straightenDeg;
     settings = next;
     history.preview(selected, next);
     requestPreview(next, "drag");
@@ -563,6 +581,7 @@
     if (!selected || selectedImage?.error) {
       return;
     }
+    straightening = false;
     settings = next;
     committed = next;
     if (history.commit(selected, next)) {
@@ -575,6 +594,14 @@
   function requestPreview(next: EditSettings, phase: "drag" | "settle") {
     if (!host || !selected || selectedImage?.error) {
       return;
+    }
+    const key = ReviewController.developKey(next);
+    if (key === previewKeys.requested && (phase === "drag" || key === previewKeys.settled)) {
+      return;
+    }
+    previewKeys.requested = key;
+    if (phase === "settle") {
+      previewKeys.settled = key;
     }
     previewPending = { settings: next, phase, imageId: selected };
     if (!previewBusy) {
@@ -870,6 +897,22 @@
     }
   }
 
+  /**
+   * Read the photo's as-shot light once its first preview is up, so the
+   * develop thread has already decoded it and the read is a lookup.
+   */
+  async function loadAsShot(imageId: string) {
+    if (!host || asShot?.imageId === imageId) {
+      return;
+    }
+    try {
+      const value = await host.asShotWhiteBalance(imageId);
+      asShot = { imageId, value };
+    } catch {
+      // Left unread: the next preview asks again.
+    }
+  }
+
   async function requestThumbnails(
     imageId: string,
     key: string,
@@ -1023,6 +1066,7 @@
       onopen={() => void perform("open")}
       edit={settings.geometry}
       {horizon}
+      guides={straightening}
       onzoom={(next) => (zoom = next)}
       onregion={viewChanged}
       oncrop={editCrop}
@@ -1041,6 +1085,7 @@
       frameWidth={review?.width || selectedImage?.width || 0}
       frameHeight={review?.height || selectedImage?.height || 0}
       {horizon}
+      asShot={selectedAsShot}
       onstock={chooseStock}
       onpreview={applyPreview}
       oncommit={applyCommit}

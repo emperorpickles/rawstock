@@ -44,11 +44,24 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   overwrite confirmation, cancel) now writes a real JPEG. The develop
   thread renders the full frame with turns and crop, writes
   `<dest>.partial`, and the board renames it only while the job is live.
-  Straighten is still recorded but not developed.
 - 1.0 app CA in the fit preview (#106): the quick X-Trans develop now
   corrects lateral CA and defringes, and when Markesteijn lands the develop
   thread emits `image:refined` so the fit preview is developed again from
   the full frame.
+- 1.0 app crop and straighten (#92): `rawstock_core::geometry::Framing`
+  applies quarter turns, straighten (scaled to fill, no empty corners) and
+  the crop. Export and thumbnails use it, and the viewer draws the same
+  mapping at Fit, 100% and 200%, so all four frame the photo alike. Crop
+  handles and draw-a-horizon work zoomed, by mouse and keyboard, with a
+  grid while straightening. Geometry edits never develop again: frames
+  stay in camera orientation and the viewer frames them.
+- 1.0 app custom white balance (#88): temperature and tint map through the
+  camera matrix (`white_balance.rs`), and custom at the file's as-shot
+  reading is bit-identical to as shot. The session keeps the demosaiced
+  camera RGB, so a change converts the fit proxy at once (about 2 ms on a
+  24 MP RAF) and the full frame only when a 100% view or export needs it.
+  Preview, full, export and thumbnails all use it. Files that cannot take
+  one develop as shot and the panel says so.
 - Unsigned alpha bundles of the 1.0 app (#93): `.github/workflows/alpha.yml`
   on a `v*` tag or by hand drafts a release with a Windows NSIS installer,
   a universal macOS `.dmg`, and checksums. Stocks ship inside the bundle.

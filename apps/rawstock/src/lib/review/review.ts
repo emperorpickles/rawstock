@@ -910,8 +910,16 @@ export class ReviewController {
     };
   }
 
+  /**
+   * What a develop depends on. Geometry is drawn by the viewer over frames
+   * in camera orientation, so crop, straighten and turns are left out.
+   */
+  static developKey(settings: EditSettings): string {
+    return JSON.stringify({ ...settings, geometry: null });
+  }
+
   private static key(settings: EditSettings): string {
-    return JSON.stringify(settings);
+    return ReviewController.developKey(settings);
   }
 
   private static clone(settings: EditSettings): EditSettings {

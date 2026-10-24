@@ -5,6 +5,7 @@ import { appError } from "./contract";
 import type { AppSettings, SettingsChanged } from "./preferences/settings";
 import type { AppInfo } from "./help/report";
 import type {
+  AsShotWhiteBalance,
   CacheEvictedEvent,
   ImageRefinedEvent,
   CacheReadyEvent,
@@ -48,6 +49,10 @@ export class Host {
     compare: boolean,
   ): Promise<JobStarted> {
     return this.invoke("develop_preview", { imageId, settings, longEdge, compare });
+  }
+
+  async asShotWhiteBalance(imageId: string): Promise<AsShotWhiteBalance | null> {
+    return this.invoke("as_shot_white_balance", { imageId });
   }
 
   async developFull(imageId: string, settings: EditSettings): Promise<JobStarted> {

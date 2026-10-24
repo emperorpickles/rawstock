@@ -100,3 +100,19 @@ test("crop aspects, a free start, and a drawn horizon", () => {
   assert.equal(fitted.height, 200);
   assert.deepEqual(GeometryView.orientedSize(300, 200, 1), { width: 200, height: 300 });
 });
+
+test("temperature and tint start from the as-shot light and keep each other", () => {
+  const asShot = { temperatureK: 5046.2, tint: 1.07 };
+  const settings = defaultSettings();
+  assert.deepEqual(Adjustments.whiteBalanceValues(settings, asShot), {
+    temperatureK: 5046.2,
+    tint: 1.07,
+  });
+  const warmer = Adjustments.temperature(settings, asShot, 6500);
+  assert.deepEqual(warmer.whiteBalance, { mode: "custom", temperatureK: 6500, tint: 1.07 });
+  const magenta = Adjustments.tint(warmer, asShot, 20);
+  assert.deepEqual(magenta.whiteBalance, { mode: "custom", temperatureK: 6500, tint: 20 });
+  assert.deepEqual(Adjustments.whiteBalanceValues(magenta, asShot), { temperatureK: 6500, tint: 20 });
+  assert.deepEqual(Adjustments.asShotWhiteBalance(magenta).whiteBalance, { mode: "asShot" });
+  assert.equal(magenta.exposureEv, settings.exposureEv);
+});

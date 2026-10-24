@@ -3,9 +3,10 @@
 //! One thread decodes the photo once, keeps a small ACEScg copy, and runs
 //! every requested stock over it. A thumbnail shows tone and colour only:
 //! grain and halation are off, because neither means anything at this
-//! size. Exposure, rotation, crop, and the CA switch come from the edit.
-//! Straighten and white balance are not applied yet; this build develops
-//! as shot, as the main preview does.
+//! size. Exposure, white balance, rotation, straighten, crop, and the CA
+//! switch come from the edit; the framing is the export's. The kept copy is
+//! camera RGB, so a white balance change converts it again without a
+//! decode.
 //!
 //! The job itself lives on the [`crate::jobs::ContractStub`] board, so cancel,
 //! supersede, and image switches end it the same way as any other job.
@@ -15,13 +16,15 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 
-use rawstock_core::color::LinearImage;
+use rawstock_core::color::{CameraImage, LinearImage};
 use rawstock_core::decode::{Orientation, RawImage};
 use rawstock_core::render::Pipeline;
 use rawstock_core::stock::Stock;
+use rawstock_core::white_balance::WhiteBalance;
 use tauri::{AppHandle, Manager};
 
 use crate::contract::{AppError, EditSettings};
+use crate::develop::Opened;
 use crate::frame;
 use crate::state::{self, AppState, lock};
 use crate::worker;
@@ -155,13 +158,14 @@ impl Thumbnailer {
     }
 }
 
-/// The open photo at [`SOURCE_EDGE`], scene-linear ACEScg, as the sensor
-/// sees it. Orientation is applied per request so a turn needs no decode.
+/// The open photo at [`SOURCE_EDGE`], camera RGB before white balance, as
+/// the sensor sees it. White balance and orientation are applied per
+/// request, so neither needs a decode.
 struct Source {
     path: PathBuf,
     ca_correction: bool,
     camera: Orientation,
-    linear: LinearImage,
+    rgb: CameraImage,
 }
 
 impl Source {
@@ -171,33 +175,35 @@ impl Source {
         let mut raw = RawImage::open(path).map_err(|error| error.to_string())?;
         raw.set_chromatic_aberration_correction(ca_correction);
         let camera = raw.orientation();
-        let linear = match raw
-            .develop_quick_linear()
+        let rgb = match raw
+            .develop_quick_camera()
             .map_err(|error| error.to_string())?
         {
             Some(quick) => quick.image,
-            None => raw.develop_linear().map_err(|error| error.to_string())?,
+            None => raw.develop_camera().map_err(|error| error.to_string())?,
         };
-        let linear = linear
+        let rgb = rgb
             .area_downsample(SOURCE_EDGE)
             .map_err(|error| error.to_string())?;
         Ok(Self {
             path: path.to_path_buf(),
             ca_correction,
             camera,
-            linear,
+            rgb,
         })
     }
 
-    /// Oriented, cropped, and shrunk to `long_edge`.
+    /// Oriented, framed, and shrunk to `long_edge`.
     fn framed(&self, settings: &EditSettings, long_edge: u32) -> Result<LinearImage, String> {
-        let mut image = self.linear.clone();
-        let turns = Orientation::quarters(settings.geometry.quarter_turns);
-        image.apply_orientation(self.camera.then(turns));
-        if let Some(crop) = settings.geometry.crop {
-            image = ThumbnailRender::crop(&image, crop.x, crop.y, crop.w, crop.h)?;
-        }
-        image
+        // As shot when the file cannot take the custom balance, like the
+        // main develop.
+        let mut image = self
+            .rgb
+            .develop(Opened::balance(settings.white_balance))
+            .or_else(|_| self.rgb.develop(WhiteBalance::AsShot))
+            .map_err(|error| error.to_string())?;
+        image.apply_orientation(self.camera);
+        ThumbnailRender::frame(&image, settings)?
             .area_downsample(long_edge.clamp(1, MAX_EDGE))
             .map_err(|error| error.to_string())
     }
@@ -240,28 +246,15 @@ impl ThumbnailRender {
         Ok(frame::pack(developed.width(), developed.height(), &rgba))
     }
 
-    /// Crop in normalised coordinates of the oriented image.
-    pub fn crop(
-        image: &LinearImage,
-        x: f64,
-        y: f64,
-        w: f64,
-        h: f64,
-    ) -> Result<LinearImage, String> {
-        let (width, height) = (image.width(), image.height());
-        let left = ((x * f64::from(width)).floor() as u32).min(width.saturating_sub(1));
-        let top = ((y * f64::from(height)).floor() as u32).min(height.saturating_sub(1));
-        let right = ((x + w) * f64::from(width)).ceil().min(f64::from(width)) as u32;
-        let bottom = ((y + h) * f64::from(height)).ceil().min(f64::from(height)) as u32;
-        let columns = right.max(left + 1) - left;
-        let rows = bottom.max(top + 1) - top;
-        let source = image.pixels();
-        let mut pixels = Vec::with_capacity(columns as usize * rows as usize * 3);
-        for row in top..top + rows {
-            let start = (row as usize * width as usize + left as usize) * 3;
-            pixels.extend_from_slice(&source[start..start + columns as usize * 3]);
-        }
-        LinearImage::new(columns, rows, pixels).map_err(|error| error.to_string())
+    /// Turns, straighten and crop of a camera-oriented image, as the
+    /// export frames it.
+    pub fn frame(image: &LinearImage, settings: &EditSettings) -> Result<LinearImage, String> {
+        let (width, height, pixels) =
+            settings
+                .geometry
+                .framing()
+                .apply_f32(image.width(), image.height(), image.pixels());
+        LinearImage::new(width, height, pixels).map_err(|error| error.to_string())
     }
 }
 
@@ -345,11 +338,24 @@ mod tests {
     }
 
     #[test]
-    fn crop_keeps_the_requested_part() {
+    fn frame_matches_the_export_framing() {
         let image = gradient(20, 10);
-        let cropped = ThumbnailRender::crop(&image, 0.5, 0.0, 0.5, 0.5).unwrap();
+        let mut settings = EditSettings::default();
+        settings.geometry.crop = Some(crate::contract::CropRect {
+            x: 0.5,
+            y: 0.0,
+            w: 0.5,
+            h: 0.5,
+        });
+        let cropped = ThumbnailRender::frame(&image, &settings).unwrap();
         assert_eq!((cropped.width(), cropped.height()), (10, 5));
         assert_eq!(cropped.pixels()[0], image.pixels()[10 * 3]);
+
+        settings.geometry.quarter_turns = 1;
+        settings.geometry.straighten_deg = 3.0;
+        let framed = ThumbnailRender::frame(&image, &settings).unwrap();
+        let size = settings.geometry.framing().output_size(20, 10);
+        assert_eq!((framed.width(), framed.height()), size);
     }
 
     #[test]

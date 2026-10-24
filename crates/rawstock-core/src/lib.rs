@@ -15,6 +15,7 @@ mod cie1931;
 pub mod color;
 pub mod decode;
 mod defringe;
+pub mod geometry;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 mod grain;
@@ -25,4 +26,5 @@ pub mod render;
 pub mod session;
 mod spectrum;
 pub mod stock;
+pub mod white_balance;
 pub mod workers;

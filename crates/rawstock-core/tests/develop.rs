@@ -8,6 +8,7 @@ use rawstock_core::color::LinearImage;
 use rawstock_core::decode::RawImage;
 use rawstock_core::render::{Parameters, Pipeline};
 use rawstock_core::stock::{Curve, FilmModel, Parametric, Stock};
+use rawstock_core::white_balance::{Temperature, WhiteBalance};
 
 #[path = "common/mod.rs"]
 mod common;
@@ -84,6 +85,67 @@ fn quick_xtrans_develop_is_a_third_of_the_full_frame() {
         total += f64::from(b.abs());
     }
     assert!(miss / total < 0.02, "proxies differ by {}", miss / total);
+}
+
+#[test]
+fn custom_white_balance_redevelops_without_a_demosaic() {
+    for fixture in [&X_S10, &IPHONE_12_PRO] {
+        let Some(path) = fixture.prepare() else {
+            return;
+        };
+        let raw = RawImage::open(&path).unwrap();
+        let camera = raw.develop_camera().unwrap();
+        let as_shot = camera.develop(WhiteBalance::AsShot).unwrap();
+        assert_eq!(
+            as_shot.pixels(),
+            raw.develop_linear().unwrap().pixels(),
+            "{}",
+            fixture.filename
+        );
+
+        let solver = camera
+            .white_balance_solver()
+            .expect("the fixture takes a custom white balance");
+        let temperature = solver.as_shot().unwrap();
+        assert!(
+            (2_500.0..10_000.0).contains(&temperature.kelvin),
+            "{} {temperature:?}",
+            fixture.filename
+        );
+        // Custom at the as-shot values is the as-shot image.
+        let custom = camera.develop(WhiteBalance::Custom(temperature)).unwrap();
+        let worst = custom
+            .pixels()
+            .iter()
+            .zip(as_shot.pixels())
+            .map(|(a, b)| (a - b).abs() / b.abs().max(1.0e-3))
+            .fold(0.0_f32, f32::max);
+        assert!(worst < 1.0e-4, "{} differs by {worst}", fixture.filename);
+
+        // A bluer light develops warmer.
+        let warmer = camera
+            .develop(WhiteBalance::Custom(Temperature {
+                kelvin: temperature.kelvin * 1.5,
+                tint: temperature.tint,
+            }))
+            .unwrap();
+        let ratio = |image: &LinearImage| {
+            let (red, blue) = image
+                .pixels()
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .fold((0.0_f64, 0.0_f64), |(red, blue), pixel| {
+                    (red + f64::from(pixel[0]), blue + f64::from(pixel[2]))
+                });
+            red / blue
+        };
+        assert!(
+            ratio(&warmer) > ratio(&as_shot) * 1.05,
+            "{}",
+            fixture.filename
+        );
+    }
 }
 
 #[test]

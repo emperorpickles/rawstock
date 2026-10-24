@@ -1,4 +1,4 @@
-import type { CropRect, EditSettings, StockSummary } from "./contract.ts";
+import type { AsShotWhiteBalance, CropRect, EditSettings, StockSummary } from "./contract.ts";
 import { CropMath } from "./geometry.ts";
 import type { AspectId } from "./geometry.ts";
 import type { SliderScale } from "./slider.ts";
@@ -145,6 +145,68 @@ export class Adjustments {
     unit: "°",
     ariaUnit: "degrees",
   };
+
+  /** Light temperature. The reset value is the file's as-shot reading. */
+  static readonly temperatureScale: SliderScale = {
+    min: 2000,
+    max: 12000,
+    fine: 10,
+    step: 50,
+    coarse: 500,
+    defaultValue: 5500,
+    majorEvery: 2000,
+    minorEvery: 500,
+    digits: 0,
+    unit: "K",
+    ariaUnit: "kelvin",
+  };
+
+  /** Off the black-body line. Positive is magenta, negative green. */
+  static readonly tintScale: SliderScale = {
+    min: -150,
+    max: 150,
+    fine: 1,
+    step: 1,
+    coarse: 10,
+    defaultValue: 0,
+    majorEvery: 50,
+    minorEvery: 10,
+    digits: 0,
+    signed: true,
+    unit: "",
+    ariaUnit: "tint",
+  };
+
+  /** What the temperature and tint sliders show: the custom light, else as shot. */
+  static whiteBalanceValues(
+    settings: EditSettings,
+    asShot: AsShotWhiteBalance,
+  ): { temperatureK: number; tint: number } {
+    const balance = settings.whiteBalance;
+    return balance.mode === "custom"
+      ? { temperatureK: balance.temperatureK, tint: balance.tint }
+      : { temperatureK: asShot.temperatureK, tint: asShot.tint };
+  }
+
+  /** A custom light at `temperatureK`. The tint stays where it was, as shot until moved. */
+  static temperature(
+    settings: EditSettings,
+    asShot: AsShotWhiteBalance,
+    temperatureK: number,
+  ): EditSettings {
+    const { tint } = Adjustments.whiteBalanceValues(settings, asShot);
+    return { ...settings, whiteBalance: { mode: "custom", temperatureK, tint } };
+  }
+
+  /** A custom light at `tint`. The temperature stays where it was. */
+  static tint(settings: EditSettings, asShot: AsShotWhiteBalance, tint: number): EditSettings {
+    const { temperatureK } = Adjustments.whiteBalanceValues(settings, asShot);
+    return { ...settings, whiteBalance: { mode: "custom", temperatureK, tint } };
+  }
+
+  static asShotWhiteBalance(settings: EditSettings): EditSettings {
+    return { ...settings, whiteBalance: { mode: "asShot" } };
+  }
 
   static exposure(settings: EditSettings, exposureEv: number): EditSettings {
     return { ...settings, exposureEv };

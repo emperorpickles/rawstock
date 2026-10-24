@@ -1,6 +1,6 @@
 <script lang="ts">
   import AdjustPanel from "./AdjustPanel.svelte";
-  import type { EditSettings, StockSummary } from "./contract";
+  import type { AsShotWhiteBalance, EditSettings, StockSummary } from "./contract";
   import type { PackedFrame } from "./frame";
   import StockBrowser from "./StockBrowser.svelte";
 
@@ -13,6 +13,7 @@
     frameWidth = 0,
     frameHeight = 0,
     horizon = false,
+    asShot = undefined,
     onstock,
     onpreview,
     oncommit,
@@ -26,6 +27,7 @@
     frameWidth?: number;
     frameHeight?: number;
     horizon?: boolean;
+    asShot?: AsShotWhiteBalance | null;
     onstock: (stock: StockSummary) => void;
     onpreview: (settings: EditSettings) => void;
     oncommit: (settings: EditSettings) => void;
@@ -51,6 +53,7 @@
     {frameWidth}
     {frameHeight}
     {horizon}
+    {asShot}
     {onpreview}
     {oncommit}
     {onhorizon}

@@ -8,9 +8,12 @@ use std::sync::atomic::Ordering;
 use tauri::ipc::Response;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+use rawstock_core::decode::RawImage;
+use rawstock_core::white_balance::WhiteBalanceSolver;
+
 use crate::contract::{
-    AppError, EditSettings, ExportOptions, JobKind, JobStarted, OpenOutcome, SaveResult,
-    StockSummary,
+    AppError, AsShotWhiteBalance, EditSettings, ExportOptions, JobKind, JobStarted, OpenOutcome,
+    SaveResult, StockSummary,
 };
 use crate::develop::{DevelopRequest, ExportTarget};
 use crate::files::classify_inputs;
@@ -187,6 +190,35 @@ fn render_thumbnails(
         });
     }
     Ok(started)
+}
+
+/// The photo's as-shot light, for the custom white balance sliders.
+/// `null` when the file cannot take a custom balance. Read from the develop
+/// thread's decode when it has opened the photo, else decoded here.
+#[tauri::command]
+async fn as_shot_white_balance(
+    app: AppHandle,
+    image_id: String,
+) -> Result<Option<AsShotWhiteBalance>, AppError> {
+    let path = lock(&app.state::<AppState>().stub)
+        .image_path(&image_id)
+        .map(PathBuf::from)
+        .ok_or_else(|| AppError::internal("This photo is no longer open."))?;
+    if let Some(known) = lock(&app.state::<AppState>().as_shot).get(&path) {
+        return Ok(*known);
+    }
+    let read = path.clone();
+    let as_shot = tauri::async_runtime::spawn_blocking(move || {
+        RawImage::open(&read).ok().and_then(|raw| {
+            WhiteBalanceSolver::new(raw.camera_matrix(), raw.as_shot_wb())
+                .and_then(|solver| solver.as_shot())
+                .map(AsShotWhiteBalance::from)
+        })
+    })
+    .await
+    .map_err(|_| AppError::internal("The white balance of this photo could not be read."))?;
+    lock(&app.state::<AppState>().as_shot).insert(path, as_shot);
+    Ok(as_shot)
 }
 
 #[tauri::command]
@@ -417,6 +449,7 @@ pub fn handlers() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sy
         develop_full,
         get_region,
         render_thumbnails,
+        as_shot_white_balance,
         take_frame,
         cancel,
         export_image,
