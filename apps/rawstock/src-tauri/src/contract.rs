@@ -14,6 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use rawstock_core::geometry::Framing;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -193,7 +194,7 @@ impl Default for ScanEdit {
     }
 }
 
-/// Crop in normalised 0..1 coordinates of the oriented image.
+/// Crop in normalised 0..1 coordinates of the turned, straightened frame.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CropRect {
@@ -229,6 +230,17 @@ pub struct GeometryEdit {
     pub straighten_deg: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub crop: Option<CropRect>,
+}
+
+impl GeometryEdit {
+    /// The framing the viewer, thumbnails and export all apply.
+    pub fn framing(&self) -> Framing {
+        Framing::new(
+            self.quarter_turns,
+            self.straighten_deg,
+            self.crop.map(|crop| [crop.x, crop.y, crop.w, crop.h]),
+        )
+    }
 }
 
 /// Everything an edit sidecar stores about one photo.

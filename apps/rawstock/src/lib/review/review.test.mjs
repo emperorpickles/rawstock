@@ -477,3 +477,31 @@ test("a failed develop is reported once and not retried", async () => {
   assert.equal(errors.length, 1);
   assert.equal(host.count("develop_full"), 1);
 });
+
+test("a crop, straighten or turn at 100% sends no develop: the viewer frames the cached frame", async () => {
+  for (const zoom of [1, 2]) {
+    const { host, review, view } = harness();
+    review.adjustOwnsAfterPreview();
+    review.open("img", settings(0), { width: 800, height: 600 });
+    review.setZoom(zoom);
+    await flush();
+    const full = host.last("develop_full");
+    done(review, full);
+    ready(review, full);
+    await flush();
+    const shown = view().after;
+    const before = host.calls.length;
+
+    const edit = settings(0);
+    for (const step of [0.1, 0.2, 0.3]) {
+      const next = { ...edit, geometry: { quarterTurns: 1, straightenDeg: -step, crop: { x: step, y: 0, w: 0.5, h: 0.5 } } };
+      assert.equal(ReviewController.developKey(next), ReviewController.developKey(edit));
+      review.update(next);
+      await flush();
+    }
+    const develops = host.calls.slice(before).filter((call) => call.command.startsWith("develop_"));
+    assert.deepEqual(develops, [], `zoom ${zoom}`);
+    assert.equal(view().after, shown);
+    assert.equal(view().updating, false);
+  }
+});
