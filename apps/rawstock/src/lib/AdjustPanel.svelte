@@ -12,10 +12,12 @@
     frameWidth = 0,
     frameHeight = 0,
     horizon = false,
+    cropping = false,
     asShot = undefined,
     onpreview,
     oncommit,
     onhorizon,
+    oncropping,
   }: {
     settings: EditSettings;
     stock?: StockSummary | null;
@@ -23,11 +25,14 @@
     frameWidth?: number;
     frameHeight?: number;
     horizon?: boolean;
+    /** The viewer is in crop mode, with the crop handles. */
+    cropping?: boolean;
     /** The file's as-shot light. `undefined` while it is read, `null` when the file cannot take a custom balance. */
     asShot?: AsShotWhiteBalance | null;
     onpreview: (settings: EditSettings) => void;
     oncommit: (settings: EditSettings) => void;
     onhorizon: (on: boolean) => void;
+    oncropping: (on: boolean) => void;
   } = $props();
 
   const frame = $derived(Adjustments.orientedFrame(frameWidth, frameHeight, settings.geometry.quarterTurns));
@@ -66,8 +71,10 @@
     }
   }
 
+  /** A new aspect opens crop mode, so its handles are there to place it. */
   function chooseAspect(id: AspectId) {
     oncommit(Adjustments.aspect(settings, id, frame.width, frame.height));
+    oncropping(true);
   }
 </script>
 
@@ -257,8 +264,17 @@
     >
       {horizon ? "Drawing a horizon" : "Draw a horizon"}
     </button>
+    <button
+      type="button"
+      aria-pressed={cropping}
+      aria-keyshortcuts="R"
+      {disabled}
+      onclick={() => oncropping(!cropping)}
+    >
+      {cropping ? "Done cropping" : "Crop"}
+    </button>
     <label class="field">
-      Crop
+      Aspect
       <select
         value={aspect}
         {disabled}

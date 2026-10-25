@@ -179,6 +179,17 @@
     touch-action: none;
   }
 
+  /* Rule of thirds inside the crop, as a guide while framing. */
+  .crop::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background-image:
+      linear-gradient(to right, transparent calc(33.333% - 0.5px), rgba(242, 242, 242, 0.4) calc(33.333% - 0.5px), rgba(242, 242, 242, 0.4) calc(33.333% + 0.5px), transparent calc(33.333% + 0.5px), transparent calc(66.667% - 0.5px), rgba(242, 242, 242, 0.4) calc(66.667% - 0.5px), rgba(242, 242, 242, 0.4) calc(66.667% + 0.5px), transparent calc(66.667% + 0.5px)),
+      linear-gradient(to bottom, transparent calc(33.333% - 0.5px), rgba(242, 242, 242, 0.4) calc(33.333% - 0.5px), rgba(242, 242, 242, 0.4) calc(33.333% + 0.5px), transparent calc(33.333% + 0.5px), transparent calc(66.667% - 0.5px), rgba(242, 242, 242, 0.4) calc(66.667% - 0.5px), rgba(242, 242, 242, 0.4) calc(66.667% + 0.5px), transparent calc(66.667% + 0.5px));
+  }
+
   .crop.movable {
     pointer-events: auto;
     cursor: move;
