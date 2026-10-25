@@ -22,6 +22,7 @@ import type {
   ImageRefinedEvent,
   JobKind,
   JobStarted,
+  StockRef,
 } from "../contract.ts";
 
 export type Zoom = "fit" | 1 | 2;
@@ -275,7 +276,8 @@ type EarlyEvent =
  * One review session for the selected image. The backend keeps one live job
  * per image and kind, so the after side goes first and the before side
  * waits for the slot. "Before" is the settings the image was first opened
- * with in this run.
+ * with in this run, unless a before stock is set: then it is the current
+ * edit developed through that stock, so the sides differ only by stock.
  */
 export class ReviewController {
   static readonly defaultEdge = 1536;
@@ -300,6 +302,7 @@ export class ReviewController {
   private landed = new Map<string, Job>();
   private ready = new Map<string, { width: number; height: number }>();
   private opened = new Map<string, EditSettings>();
+  private beforeStock: StockRef | null = null;
   private regionRect: Rect | null = null;
   private regionBusy = false;
   private regionAgain = false;
@@ -325,7 +328,7 @@ export class ReviewController {
     this.sizeHint = size && size.width > 0 && size.height > 0 ? size : null;
     this.fullSize = null;
     this.after = ReviewController.side(settings);
-    this.before = ReviewController.side(this.opened.get(imageId) ?? settings);
+    this.before = ReviewController.side(this.beforeSettings(settings));
     this.pending = { preview: null, full: null };
     this.known.clear();
     this.early.clear();
@@ -360,10 +363,30 @@ export class ReviewController {
     if (!this.after) {
       return;
     }
-    const key = ReviewController.key(settings);
-    if (key !== this.after.key) {
-      this.after.settings = ReviewController.clone(settings);
-      this.after.key = key;
+    const changed = ReviewController.retarget(this.after, settings);
+    const beforeChanged = this.before != null && ReviewController.retarget(this.before, this.beforeSettings(settings));
+    if (changed || beforeChanged) {
+      this.emit();
+    }
+    this.pump();
+  }
+
+  /**
+   * The stock the before side develops the current edit through, or `null`
+   * for the settings the image opened with. It holds across photos.
+   */
+  setBeforeStock(stock: StockRef | null): void {
+    const same =
+      stock === this.beforeStock ||
+      (stock != null && this.beforeStock != null && stock.id === this.beforeStock.id && stock.revision === this.beforeStock.revision);
+    if (same) {
+      return;
+    }
+    this.beforeStock = stock ? { ...stock } : null;
+    if (!this.after || !this.before) {
+      return;
+    }
+    if (ReviewController.retarget(this.before, this.beforeSettings(this.after.settings))) {
       this.emit();
     }
     this.pump();
@@ -895,6 +918,24 @@ export class ReviewController {
 
   private emit(): void {
     this.callbacks.onview(this.snapshot());
+  }
+
+  private beforeSettings(settings: EditSettings): EditSettings {
+    if (this.beforeStock) {
+      return { ...ReviewController.clone(settings), stock: { ...this.beforeStock } };
+    }
+    return this.opened.get(this.imageId) ?? settings;
+  }
+
+  /** Point a side at new settings. True when its develop key changed. */
+  private static retarget(side: SideState, settings: EditSettings): boolean {
+    const key = ReviewController.key(settings);
+    if (key === side.key) {
+      return false;
+    }
+    side.settings = ReviewController.clone(settings);
+    side.key = key;
+    return true;
   }
 
   private static side(settings: EditSettings): SideState {

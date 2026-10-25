@@ -106,8 +106,9 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   DSCF7392 (`agent: claude`, `stage: ready`, waiting on Caleb's look
   review). New color-spectral key `violet_cutoff_nm` fades layer
   sensitivity below 440 nm (the upsampler's violet lobe turned reds
-  magenta), a Status M scan, a faint neutral halation, and the defringe no
-  longer desaturates saturated reds into gray outlines.
+  magenta), a faint neutral halation, and the defringe no longer
+  desaturates saturated reds into gray outlines. Its Status M scan was
+  removed again (too-red skin, too-green foliage).
 - **#79** — Scale-correct grain and silver grain (`agent: claude`, `stage:
   ready`, waiting on Caleb's look review). The field is calibrated through
   the 48 µm aperture, so a preview matches the export shrunk to its size;
@@ -125,6 +126,11 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   and a clipping overlay (`J`). Logic in `apps/rawstock/src/lib/review/`.
   The backend still returns the stub's placeholder frames until the real
   develop service lands.
+- **#111, #112** — 1.0 app Neutral default and A/B stock pickers
+  (`agent: claude`, `stage: ready`, waiting on Caleb's look review).
+  Neutral ships under a Reference group and new photos open on it. In
+  Split and Before/After the badges pick stock A and stock B (the edit),
+  with a swap; A develops the current edit through another stock.
 - **#52, #53** — 1.0 app presets and export queue (`agent: claude`,
   `stage: holding`) until #39 and #41 land.
 - **#63** — Lavapipe apt timeout and retry in CI (`agent: grok`). GPU

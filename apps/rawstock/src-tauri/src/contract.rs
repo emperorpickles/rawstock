@@ -566,6 +566,9 @@ pub struct StockControls {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum StockCategory {
+    /// The Neutral stock: no film look, shown first so the others can be
+    /// compared against it.
+    Reference,
     ColorNegative,
     Slide,
     Bw,
@@ -581,7 +584,9 @@ pub fn category_for(stem: &str, name: &str) -> StockCategory {
     } else {
         stem.as_str()
     };
-    if key.contains("portra") || name.contains("portra") {
+    if key == "neutral" {
+        StockCategory::Reference
+    } else if key.contains("portra") || name.contains("portra") {
         StockCategory::ColorNegative
     } else if key.contains("acros") || key.contains("mono") || name.contains("monochrome") {
         StockCategory::Bw
@@ -1018,10 +1023,7 @@ revision = 2
             StockCategory::ColorNegative
         );
         assert_eq!(category_for("velvia", "Velvia"), StockCategory::FujiSim);
-        assert_eq!(
-            category_for("neutral", "Neutral"),
-            StockCategory::ColorNegative
-        );
+        assert_eq!(category_for("neutral", "Neutral"), StockCategory::Reference);
         assert_eq!(category_for("acros", "Acros"), StockCategory::Bw);
     }
 }

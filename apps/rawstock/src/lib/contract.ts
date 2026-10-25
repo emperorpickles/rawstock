@@ -4,7 +4,7 @@ export type SupportLevel = "calibrated" | "decodes" | "unsupported";
 
 export type SidecarStatus = "none" | "loaded" | "invalid" | "stockVersionMismatch";
 
-export type StockCategory = "colorNegative" | "slide" | "bw" | "fujiSim";
+export type StockCategory = "reference" | "colorNegative" | "slide" | "bw" | "fujiSim";
 
 export type JobKind = "preview" | "full" | "thumbnails" | "export";
 

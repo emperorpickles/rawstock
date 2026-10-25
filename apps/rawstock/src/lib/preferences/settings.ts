@@ -106,9 +106,20 @@ export class Preferences {
     return { ...settings, layout: { ...settings.layout, filmstripCollapsed: collapsed } };
   }
 
-  /** The stock a newly opened image starts on. */
+  /** New photos open on this stock unless Preferences names another. */
+  static readonly fallbackStockId = "neutral";
+
+  /**
+   * The stock a newly opened image starts on: the Preferences choice, then
+   * Neutral, then the first stock when neither is installed.
+   */
   static startingStock(settings: AppSettings, stocks: StockSummary[]): StockSummary | null {
-    const wanted = settings.newImage.defaultStockId;
-    return stocks.find((stock) => stock.id === wanted) ?? stocks[0] ?? null;
+    const wanted = settings.newImage.defaultStockId ?? Preferences.fallbackStockId;
+    return (
+      stocks.find((stock) => stock.id === wanted) ??
+      stocks.find((stock) => stock.id === Preferences.fallbackStockId) ??
+      stocks[0] ??
+      null
+    );
   }
 }

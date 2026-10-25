@@ -325,6 +325,62 @@ test("the before side waits for the after side and is developed with compare", a
   assert.equal(host.count("develop_full"), 2);
 });
 
+test("a before stock develops the current edit through that stock, and follows edits", async () => {
+  const { host, review, view } = harness();
+  review.open("img", settings());
+  review.setCompare(true);
+  await flush();
+  done(review, host.last("develop_preview"));
+  await flush();
+  assert.equal(host.count("develop_preview"), 1, "no before stock: before reuses after");
+
+  review.setBeforeStock({ id: "neutral", revision: 2 });
+  await flush();
+  const first = host.last("develop_preview");
+  assert.equal(first.compare, true);
+  assert.deepEqual(first.settings.stock, { id: "neutral", revision: 2 });
+  assert.equal(first.settings.exposureEv, 0);
+  done(review, first);
+  await flush();
+  assert.notEqual(view().before, view().after);
+
+  review.update(settings(1));
+  await flush();
+  done(review, host.last("develop_preview"));
+  await flush();
+  const followed = host.last("develop_preview");
+  assert.equal(followed.compare, true);
+  assert.deepEqual(followed.settings.stock, { id: "neutral", revision: 2 });
+  assert.equal(followed.settings.exposureEv, 1, "the before side keeps the edit");
+  done(review, followed);
+  await flush();
+
+  review.setBeforeStock({ id: "neutral", revision: 2 });
+  await flush();
+  const calls = host.count("develop_preview");
+  review.setBeforeStock(null);
+  await flush();
+  const opened = host.last("develop_preview");
+  assert.equal(host.count("develop_preview"), calls + 1);
+  assert.deepEqual(opened.settings.stock, { id: "portra400", revision: 1 });
+  assert.equal(opened.settings.exposureEv, 0, "cleared: before is the state at open");
+});
+
+test("a before stock holds when switching photos", async () => {
+  const { host, review } = harness();
+  review.setBeforeStock({ id: "velvia", revision: 3 });
+  review.open("a", settings(0.5));
+  review.setCompare(true);
+  await flush();
+  done(review, host.last("develop_preview"));
+  await flush();
+  const before = host.last("develop_preview");
+  assert.equal(before.imageId, "a");
+  assert.equal(before.compare, true);
+  assert.deepEqual(before.settings.stock, { id: "velvia", revision: 3 });
+  assert.equal(before.settings.exposureEv, 0.5);
+});
+
 test("with no edits, before reuses the after frames", async () => {
   const { host, review, view } = harness();
   review.open("img", settings());
