@@ -161,7 +161,7 @@ impl Thumbnailer {
 /// The open photo at [`SOURCE_EDGE`], camera RGB before white balance, as
 /// the sensor sees it. White balance and orientation are applied per
 /// request, so neither needs a decode.
-struct Source {
+pub(crate) struct Source {
     path: PathBuf,
     ca_correction: bool,
     camera: Orientation,
@@ -171,7 +171,7 @@ struct Source {
 impl Source {
     /// X-Trans uses the third-size quick develop, which is plenty for a
     /// thumbnail. Bayer and linear DNG develop in full, once per photo.
-    fn decode(path: &Path, ca_correction: bool) -> Result<Self, String> {
+    pub(crate) fn decode(path: &Path, ca_correction: bool) -> Result<Self, String> {
         let mut raw = RawImage::open(path).map_err(|error| error.to_string())?;
         raw.set_chromatic_aberration_correction(ca_correction);
         let camera = raw.orientation();
@@ -194,7 +194,11 @@ impl Source {
     }
 
     /// Oriented, framed, and shrunk to `long_edge`.
-    fn framed(&self, settings: &EditSettings, long_edge: u32) -> Result<LinearImage, String> {
+    pub(crate) fn framed(
+        &self,
+        settings: &EditSettings,
+        long_edge: u32,
+    ) -> Result<LinearImage, String> {
         // As shot when the file cannot take the custom balance, like the
         // main develop.
         let mut image = self

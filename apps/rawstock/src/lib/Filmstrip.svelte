@@ -1,17 +1,21 @@
 <script lang="ts">
   import type { ImageInfo } from "./contract";
   import { filmstripBadges, filmstripLabel } from "./edits";
+  import type { PackedFrame } from "./frame";
 
   let {
     images,
     selected = "",
     collapsed = false,
+    frames = {},
     onselect,
     oncollapse,
   }: {
     images: ImageInfo[];
     selected?: string;
     collapsed?: boolean;
+    /** Rendered frames by image id: the camera preview, then the develop. */
+    frames?: Record<string, PackedFrame>;
     onselect: (imageId: string) => void;
     oncollapse: (collapsed: boolean) => void;
   } = $props();
@@ -31,11 +35,25 @@
       ?.scrollIntoView({ block: "nearest", inline: "nearest" });
   });
 
-  /** Thumbnail box: the photo's own aspect, fitted inside 96 x 64 px. */
-  function box(image: ImageInfo): { width: string; height: string } {
-    const ratio = image.width && image.height ? image.width / image.height : 1.5;
+  /**
+   * Thumbnail box fitted inside 96 x 64 px: the rendered frame's aspect,
+   * which includes turns and crop, else the photo's own.
+   */
+  function box(image: ImageInfo, frame?: PackedFrame): { width: string; height: string } {
+    const [w, h] = frame ? [frame.width, frame.height] : [image.width, image.height];
+    const ratio = w && h ? w / h : 1.5;
     const width = Math.min(96, 64 * ratio);
     return { width: `${Math.round(width)}px`, height: `${Math.round(width / ratio)}px` };
+  }
+
+  function paint(canvas: HTMLCanvasElement, frame: PackedFrame) {
+    const draw = (next: PackedFrame) => {
+      canvas.width = next.width;
+      canvas.height = next.height;
+      canvas.getContext("2d")?.putImageData(new ImageData(next.rgba, next.width, next.height), 0, 0);
+    };
+    draw(frame);
+    return { update: draw };
   }
 </script>
 
@@ -62,7 +80,8 @@
       {:else}
         {#each images as image (image.imageId)}
           {@const badges = filmstripBadges(image)}
-          {@const size = box(image)}
+          {@const frame = frames[image.imageId]}
+          {@const size = box(image, frame)}
           <button
             id="strip-{image.imageId}"
             type="button"
@@ -75,7 +94,11 @@
             onclick={() => onselect(image.imageId)}
           >
             <span class="mat" aria-hidden="true">
-              <span class="thumb" style:width={size.width} style:height={size.height}></span>
+              <span class="thumb" style:width={size.width} style:height={size.height}>
+                {#if frame}
+                  <canvas use:paint={frame}></canvas>
+                {/if}
+              </span>
               {#if badges.length}
                 <span class="badges">
                   {#each badges as badge (badge)}
@@ -186,6 +209,12 @@
     border: 2px solid var(--mat);
     background: var(--surround);
     border-radius: 2px;
+  }
+
+  .thumb canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
   }
 
   .broken .thumb {

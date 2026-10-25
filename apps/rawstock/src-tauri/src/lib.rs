@@ -19,6 +19,7 @@ mod shell;
 mod sidecar;
 mod state;
 mod stocks;
+mod strip;
 mod thumbnails;
 mod worker;
 
@@ -79,6 +80,7 @@ pub fn run() {
             let thumbnailer = thumbnails::Thumbnailer::spawn(app.handle().clone());
             *lock(&state.developer) = Some(develop::Developer::spawn(app.handle().clone()));
             *lock(&state.thumbnailer) = Some(thumbnailer);
+            *lock(&state.strip) = Some(strip::Strip::spawn(app.handle().clone()));
             Ok(())
         })
         .on_menu_event(|app, event| {

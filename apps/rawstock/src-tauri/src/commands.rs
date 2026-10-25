@@ -22,6 +22,7 @@ use crate::settings::{AppSettings, SettingsChanged};
 use crate::shell;
 use crate::state::{self, AppState, lock};
 use crate::stocks;
+use crate::strip::{StripItem, StripRequest};
 use crate::thumbnails::ThumbnailRequest;
 use crate::worker;
 
@@ -219,6 +220,41 @@ async fn as_shot_white_balance(
     .map_err(|_| AppError::internal("The white balance of this photo could not be read."))?;
     lock(&app.state::<AppState>().as_shot).insert(path, as_shot);
     Ok(as_shot)
+}
+
+/// Queue filmstrip frames, most wanted first. Replaces the last call's
+/// queue. Photos that are not open are skipped.
+#[tauri::command]
+fn render_strip(app: AppHandle, items: Vec<StripRequest>) {
+    let state = app.state::<AppState>();
+    let queued = {
+        let stub = lock(&state.stub);
+        items
+            .into_iter()
+            .filter_map(|request| {
+                let path = stub.image_path(&request.image_id)?;
+                Some(StripItem {
+                    hash: crate::contract::settings_hash(&request.settings),
+                    image_id: request.image_id,
+                    path: PathBuf::from(path),
+                    settings: request.settings,
+                })
+            })
+            .collect()
+    };
+    if let Some(strip) = lock(&state.strip).as_ref() {
+        strip.submit(queued);
+    }
+}
+
+/// The latest filmstrip frame for a photo, after `strip:ready`.
+#[tauri::command]
+fn strip_frame(app: AppHandle, image_id: String) -> Result<Response, AppError> {
+    lock(&app.state::<AppState>().strip)
+        .as_ref()
+        .and_then(|strip| strip.frame(&image_id))
+        .map(Response::new)
+        .ok_or_else(AppError::cache_miss)
 }
 
 #[tauri::command]
@@ -451,6 +487,8 @@ pub fn handlers() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sy
         render_thumbnails,
         as_shot_white_balance,
         take_frame,
+        render_strip,
+        strip_frame,
         cancel,
         export_image,
         save_sidecar,

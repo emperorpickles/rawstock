@@ -11,6 +11,7 @@ use crate::develop::Developer;
 use crate::jobs::ContractStub;
 use crate::recent::RecentFiles;
 use crate::settings::SettingsStore;
+use crate::strip::Strip;
 use crate::thumbnails::Thumbnailer;
 
 pub struct AppState {
@@ -29,6 +30,8 @@ pub struct AppState {
     pub wake: Mutex<Option<mpsc::Sender<()>>>,
     /// Real stock thumbnails. Set once the app has started.
     pub thumbnailer: Mutex<Option<Thumbnailer>>,
+    /// Filmstrip frames. Set once the app has started.
+    pub strip: Mutex<Option<Strip>>,
     /// The real preview and full develop. Set once the app has started.
     pub developer: Mutex<Option<Developer>>,
     /// As-shot light per opened RAW, recorded when the develop thread
@@ -51,6 +54,7 @@ impl AppState {
             menu_paths: Mutex::new(Vec::new()),
             wake: Mutex::new(None),
             thumbnailer: Mutex::new(None),
+            strip: Mutex::new(None),
             developer: Mutex::new(None),
             as_shot: Mutex::new(HashMap::new()),
         }
