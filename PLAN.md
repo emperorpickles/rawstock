@@ -76,6 +76,8 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   folds away (`layout.filmstripCollapsed`), View > Split on `Y`. Strip
   frames (#110) show the camera's embedded JPEG at once, then each photo
   developed with its own edit (`strip.rs`, one thread, nearest first).
+  The thread never holds the queue lock while drawing: `render_strip`
+  runs on the main thread, and a held lock froze the app (#119).
 
 ## In flight
 
