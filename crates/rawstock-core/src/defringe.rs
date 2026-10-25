@@ -8,18 +8,21 @@
 //! blue or purple outline, and a saturated stock makes it worse.
 //!
 //! [`Defringe::apply`] runs on scene-linear ACEScg, where a neutral has equal
-//! channels. A pixel is desaturated toward its own luminance when two things
-//! hold: it is well below the brightest pixel within [`Defringe::RADIUS`]
+//! channels. A pixel takes the color of the dark side around it, at its own
+//! luminance, when two things hold: it is well below the brightest pixel within [`Defringe::RADIUS`]
 //! (it sits on the dark side of a high-contrast edge), and its color is in
 //! the fringe range, blue or purple to magenta, with blue the strongest
 //! channel or red and blue both above green. A red whose blue is a small
-//! fraction of its red is not counted as magenta. Luminance is kept, so edges do
-//! not move or soften. A blue or purple subject away from bright edges keeps
-//! its color.
+//! fraction of its red is not counted as magenta. The dark side's color is
+//! the luminance-weighted mean of nearby pixels that are neither fringe nor
+//! bright: neutral beside a dark neutral subject, red beside a red sign,
+//! where desaturating would leave a gray outline. Luminance is kept, so
+//! edges do not move or soften. A blue or purple subject away from bright
+//! edges keeps its color.
 
 use rayon::prelude::*;
 
-/// Desaturates blue/purple fringes next to bright edges.
+/// Recolors blue/purple fringes next to bright edges with their surroundings.
 pub(crate) struct Defringe;
 
 impl Defringe {
@@ -36,6 +39,9 @@ impl Defringe {
     /// near zero (a red sign) is not a fringe, even when noise lifts blue a
     /// hair above green.
     const BLUE_TO_RED: (f32, f32) = (0.25, 0.5);
+    /// Pixels darker than this fraction of the local maximum are the dark
+    /// side of the edge, whose color a fringe takes.
+    const DARK_SIDE: f32 = 0.5;
     /// AP1 luminance weights (ACEScg to CIE Y).
     const LUMA: [f32; 3] = [0.272_228_7, 0.674_081_8, 0.053_689_5];
 
@@ -51,21 +57,82 @@ impl Defringe {
             .map(|pixel| Self::luma(*pixel).max(0.0))
             .collect();
         let bright = Self::local_max(width, height, &luma);
+        let amount: Vec<f32> = samples
+            .as_chunks::<3>()
+            .0
+            .par_iter()
+            .zip(luma.par_iter().zip(&bright))
+            .map(|(pixel, (&y, &peak))| Self::edge_weight(y, peak) * Self::hue_weight(*pixel, y))
+            .collect();
+        let source = samples.to_vec();
         samples
             .par_chunks_mut(width * 3)
-            .zip(luma.par_chunks(width).zip(bright.par_chunks(width)))
-            .for_each(|(row, (luma, bright))| {
-                for ((pixel, &y), &peak) in
-                    row.as_chunks_mut::<3>().0.iter_mut().zip(luma).zip(bright)
-                {
-                    let amount = Self::edge_weight(y, peak) * Self::hue_weight(*pixel, y);
-                    if amount > 0.0 {
-                        for channel in pixel.iter_mut() {
-                            *channel = y + (*channel - y) * (1.0 - amount);
-                        }
+            .enumerate()
+            .for_each(|(row_index, row)| {
+                for (x, pixel) in row.as_chunks_mut::<3>().0.iter_mut().enumerate() {
+                    let index = row_index * width + x;
+                    let weight = amount[index];
+                    if weight <= 0.0 {
+                        continue;
+                    }
+                    let y = luma[index];
+                    let chroma = Self::surround_chroma(
+                        width,
+                        height,
+                        (x, row_index),
+                        &source,
+                        &luma,
+                        &amount,
+                        bright[index],
+                    );
+                    for (channel, tint) in pixel.iter_mut().zip(chroma) {
+                        let target = y * tint;
+                        *channel += (target - *channel) * weight;
                     }
                 }
             });
+    }
+
+    /// Color of the dark side around a fringe, as channel / luminance.
+    ///
+    /// The luminance-weighted mean over the window of pixels that are
+    /// neither fringe nor on the bright side of the edge. A fringe beside a
+    /// red sign takes the red; one beside a dark neutral turns neutral, as
+    /// before. Neutral when the window has no such pixel.
+    fn surround_chroma(
+        width: usize,
+        height: usize,
+        (x, y): (usize, usize),
+        samples: &[f32],
+        luma: &[f32],
+        amount: &[f32],
+        peak: f32,
+    ) -> [f32; 3] {
+        let radius = Self::RADIUS;
+        let dark = peak * Self::DARK_SIDE;
+        let mut sum = [0.0f32; 3];
+        let mut weight = 0.0f32;
+        for row in y.saturating_sub(radius)..=(y + radius).min(height - 1) {
+            for column in x.saturating_sub(radius)..=(x + radius).min(width - 1) {
+                let index = row * width + column;
+                let y = luma[index];
+                if amount[index] > 0.0 || y >= dark || y <= 0.0 {
+                    continue;
+                }
+                let pixel = &samples[index * 3..index * 3 + 3];
+                if pixel.iter().any(|channel| *channel < 0.0) {
+                    continue;
+                }
+                for (total, channel) in sum.iter_mut().zip(pixel) {
+                    *total += channel;
+                }
+                weight += y;
+            }
+        }
+        if weight <= 0.0 {
+            return [1.0; 3];
+        }
+        sum.map(|total| total / weight)
     }
 
     fn luma(pixel: [f32; 3]) -> f32 {
@@ -232,5 +299,32 @@ mod tests {
         let original = samples.clone();
         Defringe::apply(WIDTH, HEIGHT, &mut samples);
         assert_eq!(pixel(&samples, 21, 4), pixel(&original, 21, 4));
+    }
+
+    #[test]
+    fn a_purple_edge_on_a_red_field_takes_the_red_not_gray() {
+        // DSCF7392: the one purple pixel between a white letter and the red
+        // sign turned gray and outlined every letter.
+        let red = [0.3, 0.035, 0.04];
+        let mut samples = fringed_edge();
+        for y in 0..HEIGHT {
+            for x in 20..WIDTH {
+                let index = (y * WIDTH + x) * 3;
+                let pixel = if x == 20 { [0.31, 0.03, 0.16] } else { red };
+                samples[index..index + 3].copy_from_slice(&pixel);
+            }
+        }
+        let before = pixel(&samples, 20, 4);
+        Defringe::apply(WIDTH, HEIGHT, &mut samples);
+        let after = pixel(&samples, 20, 4);
+        assert!((Defringe::luma(before) - Defringe::luma(after)).abs() < 1.0e-6);
+        let tint = |pixel: [f32; 3]| pixel.map(|channel| channel / Defringe::luma(pixel));
+        for (got, want) in tint(after).iter().zip(tint(red)) {
+            assert!(
+                (got - want).abs() < 1.0e-3,
+                "{after:?} is not the red {red:?}"
+            );
+        }
+        assert_eq!(pixel(&samples, 25, 4), red);
     }
 }
