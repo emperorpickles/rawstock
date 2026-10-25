@@ -1,4 +1,4 @@
-import type { CropRect } from "./contract.ts";
+import type { CropRect, GeometryEdit } from "./contract.ts";
 
 /** Crop aspect choices. `original` is the photo's own ratio and a full frame. */
 export type AspectId = "original" | "free" | "3:2" | "4:3" | "1:1" | "16:9";
@@ -131,6 +131,40 @@ export class Framing {
       d: second.b * first.c + second.d * first.d,
       e: second.a * first.e + second.c * first.f + second.e,
       f: second.b * first.e + second.d * first.f + second.f,
+    };
+  }
+
+  /**
+   * The crop in whole pixels of a `width`×`height` turned frame, rounded
+   * outward and at least 1×1, as `Framing::crop_pixels` in rawstock-core.
+   */
+  static cropPixels(crop: CropRect | undefined, width: number, height: number): FrameRect {
+    if (!crop) {
+      return { x: 0, y: 0, width, height };
+    }
+    const left = Math.min(Math.max(0, Math.floor(crop.x * width)), Math.max(0, width - 1));
+    const top = Math.min(Math.max(0, Math.floor(crop.y * height)), Math.max(0, height - 1));
+    const right = Math.min(width, Math.ceil((crop.x + crop.w) * width));
+    const bottom = Math.min(height, Math.ceil((crop.y + crop.h) * height));
+    return { x: left, y: top, width: Math.max(right, left + 1) - left, height: Math.max(bottom, top + 1) - top };
+  }
+
+  /** `map`, then the crop's top-left moved to the origin: the export's own pixels. */
+  static cropped(map: Affine, crop: FrameRect): Affine {
+    return Framing.then(map, { a: 1, b: 0, c: 0, d: 1, e: -crop.x, f: -crop.y });
+  }
+
+  /**
+   * A view centre, normalised in frame rect `from`, moved to rect `to` so
+   * the same point of the photo stays in the middle of the view.
+   */
+  static recenter(center: Point, from: FrameRect, to: FrameRect): Point {
+    if (!(to.width > 0) || !(to.height > 0)) {
+      return center;
+    }
+    return {
+      x: (from.x + center.x * from.width - to.x) / to.width,
+      y: (from.y + center.y * from.height - to.y) / to.height,
     };
   }
 
@@ -365,5 +399,34 @@ export class CropMath {
     const left = Math.min(Math.max(0, x), 1 - width);
     const top = Math.min(Math.max(0, y), 1 - height);
     return { x: left, y: top, w: width, h: height };
+  }
+}
+
+/** Crop mode's own keys and checks. */
+export class CropMode {
+  /**
+   * Enter keeps the crop and Esc cancels it. Neither fires with a modifier,
+   * from a text field, or as Enter on a control that Enter already presses.
+   */
+  static isExitKey(
+    event: { key: string; metaKey: boolean; ctrlKey: boolean; altKey: boolean; repeat?: boolean },
+    targetTag: string,
+  ): boolean {
+    if (event.metaKey || event.ctrlKey || event.altKey || event.repeat) {
+      return false;
+    }
+    const tag = targetTag.toUpperCase();
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
+      return false;
+    }
+    if (event.key === "Escape") {
+      return true;
+    }
+    return event.key === "Enter" && tag !== "BUTTON" && tag !== "A";
+  }
+
+  static sameGeometry(a: GeometryEdit, b: GeometryEdit): boolean {
+    const crop = (rect: CropRect | undefined) => (rect ? `${rect.x},${rect.y},${rect.w},${rect.h}` : "");
+    return a.quarterTurns === b.quarterTurns && a.straightenDeg === b.straightenDeg && crop(a.crop) === crop(b.crop);
   }
 }

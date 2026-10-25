@@ -33,6 +33,7 @@ pub fn menu_hit(id: &str) -> MenuHit {
         "split" => MenuHit::Action("split"),
         "before-after" => MenuHit::Action("before-after"),
         "clipping" => MenuHit::Action("clipping"),
+        "crop" => MenuHit::Action("crop"),
         "about" => MenuHit::Action("about"),
         "licenses" => MenuHit::Action("licenses"),
         "report-issue" => MenuHit::Action("report-issue"),
@@ -137,6 +138,8 @@ fn install_menu(app: &AppHandle, paths: &[String]) -> tauri::Result<()> {
     let before_after = item(app, "before-after", "Before/After", None)?;
     let clipping = item(app, "clipping", "Clipping", None)?;
     let sep_view = PredefinedMenuItem::separator(app)?;
+    let crop = item(app, "crop", "Crop", None)?;
+    let sep_crop = PredefinedMenuItem::separator(app)?;
 
     let welcome = item(app, "welcome", "Welcome…", None)?;
     let about = item(app, "about", "About", None)?;
@@ -202,6 +205,8 @@ fn install_menu(app: &AppHandle, paths: &[String]) -> tauri::Result<()> {
             &split,
             &before_after,
             &clipping,
+            &sep_crop,
+            &crop,
         ],
     )?;
     let help = Submenu::with_items(
@@ -311,6 +316,7 @@ mod tests {
         assert_eq!(menu_hit("redo-y"), MenuHit::Action("redo"));
         assert_eq!(menu_hit("zoom-100"), MenuHit::Action("zoom-100"));
         assert_eq!(menu_hit("split"), MenuHit::Action("split"));
+        assert_eq!(menu_hit("crop"), MenuHit::Action("crop"));
         assert_eq!(menu_hit("preferences"), MenuHit::Action("preferences"));
         assert_eq!(menu_hit("show-log"), MenuHit::Action("show-log"));
         assert_eq!(menu_hit("welcome"), MenuHit::Action("welcome"));
