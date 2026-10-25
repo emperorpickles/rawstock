@@ -168,36 +168,56 @@ impl Strip {
             .name("rawstock-strip".to_string())
             .spawn(move || {
                 while woken.recv().is_ok() {
-                    while let Some((item, pass)) = lock(&shared).next() {
-                        let drawn = match pass {
-                            StripPass::Embedded => StripRender::embedded(&item),
-                            StripPass::Develop => StripRender::developed(&item),
-                        };
-                        let mut queue = lock(&shared);
-                        match drawn {
-                            Ok(packed) => {
-                                if queue.store(&item, pass, packed) {
-                                    drop(queue);
-                                    Self::announce(&app, &item, pass);
-                                }
-                            }
-                            Err(detail) => {
-                                queue.fail(&item, pass);
-                                drop(queue);
-                                state::log_detail(
-                                    &app.state::<AppState>().log_dir,
-                                    &format!(
-                                        "strip {pass:?} for {}: {detail}",
-                                        item.path.display()
-                                    ),
-                                );
-                            }
-                        }
-                    }
+                    Self::drain(
+                        &shared,
+                        |item, pass| match pass {
+                            StripPass::Embedded => StripRender::embedded(item),
+                            StripPass::Develop => StripRender::developed(item),
+                        },
+                        |item, pass| Self::announce(&app, item, pass),
+                        |item, pass, detail| {
+                            state::log_detail(
+                                &app.state::<AppState>().log_dir,
+                                &format!("strip {pass:?} for {}: {detail}", item.path.display()),
+                            );
+                        },
+                    );
                 }
             })
             .expect("spawn the filmstrip thread");
         Self { queue, wake }
+    }
+
+    /// Draw until the queue has nothing left. The queue is only locked to
+    /// pick and to store, never while drawing: `render_strip` runs on the
+    /// main thread and replaces the queue, so holding the lock through a
+    /// draw would freeze the app.
+    pub fn drain(
+        shared: &Mutex<StripQueue>,
+        mut draw: impl FnMut(&StripItem, StripPass) -> Result<Vec<u8>, String>,
+        mut stored: impl FnMut(&StripItem, StripPass),
+        mut failed: impl FnMut(&StripItem, StripPass, &str),
+    ) {
+        loop {
+            // Its own statement: a `while let` scrutinee would keep this
+            // guard alive through the draw below.
+            let next = lock(shared).next();
+            let Some((item, pass)) = next else {
+                return;
+            };
+            match draw(&item, pass) {
+                Ok(packed) => {
+                    let kept = lock(shared).store(&item, pass, packed);
+                    if kept {
+                        stored(&item, pass);
+                    }
+                }
+                Err(detail) => {
+                    lock(shared).fail(&item, pass);
+                    failed(&item, pass, &detail);
+                }
+            }
+        }
     }
 
     pub fn submit(&self, items: Vec<StripItem>) {
@@ -344,6 +364,44 @@ mod tests {
         queue.replace(Vec::new());
         assert_eq!(queue.frame("a"), None);
         assert!(!queue.store(&a, StripPass::Develop, frame::placeholder(4, 4, 1)));
+    }
+
+    #[test]
+    fn the_queue_stays_unlocked_while_a_frame_is_drawn() {
+        let shared = Mutex::new(StripQueue::default());
+        lock(&shared).replace(vec![item("a", "portra400", 0.0), item("b", "velvia", 0.0)]);
+        let mut drawn = Vec::new();
+        let mut announced = 0;
+        Strip::drain(
+            &shared,
+            |item, pass| {
+                // What `render_strip` does on the main thread mid-draw.
+                assert!(shared.try_lock().is_ok(), "queue locked during a draw");
+                drawn.push((item.image_id.clone(), pass));
+                Ok(frame::placeholder(2, 2, 0))
+            },
+            |_, _| announced += 1,
+            |_, _, _| panic!("no draw fails"),
+        );
+        assert_eq!(drawn.len(), 4);
+        assert_eq!(announced, 4);
+        assert!(lock(&shared).frame("a").is_some());
+        assert!(lock(&shared).next().is_none());
+    }
+
+    #[test]
+    fn a_failed_draw_is_not_retried() {
+        let shared = Mutex::new(StripQueue::default());
+        lock(&shared).replace(vec![item("a", "portra400", 0.0)]);
+        let mut failures = Vec::new();
+        Strip::drain(
+            &shared,
+            |_, _| Err("unreadable".to_string()),
+            |_, _| panic!("nothing is stored"),
+            |item, pass, detail| failures.push((item.image_id.clone(), pass, detail.to_string())),
+        );
+        assert_eq!(failures.len(), 2, "embedded, then develop, each once");
+        assert!(lock(&shared).next().is_none());
     }
 
     #[test]
