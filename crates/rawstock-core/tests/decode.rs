@@ -5,6 +5,8 @@
 //! test, unless `RAWSTOCK_REQUIRE_FIXTURES` is set.
 
 use rawstock_core::decode::{EmbeddedPreview, RawImage};
+use rawstock_core::lens::{LensCorrections, LensProfile};
+use rawstock_core::white_balance::WhiteBalance;
 
 #[path = "common/mod.rs"]
 mod common;
@@ -53,4 +55,33 @@ fn reads_the_embedded_preview_of_a_raf() {
         (preview.width * preview.height * 3) as usize
     );
     assert!(preview.rgb.iter().any(|&value| value > 16));
+}
+
+#[test]
+fn proraw_records_no_lens_tables() {
+    let Some(path) = IPHONE_12_PRO.prepare() else {
+        return;
+    };
+    let image = RawImage::open(&path).unwrap();
+    assert_eq!(image.lens_profile(), &LensProfile::NONE);
+}
+
+#[test]
+fn lens_corrections_follow_the_rafs_own_tables_and_switch_off() {
+    let Some(path) = X_S10.prepare() else {
+        return;
+    };
+    let mut raw = RawImage::open(&path).unwrap();
+    let quick = |raw: &RawImage| {
+        let quick = raw.develop_quick_camera().unwrap().expect("X-Trans");
+        quick.image.develop(WhiteBalance::AsShot).unwrap()
+    };
+    assert_eq!(raw.lens_corrections(), LensCorrections::ALL);
+    let on = quick(&raw);
+    raw.set_lens_corrections(LensCorrections::OFF);
+    let off = quick(&raw);
+    assert_eq!((on.width(), on.height()), (off.width(), off.height()));
+    let profile = raw.lens_profile();
+    let has_table = profile.distortion().is_some() || profile.vignetting().is_some();
+    assert_eq!(on.pixels() != off.pixels(), has_table, "{profile:?}");
 }

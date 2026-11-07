@@ -50,7 +50,9 @@ use rawstock_core::white_balance::{Temperature, WhiteBalance, WhiteBalanceSolver
 use rawstock_core::workers::Workers;
 use tauri::{AppHandle, Manager};
 
-use crate::contract::{self, AppError, ContractEvent, EditSettings, ImageRefinedEvent, JobKind};
+use crate::contract::{
+    self, AppError, ContractEvent, EditSettings, ImageRefinedEvent, JobKind, LensEdit,
+};
 use crate::export_dest;
 use crate::frame;
 use crate::state::{self, AppState, lock};
@@ -170,7 +172,7 @@ impl GpuStart {
 pub(crate) struct Opened {
     image_id: String,
     path: PathBuf,
-    ca_correction: bool,
+    lens: LensEdit,
     session: PreviewSession,
     /// Markesteijn still running for a staged session.
     full: Option<Receiver<Result<FullDevelop, String>>>,
@@ -275,24 +277,20 @@ impl Service {
     /// `Ok(None)` when the job was cancelled on the way.
     fn develop(&mut self, request: &DevelopRequest) -> Result<Option<SrgbImage>, String> {
         let settings = &request.settings;
-        let reuse = self.open.as_ref().is_some_and(|open| {
-            open.path == request.path && open.ca_correction == settings.lens.ca_correction
-        });
+        let reuse = self
+            .open
+            .as_ref()
+            .is_some_and(|open| open.path == request.path && open.lens == settings.lens);
         if !reuse {
             self.open = None;
             let gpu = self.gpu.device();
             // One line per decode, so a white balance drag can be checked
-            // for none: only a new photo or the CA switch decodes again.
+            // for none: only a new photo or a lens switch decodes again.
             state::log_info(
                 &self.app.state::<AppState>().log_dir,
                 &format!("develop decode {}", request.path.display()),
             );
-            let opened = Opened::decode(
-                &request.image_id,
-                &request.path,
-                settings.lens.ca_correction,
-                gpu,
-            )?;
+            let opened = Opened::decode(&request.image_id, &request.path, settings.lens, gpu)?;
             lock(&self.app.state::<AppState>().as_shot).insert(
                 request.path.clone(),
                 opened.as_shot.map(contract::AsShotWhiteBalance::from),
@@ -393,11 +391,11 @@ impl Opened {
     fn decode(
         image_id: &str,
         path: &Path,
-        ca_correction: bool,
+        lens: LensEdit,
         gpu: Option<Gpu>,
     ) -> Result<Self, String> {
         let mut raw = RawImage::open(path).map_err(|error| error.to_string())?;
-        raw.set_chromatic_aberration_correction(ca_correction);
+        lens.apply_to(&mut raw);
         let orientation = raw.orientation();
         let as_shot = WhiteBalanceSolver::new(raw.camera_matrix(), raw.as_shot_wb())
             .and_then(|solver| solver.as_shot());
@@ -433,7 +431,7 @@ impl Opened {
         Ok(Self {
             image_id: image_id.to_string(),
             path: path.to_path_buf(),
-            ca_correction,
+            lens,
             session,
             full,
             stock_id: String::new(),

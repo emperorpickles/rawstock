@@ -21,6 +21,7 @@ pub mod gpu;
 mod grain;
 mod icc;
 mod lateral_ca;
+pub mod lens;
 mod matrices;
 pub mod render;
 pub mod session;
