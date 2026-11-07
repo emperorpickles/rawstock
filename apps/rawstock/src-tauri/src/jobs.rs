@@ -1358,4 +1358,60 @@ mod tests {
         assert!(stub.take_frame(job.job_id, None).is_err());
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    #[test]
+    fn ca_correction_on_and_off_are_distinct_preview_full_and_export_jobs() {
+        let dir = temp_dir("ca");
+        let raw = dir.join("frame.RAF");
+        std::fs::write(&raw, b"raw-bytes").unwrap();
+        let mut info = photo("frame");
+        info.path = raw.display().to_string();
+        let mut stub = ContractStub::default();
+        stub.insert_image(info);
+
+        let on = settings(1);
+        assert!(on.lens.ca_correction);
+        let mut off = on.clone();
+        off.lens.ca_correction = false;
+        let on_hash = settings_hash(&on);
+        let off_hash = settings_hash(&off);
+        assert_ne!(on_hash, off_hash);
+
+        fn finished(stub: &mut ContractStub, id: u64, hash: &str, kind: JobKind) {
+            let events = run_to_done(stub, id);
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    ContractEvent::Done(done)
+                        if done.job_id == id && done.settings_hash == hash && done.kind == kind
+                )),
+                "job {id} ({kind:?}) did not finish with {hash}"
+            );
+        }
+
+        let jpeg = |path: String| ExportOptions {
+            format: "jpeg".to_string(),
+            quality: 92,
+            path,
+            overwrite: false,
+        };
+        let on_jpeg = jpeg(dir.join("on.jpg").display().to_string());
+        let off_jpeg = jpeg(dir.join("off.jpg").display().to_string());
+
+        let (preview_on, _) = stub.develop_preview("frame", &on, 720, false).unwrap();
+        finished(&mut stub, preview_on.job_id, &on_hash, JobKind::Preview);
+        let (full_on, _) = stub.develop_full("frame", &on).unwrap();
+        finished(&mut stub, full_on.job_id, &on_hash, JobKind::Full);
+        let (export_on, _) = stub.export_image("frame", &on, &on_jpeg).unwrap();
+        finished(&mut stub, export_on.job_id, &on_hash, JobKind::Export);
+
+        let (preview_off, _) = stub.develop_preview("frame", &off, 720, false).unwrap();
+        finished(&mut stub, preview_off.job_id, &off_hash, JobKind::Preview);
+        let (full_off, _) = stub.develop_full("frame", &off).unwrap();
+        finished(&mut stub, full_off.job_id, &off_hash, JobKind::Full);
+        let (export_off, _) = stub.export_image("frame", &off, &off_jpeg).unwrap();
+        finished(&mut stub, export_off.job_id, &off_hash, JobKind::Export);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

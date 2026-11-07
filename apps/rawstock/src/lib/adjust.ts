@@ -208,6 +208,14 @@ export class Adjustments {
     return { ...settings, whiteBalance: { mode: "asShot" } };
   }
 
+  /**
+   * Lateral CA correction and the blue/purple defringe. On matches the
+   * sidecar default and today's develop. Off reopens the decoded session.
+   */
+  static caCorrection(settings: EditSettings, enabled: boolean): EditSettings {
+    return { ...settings, lens: { ...settings.lens, caCorrection: enabled } };
+  }
+
   static exposure(settings: EditSettings, exposureEv: number): EditSettings {
     return { ...settings, exposureEv };
   }
