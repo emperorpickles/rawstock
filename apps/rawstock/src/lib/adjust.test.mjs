@@ -35,6 +35,44 @@ test("dye, contrast, and grain stay hidden unless the stock or the sidecar has t
   assert.equal(Adjustments.showGrain(parametric, saved), true);
 });
 
+test("chromatic aberration correction defaults on and toggles without changing the rest of the edit", () => {
+  const settings = {
+    ...defaultSettings(),
+    exposureEv: 0.4,
+    whiteBalance: { mode: "custom", temperatureK: 5200, tint: -3 },
+  };
+  assert.equal(settings.lens.caCorrection, true);
+  const off = Adjustments.caCorrection(settings, false);
+  assert.equal(off.lens.caCorrection, false);
+  assert.equal(off.exposureEv, 0.4);
+  assert.deepEqual(off.whiteBalance, settings.whiteBalance);
+  assert.equal(off.halation.enabled, settings.halation.enabled);
+  assert.equal(settings.lens.caCorrection, true);
+  const on = Adjustments.caCorrection(off, true);
+  assert.equal(on.lens.caCorrection, true);
+  assert.equal(on.exposureEv, 0.4);
+  assert.deepEqual(on.whiteBalance, off.whiteBalance);
+});
+
+test("distortion and vignetting switch alone and keep the other lens settings", () => {
+  const settings = defaultSettings();
+  assert.equal(settings.lens.distortionCorrection, true);
+  assert.equal(settings.lens.vignettingCorrection, true);
+  const flat = Adjustments.distortionCorrection(settings, false);
+  assert.deepEqual(flat.lens, { ...settings.lens, distortionCorrection: false });
+  const dark = Adjustments.vignettingCorrection(flat, false);
+  assert.deepEqual(dark.lens, {
+    caCorrection: true,
+    distortionCorrection: false,
+    vignettingCorrection: false,
+  });
+  assert.equal(settings.lens.distortionCorrection, true);
+  assert.deepEqual(
+    Adjustments.vignettingCorrection(Adjustments.distortionCorrection(dark, true), true).lens,
+    settings.lens,
+  );
+});
+
 test("editing exposure keeps a custom white balance for the sidecar", () => {
   const custom = {
     ...defaultSettings(),

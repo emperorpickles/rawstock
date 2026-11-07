@@ -63,6 +63,19 @@ test("overwrite needs confirmation, and the raw and sidecar paths are refused", 
   assert.match(ExportPlan.review(raw, "/photos/out", "directory").message, /folder/);
 });
 
+test("the export request carries chromatic aberration correction on and off", () => {
+  const on = defaultSettings();
+  assert.equal(on.lens.caCorrection, true);
+  const onRequest = ExportPlan.request("img-1", on, 92, "/photos/DSCF0001.jpg", false);
+  assert.equal(onRequest.settings.lens.caCorrection, true);
+  const off = { ...on, lens: { caCorrection: false }, exposureEv: -0.5 };
+  const offRequest = ExportPlan.request("img-1", off, 92, "/photos/DSCF0001.jpg", false);
+  assert.equal(offRequest.settings.lens.caCorrection, false);
+  assert.equal(offRequest.settings.exposureEv, -0.5);
+  off.lens.caCorrection = true;
+  assert.equal(offRequest.settings.lens.caCorrection, false);
+});
+
 test("the export request keeps the whole edit, including crop, straighten, and rotate", () => {
   const settings = {
     ...defaultSettings(),

@@ -229,7 +229,9 @@ pub struct CropRect {
 pub struct LensEdit {
     /// Chromatic aberration correction: red and blue registered onto green,
     /// then the blue/purple glow beside bright edges desaturated. On unless
-    /// the edit turns it off.
+    /// the edit turns it off. A missing key stays on. A plain `bool` would
+    /// deserialize as off.
+    #[serde(default = "LensEdit::ca_correction_on")]
     pub ca_correction: bool,
     /// Lens distortion undone from the file's own table, then the frame
     /// filled, as the camera's JPEG is. On unless the edit turns it off.
@@ -250,6 +252,10 @@ impl Default for LensEdit {
 }
 
 impl LensEdit {
+    fn ca_correction_on() -> bool {
+        true
+    }
+
     /// Set these corrections on `raw` for its later develops.
     pub fn apply_to(self, raw: &mut rawstock_core::decode::RawImage) {
         raw.set_chromatic_aberration_correction(self.ca_correction);
@@ -1001,13 +1007,34 @@ revision = 2
     }
 
     #[test]
-    fn ca_correction_defaults_on_and_an_older_sidecar_keeps_it_on() {
+    fn ca_correction_defaults_on_and_round_trips_on_and_off() {
         assert!(EditSettings::default().lens.ca_correction);
         let older: EditSettings = toml::from_str("exposureEv = 0.5").unwrap();
         assert!(older.lens.ca_correction);
+        let empty_lens: EditSettings = toml::from_str("[lens]\n").unwrap();
+        assert!(empty_lens.lens.ca_correction);
+        let empty_json: EditSettings = serde_json::from_str(r#"{"lens":{}}"#).unwrap();
+        assert!(empty_json.lens.ca_correction);
+
         let off: EditSettings = toml::from_str("[lens]\ncaCorrection = false").unwrap();
         assert!(!off.lens.ca_correction);
         assert!(off.lens.distortion_correction && off.lens.vignetting_correction);
+        assert_ne!(settings_hash(&off), settings_hash(&EditSettings::default()));
+        let off_toml = toml::to_string(&off).unwrap();
+        assert!(off_toml.contains("caCorrection = false"));
+        let off_back: EditSettings = toml::from_str(&off_toml).unwrap();
+        assert!(!off_back.lens.ca_correction);
+
+        let on: EditSettings = toml::from_str("[lens]\ncaCorrection = true").unwrap();
+        assert!(on.lens.ca_correction);
+        let on_json = serde_json::to_string(&EditSettings::default()).unwrap();
+        assert!(on_json.contains("\"caCorrection\":true"));
+        let on_back: EditSettings = serde_json::from_str(&on_json).unwrap();
+        assert!(on_back.lens.ca_correction);
+        let off_json = serde_json::to_string(&off).unwrap();
+        assert!(off_json.contains("\"caCorrection\":false"));
+        let off_json_back: EditSettings = serde_json::from_str(&off_json).unwrap();
+        assert!(!off_json_back.lens.ca_correction);
     }
 
     #[test]
@@ -1022,6 +1049,11 @@ revision = 2
         assert!(off.lens.ca_correction);
         assert!(!off.lens.distortion_correction && !off.lens.vignetting_correction);
         assert_ne!(settings_hash(&off), settings_hash(&EditSettings::default()));
+        let off_toml = toml::to_string(&off).unwrap();
+        assert!(off_toml.contains("distortionCorrection = false"));
+        assert!(off_toml.contains("vignettingCorrection = false"));
+        let off_back: EditSettings = toml::from_str(&off_toml).unwrap();
+        assert_eq!(off_back.lens, off.lens);
     }
 
     #[test]

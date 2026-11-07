@@ -81,6 +81,10 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
 
 ## In flight
 
+- **#123** — 1.0 app chromatic aberration correction toggle (`agent: grok`,
+  `stage: ready`). PR #127. Adjust checkbox, default on, writes
+  `lens.caCorrection`. Preview, full develop, and export already apply it;
+  turning it off or on reopens the decode session.
 - **#17** — Provia simulation fit (`agent: grok`, `stage: holding`).
   Waiting on more Provia RAF+JPEG pairs from Caleb. Pairs already in hand
   are held out. Do not commit them.
@@ -144,7 +148,7 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   opened with. Outside it the viewer shows only the cropped photo, and
   Fit, 100% and 200% frame the crop.
 - **#124** — Fuji-style lens distortion and vignetting correction
-  (`agent: claude`, `stage: ready`, waiting on Caleb's look review).
+  (`agent: claude`, `stage: ready`, look approved by Caleb).
   `rawstock_core::lens` reads the RAF's own `GeometricDistortionParams`
   and `VignettingParams` (rawler names them but does not apply them),
   undistorts after the lateral CA correction and scales to fill the frame
@@ -152,8 +156,8 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   out to 0.8 of the half-diagonal), and lifts vignetting after highlight
   recovery. Both on by default: `lens.distortionCorrection` and
   `lens.vignettingCorrection` in the sidecar, CLI
-  `--no-distortion-correction` / `--no-vignetting-correction`. The app's
-  toggles belong with the CA toggle in #123 (Grok). The RAF's CA table is
+  `--no-distortion-correction` / `--no-vignetting-correction`, and two
+  checkboxes beside the CA one in Adjust (#127). The RAF's CA table is
   not used; lateral CA stays image-estimated.
 - **#52, #53** — 1.0 app presets and export queue (`agent: claude`,
   `stage: holding`) until #39 and #41 land.

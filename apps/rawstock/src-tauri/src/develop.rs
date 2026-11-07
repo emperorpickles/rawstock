@@ -32,7 +32,10 @@
 //! custom temperature and tint re-convert instead of decoding again: the
 //! fit proxy at once, the full frame when a full develop or export next
 //! needs it. That buffer is freed with the session when another photo
-//! opens.
+//! opens. Lens corrections (chromatic aberration, distortion, vignetting)
+//! are applied while the file is decoded, so preview, full develop, and
+//! export reuse the session only while those switches stay the same.
+//! Turning one off or on opens it again.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -168,6 +171,12 @@ impl GpuStart {
     }
 }
 
+/// The decoded session can develop `path` only at the same lens settings.
+/// Chromatic aberration and distortion are baked in at decode.
+fn same_decode(open_path: &Path, open_lens: LensEdit, path: &Path, lens: LensEdit) -> bool {
+    open_path == path && open_lens == lens
+}
+
 /// The photo the session was built from.
 pub(crate) struct Opened {
     image_id: String,
@@ -280,7 +289,7 @@ impl Service {
         let reuse = self
             .open
             .as_ref()
-            .is_some_and(|open| open.path == request.path && open.lens == settings.lens);
+            .is_some_and(|open| same_decode(&open.path, open.lens, &request.path, settings.lens));
         if !reuse {
             self.open = None;
             let gpu = self.gpu.device();
@@ -686,6 +695,33 @@ mod tests {
         live.set(false);
         assert!(session.render_proxy(&mut control).is_err());
         assert!(session.render_full(&mut control).is_err());
+    }
+
+    #[test]
+    fn turning_a_lens_correction_opens_the_decoded_session_again() {
+        let path = Path::new("/photos/a.RAF");
+        let other = Path::new("/photos/b.RAF");
+        let on = LensEdit::default();
+        let no_ca = LensEdit {
+            ca_correction: false,
+            ..on
+        };
+        let no_distortion = LensEdit {
+            distortion_correction: false,
+            ..on
+        };
+        let no_vignetting = LensEdit {
+            vignetting_correction: false,
+            ..on
+        };
+        assert!(same_decode(path, on, path, on));
+        assert!(same_decode(path, no_ca, path, no_ca));
+        assert!(!same_decode(path, on, path, no_ca));
+        assert!(!same_decode(path, no_ca, path, on));
+        assert!(!same_decode(path, on, path, no_distortion));
+        assert!(!same_decode(path, on, path, no_vignetting));
+        assert!(!same_decode(path, on, other, on));
+        assert!(!same_decode(path, no_ca, other, no_ca));
     }
 
     #[test]
