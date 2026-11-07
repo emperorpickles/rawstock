@@ -10,9 +10,11 @@
 //! itself: on many small tiles it fits each channel to green with a gain, an
 //! offset, and a sub-pixel shift, keeps the radial part of that shift, and
 //! fits a radial polynomial through the tiles. [`LateralCa::apply`] then
-//! resamples red and blue so they line up with green. Both run on demosaiced
-//! camera RGB, before white balance, because the aberration is optical and
-//! belongs to the sensor channels.
+//! resamples red and blue so they line up with green. The develop uses this
+//! estimate only when the file has no usable camera table
+//! ([`crate::lens::LensProfile`]). Both run on demosaiced camera RGB, before
+//! white balance, because the aberration is optical and belongs to the
+//! sensor channels.
 
 use rayon::prelude::*;
 
@@ -548,8 +550,8 @@ mod tests {
     fn applying_the_estimate_registers_the_channels() {
         let (width, height) = (768, 512);
         let mut samples = scene(width, height, lens());
-        let found = LateralCa::estimate(width, height, &samples);
-        found.apply(width, height, &mut samples);
+        // No camera table: the develop still measures the shift from the image.
+        crate::lens::LensProfile::NONE.correct_lateral_ca(width, height, &mut samples);
         let after = LateralCa::estimate(width, height, &samples);
         assert_eq!(after, LateralCa::NONE, "residual {after:?}");
     }

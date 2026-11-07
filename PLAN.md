@@ -93,6 +93,11 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
 
 ## In flight
 
+- **#129** — Prefer the RAF chromatic aberration table (`agent: grok`,
+  `stage: working`). A usable `ChromaticAberrationParams` (0xf00f) resamples
+  red and blue; otherwise the image estimate still runs. The existing
+  `lens.caCorrection` switch still turns that correction and the defringe
+  off together. Look-changing; needs Caleb's visual OK.
 - **#125** — Highlight recovery (`agent: grok`, `stage: working`).
   Clipped channels are rebuilt in camera RGB before the ACEScg matrix, so
   exposure and the film model keep the highlight and a blown neutral stays
