@@ -233,19 +233,36 @@ pub struct LensEdit {
     /// deserialize as off.
     #[serde(default = "LensEdit::ca_correction_on")]
     pub ca_correction: bool,
-}
-
-impl LensEdit {
-    fn ca_correction_on() -> bool {
-        true
-    }
+    /// Lens distortion undone from the file's own table, then the frame
+    /// filled, as the camera's JPEG is. On unless the edit turns it off.
+    pub distortion_correction: bool,
+    /// Corner falloff lifted by the file's own vignetting table. On unless
+    /// the edit turns it off.
+    pub vignetting_correction: bool,
 }
 
 impl Default for LensEdit {
     fn default() -> Self {
         Self {
             ca_correction: true,
+            distortion_correction: true,
+            vignetting_correction: true,
         }
+    }
+}
+
+impl LensEdit {
+    fn ca_correction_on() -> bool {
+        true
+    }
+
+    /// Set these corrections on `raw` for its later develops.
+    pub fn apply_to(self, raw: &mut rawstock_core::decode::RawImage) {
+        raw.set_chromatic_aberration_correction(self.ca_correction);
+        raw.set_lens_corrections(rawstock_core::lens::LensCorrections {
+            distortion: self.distortion_correction,
+            vignetting: self.vignetting_correction,
+        });
     }
 }
 
@@ -1001,6 +1018,7 @@ revision = 2
 
         let off: EditSettings = toml::from_str("[lens]\ncaCorrection = false").unwrap();
         assert!(!off.lens.ca_correction);
+        assert!(off.lens.distortion_correction && off.lens.vignetting_correction);
         assert_ne!(settings_hash(&off), settings_hash(&EditSettings::default()));
         let off_toml = toml::to_string(&off).unwrap();
         assert!(off_toml.contains("caCorrection = false"));
@@ -1017,6 +1035,25 @@ revision = 2
         assert!(off_json.contains("\"caCorrection\":false"));
         let off_json_back: EditSettings = serde_json::from_str(&off_json).unwrap();
         assert!(!off_json_back.lens.ca_correction);
+    }
+
+    #[test]
+    fn lens_corrections_default_on_and_each_turns_off_alone() {
+        let lens = EditSettings::default().lens;
+        assert!(lens.distortion_correction && lens.vignetting_correction);
+        let older: EditSettings = toml::from_str("[lens]\ncaCorrection = true").unwrap();
+        assert_eq!(older.lens, LensEdit::default());
+        let off: EditSettings =
+            toml::from_str("[lens]\ndistortionCorrection = false\nvignettingCorrection = false")
+                .unwrap();
+        assert!(off.lens.ca_correction);
+        assert!(!off.lens.distortion_correction && !off.lens.vignetting_correction);
+        assert_ne!(settings_hash(&off), settings_hash(&EditSettings::default()));
+        let off_toml = toml::to_string(&off).unwrap();
+        assert!(off_toml.contains("distortionCorrection = false"));
+        assert!(off_toml.contains("vignettingCorrection = false"));
+        let off_back: EditSettings = toml::from_str(&off_toml).unwrap();
+        assert_eq!(off_back.lens, off.lens);
     }
 
     #[test]

@@ -11,7 +11,10 @@ use rawler::imgop::sensor::SensorType;
 use rawler::imgop::xyz::Illuminant;
 use rawler::rawimage::RawImageData;
 use rawler::rawimage::RawPhotometricInterpretation;
+use rawler::rawsource::RawSource;
 use thiserror::Error;
+
+use crate::lens::{LensCorrections, LensProfile};
 
 /// How the sensor samples are arranged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -429,6 +432,10 @@ pub struct RawImage {
     camera_matrix: [[f32; 3]; 4],
     /// Correct chromatic aberration when developing. On by default.
     correct_chromatic_aberration: bool,
+    /// Distortion and vignetting tables the file records.
+    lens_profile: LensProfile,
+    /// Which of those tables a develop applies. All by default.
+    lens_corrections: LensCorrections,
     /// Sensor samples and CFA layout. Not part of [`Debug`] output.
     decoded: rawler::rawimage::RawImage,
 }
@@ -438,11 +445,18 @@ impl RawImage {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, DecodeError> {
         let path = path.as_ref();
         let path_string = path.display().to_string();
-        let decoded = rawler::decode_file(path).map_err(|source| DecodeError::Backend {
+        let source = RawSource::new(path).map_err(|error| DecodeError::Backend {
             path: path_string.clone(),
-            source,
+            source: rawler::RawlerError::with_io_error("open", path, error),
         })?;
-        Self::from_decoded(&path_string, decoded)
+        let decoded = rawler::decode(&source, &rawler::decoders::RawDecodeParams::default())
+            .map_err(|source| DecodeError::Backend {
+                path: path_string.clone(),
+                source,
+            })?;
+        let mut image = Self::from_decoded(&path_string, decoded)?;
+        image.lens_profile = LensProfile::read(&source);
+        Ok(image)
     }
 
     /// Width and height of the decoded frame, in pixels.
@@ -494,6 +508,24 @@ impl RawImage {
     /// Turn chromatic aberration correction on or off for later develops.
     pub fn set_chromatic_aberration_correction(&mut self, enabled: bool) {
         self.correct_chromatic_aberration = enabled;
+    }
+
+    /// Distortion and vignetting tables the file records. Fujifilm RAF
+    /// carries them. Other files, ProRAW included, have none here.
+    pub fn lens_profile(&self) -> &LensProfile {
+        &self.lens_profile
+    }
+
+    /// Which lens corrections [`Self::develop_linear`] applies from
+    /// [`Self::lens_profile`]: distortion and vignetting, both on by
+    /// default. A file without a table develops the same either way.
+    pub fn lens_corrections(&self) -> LensCorrections {
+        self.lens_corrections
+    }
+
+    /// Choose the lens corrections for later develops.
+    pub fn set_lens_corrections(&mut self, corrections: LensCorrections) {
+        self.lens_corrections = corrections;
     }
 
     /// Sensor samples backing this image.
@@ -551,6 +583,8 @@ impl RawImage {
             as_shot_wb: decoded.wb_coeffs,
             camera_matrix,
             correct_chromatic_aberration: true,
+            lens_profile: LensProfile::NONE,
+            lens_corrections: LensCorrections::ALL,
             decoded,
         })
     }
@@ -675,6 +709,8 @@ impl fmt::Debug for RawImage {
                 "correct_chromatic_aberration",
                 &self.correct_chromatic_aberration,
             )
+            .field("lens_profile", &self.lens_profile)
+            .field("lens_corrections", &self.lens_corrections)
             .finish_non_exhaustive()
     }
 }

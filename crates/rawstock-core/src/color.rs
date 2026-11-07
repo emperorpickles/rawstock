@@ -8,6 +8,7 @@
 //! after the film pipeline.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use rawler::imgop::develop::{Intermediate, ProcessingStep, RawDevelop};
 use rawler::imgop::sensor::Demosaic;
@@ -20,6 +21,7 @@ use thiserror::Error;
 use crate::decode::{CfaKind, RawImage};
 use crate::defringe::Defringe;
 use crate::lateral_ca::LateralCa;
+use crate::lens::{LensWarp, RadialGain};
 use crate::matrices;
 use crate::white_balance::{WhiteBalance, WhiteBalanceSolver};
 use crate::workers::Workers;
@@ -297,9 +299,10 @@ impl RawImage {
         self.develop_camera_here()?.convert(WhiteBalance::AsShot)
     }
 
-    /// Demosaic and correct chromatic aberration, but stop in camera RGB,
-    /// before white balance. [`CameraImage::develop`] finishes it with any
-    /// white balance, as often as needed, without demosaicing again.
+    /// Demosaic, correct chromatic aberration and lens distortion, but stop
+    /// in camera RGB, before white balance. [`CameraImage::develop`]
+    /// finishes it with any white balance, as often as needed, without
+    /// demosaicing again.
     /// `develop_camera()?.develop(WhiteBalance::AsShot)` is
     /// [`Self::develop_linear`].
     pub fn develop_camera(&self) -> Result<CameraImage, DevelopError> {
@@ -337,7 +340,35 @@ impl RawImage {
             let lateral_ca = LateralCa::estimate(columns, rows, &samples);
             lateral_ca.apply(columns, rows, &mut samples);
         }
-        CameraImage::from_raw(self, width, height, samples, correct)
+        let (samples, vignetting) = self.correct_lens(width as usize, height as usize, samples);
+        CameraImage::from_raw(self, width, height, samples, correct, vignetting)
+    }
+
+    /// Undistort `samples` as [`Self::lens_corrections`] asks, and the
+    /// vignetting gain [`CameraImage`] applies after highlight recovery.
+    fn correct_lens(
+        &self,
+        width: usize,
+        height: usize,
+        samples: Vec<f32>,
+    ) -> (Vec<f32>, Option<Arc<RadialGain>>) {
+        let corrections = self.lens_corrections();
+        let profile = self.lens_profile();
+        let half_width = (width as f64 - 1.0) / 2.0;
+        let half_height = (height as f64 - 1.0) / 2.0;
+        let warp = profile
+            .distortion()
+            .filter(|_| corrections.distortion)
+            .and_then(|table| LensWarp::new(table, half_width, half_height));
+        let vignetting = profile
+            .vignetting()
+            .filter(|_| corrections.vignetting)
+            .map(|table| Arc::new(RadialGain::new(table, warp.as_ref())));
+        let samples = match &warp {
+            Some(warp) => warp.apply(width, height, &samples),
+            None => samples,
+        };
+        (samples, vignetting)
     }
 
     /// [`Self::develop_linear`] on a pool of its own, `threads` wide.
@@ -429,12 +460,14 @@ impl RawImage {
                 lateral_ca.apply(width, height, &mut samples);
             });
         }
+        let (samples, vignetting) = Workers::install(|| self.correct_lens(width, height, samples));
         let image = CameraImage::from_raw(
             self,
             u32::try_from(width).map_err(|_| DevelopError::Dimension { value: width })?,
             u32::try_from(height).map_err(|_| DevelopError::Dimension { value: height })?,
             samples,
             correct,
+            vignetting,
         )?;
         Ok(Some(QuickDevelop {
             image,
@@ -477,7 +510,8 @@ pub struct QuickDevelop<Image = LinearImage> {
 }
 
 /// Demosaiced camera RGB before white balance: black and white levels
-/// normalized, chromatic aberration registered, nothing else.
+/// normalized, chromatic aberration registered, lens distortion undone,
+/// nothing else. Vignetting is applied by [`Self::develop`].
 ///
 /// [`Self::develop`] finishes it to ACEScg for a [`WhiteBalance`]. Keeping
 /// this buffer is what lets a white balance change skip the decode and the
@@ -493,6 +527,9 @@ pub struct CameraImage {
     /// full-size, CA-corrected develop sets it: the defringe radius is in
     /// sensor pixels.
     defringe: bool,
+    /// Lens vignetting gain by normalized radius, applied after highlight
+    /// recovery. It is resolution independent, so a downsample keeps it.
+    vignetting: Option<Arc<RadialGain>>,
 }
 
 impl std::fmt::Debug for CameraImage {
@@ -502,6 +539,7 @@ impl std::fmt::Debug for CameraImage {
             .field("height", &self.height)
             .field("pixels", &self.pixels.len())
             .field("defringe", &self.defringe)
+            .field("vignetting", &self.vignetting.is_some())
             .finish()
     }
 }
@@ -531,6 +569,7 @@ impl CameraImage {
             camera_matrix,
             as_shot_wb,
             defringe: false,
+            vignetting: None,
         })
     }
 
@@ -540,9 +579,11 @@ impl CameraImage {
         height: u32,
         pixels: Vec<f32>,
         defringe: bool,
+        vignetting: Option<Arc<RadialGain>>,
     ) -> Result<Self, DevelopError> {
         let mut image = Self::new(width, height, pixels, raw.camera_matrix(), raw.as_shot_wb())?;
         image.defringe = defringe;
+        image.vignetting = vignetting;
         Ok(image)
     }
 
@@ -600,6 +641,7 @@ impl CameraImage {
             camera_matrix: self.camera_matrix,
             as_shot_wb: self.as_shot_wb,
             defringe: false,
+            vignetting: self.vignetting.clone(),
         })
     }
 
@@ -616,10 +658,19 @@ impl CameraImage {
         let transform = acescg_transform(self.camera_matrix, [1.0, 1.0, 1.0, 0.0])?;
         let cap = white_balance[0].min(white_balance[1]).min(white_balance[2]) as f32;
         let wb = white_balance.map(|channel| channel as f32);
-        self.pixels.par_chunks_mut(3 * 4096).for_each(|chunk| {
-            recover_highlights(chunk, wb, cap);
-            apply_transform(chunk, transform);
-        });
+        const CHUNK: usize = 4096;
+        let (width, height) = (self.width as usize, self.height as usize);
+        let vignetting = self.vignetting.as_deref();
+        self.pixels
+            .par_chunks_mut(3 * CHUNK)
+            .enumerate()
+            .for_each(|(index, chunk)| {
+                recover_highlights(chunk, wb, cap);
+                if let Some(gain) = vignetting {
+                    gain.apply(width, height, index * CHUNK, chunk);
+                }
+                apply_transform(chunk, transform);
+            });
         let mut linear = LinearImage::new(self.width, self.height, self.pixels)?;
         if self.defringe {
             Defringe::apply(

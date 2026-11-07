@@ -145,6 +145,28 @@
     <span>Chromatic aberration correction</span>
   </label>
 
+  <label class="check">
+    <input
+      type="checkbox"
+      checked={settings.lens.distortionCorrection}
+      {disabled}
+      onchange={(event) =>
+        send(Adjustments.distortionCorrection(settings, event.currentTarget.checked), true)}
+    />
+    <span>Distortion correction</span>
+  </label>
+
+  <label class="check">
+    <input
+      type="checkbox"
+      checked={settings.lens.vignettingCorrection}
+      {disabled}
+      onchange={(event) =>
+        send(Adjustments.vignettingCorrection(settings, event.currentTarget.checked), true)}
+    />
+    <span>Vignetting correction</span>
+  </label>
+
   <Slider
     label="Print exposure"
     value={settings.printExposure}

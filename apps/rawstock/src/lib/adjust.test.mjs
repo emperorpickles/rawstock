@@ -54,6 +54,25 @@ test("chromatic aberration correction defaults on and toggles without changing t
   assert.deepEqual(on.whiteBalance, off.whiteBalance);
 });
 
+test("distortion and vignetting switch alone and keep the other lens settings", () => {
+  const settings = defaultSettings();
+  assert.equal(settings.lens.distortionCorrection, true);
+  assert.equal(settings.lens.vignettingCorrection, true);
+  const flat = Adjustments.distortionCorrection(settings, false);
+  assert.deepEqual(flat.lens, { ...settings.lens, distortionCorrection: false });
+  const dark = Adjustments.vignettingCorrection(flat, false);
+  assert.deepEqual(dark.lens, {
+    caCorrection: true,
+    distortionCorrection: false,
+    vignettingCorrection: false,
+  });
+  assert.equal(settings.lens.distortionCorrection, true);
+  assert.deepEqual(
+    Adjustments.vignettingCorrection(Adjustments.distortionCorrection(dark, true), true).lens,
+    settings.lens,
+  );
+});
+
 test("editing exposure keeps a custom white balance for the sidecar", () => {
   const custom = {
     ...defaultSettings(),
