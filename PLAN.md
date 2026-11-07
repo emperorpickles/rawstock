@@ -78,6 +78,15 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   developed with its own edit (`strip.rs`, one thread, nearest first).
   The thread never holds the queue lock while drawing: `render_strip`
   runs on the main thread, and a held lock froze the app (#119).
+- Camera color matching (#126): files with two color matrices (rawler's
+  Fuji A and D65 pair, DNG `ColorMatrix1`/`2`) interpolate them in mireds
+  for the scene's light, and the as-shot light is found by iterating, as
+  the DNG SDK does (`camera_matrices.rs`, `white_balance.rs`). Camera RGB
+  is read back to XYZ under the scene white, then Bradford-adapted to the
+  ACES white. An Oklab hue-preserving gamut map was tried and dropped: on
+  DSCF7392 it moved Velvia's sign red and blue away from the camera JPEG.
+  Output keeps the per-channel clip, as Lightroom's sRGB export does;
+  saturation belongs in each stock's print/scan.
 
 ## In flight
 
@@ -143,16 +152,6 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   Enter or `R` keeps the crop and Esc puts back the geometry crop mode
   opened with. Outside it the viewer shows only the cropped photo, and
   Fit, 100% and 200% frame the crop.
-- **#126** — Camera color matching (`agent: claude`, `stage: ready`,
-  waiting on Caleb's look review). Files with two color matrices (rawler's
-  Fuji A and D65 pair, DNG `ColorMatrix1`/`2`) interpolate them in mireds
-  for the scene's light; the as-shot light is found by iterating, as the
-  DNG SDK does (`camera_matrices.rs`, `white_balance.rs`). Camera RGB is
-  read back to XYZ under the scene white, then Bradford-adapted to ACES
-  white. The sRGB encode clips out-of-gamut colors in Oklab at constant
-  lightness and hue instead of per channel (`gamut.rs`, CPU and GPU). On
-  DSCF7392 the gamut map moved Velvia's sign red and blue away from the
-  camera JPEG, so Caleb decides whether it ships.
 - **#52, #53** — 1.0 app presets and export queue (`agent: claude`,
   `stage: holding`) until #39 and #41 land.
 - **#63** — Lavapipe apt timeout and retry in CI (`agent: grok`). GPU

@@ -61,9 +61,10 @@ Implemented order:
    (Status M for a negative). Otherwise characteristic density is printed.
    The print curve gives print density; with `[print_dye_density]` the
    paper's own dyes are viewed under D65, otherwise ideal ACEScg dyes.
-7. **Output.** ACEScg to encoded sRGB. An out-of-gamut color keeps its
-   Oklab lightness and hue and loses chroma to the sRGB edge (`gamut.rs`,
-   and the GPU encode). Colors inside sRGB are untouched.
+7. **Output.** ACEScg to encoded sRGB. The code clips out-of-gamut
+   channels, as Lightroom's sRGB export does. There is no separate
+   gamut-compression stage: a stock's print/scan keeps its colors near
+   sRGB, the way a camera profile does.
 
 Stocks are parametric or spectral models, never LUTs. A 3D LUT is only an
 optional `.cube` export bake or preview cache. **ACEScct is the shaper for

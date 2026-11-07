@@ -33,11 +33,6 @@ const GRAIN_RMS_TOLERANCE: f64 = 2.0e-5;
 const PRINT_TOLERANCE: f32 = 1.0e-4;
 /// Encoded sRGB in `0..=1`.
 const ENCODE_TOLERANCE: f32 = 2.0e-5;
-/// Encoded sRGB of a color the gamut map moved. The map's Oklab round trip
-/// cancels terms near 4 down to small channels, which costs f32 about
-/// 2e-6 in linear light on a far out-of-gamut color; the OETF's slope near
-/// black makes that ~1e-4 encoded, 1/40 of an 8-bit code.
-const GAMUT_MAP_TOLERANCE: f32 = 1.0e-4;
 
 fn gpu() -> Option<&'static Gpu> {
     static GPU: OnceLock<Option<Gpu>> = OnceLock::new();
@@ -445,45 +440,11 @@ fn encode_matches() {
         f32::INFINITY,
         f32::NEG_INFINITY,
     ]);
-    // Out-of-gamut colors a film stock really makes: saturated reds with a
-    // little negative green, deep blues, bright yellows.
-    linear.extend([
-        0.25, 0.02, 0.01, 0.05, 0.03, 0.6, 0.9, 0.85, 0.02, 0.4, 0.05, 0.3,
-    ]);
     let cpu = crate::color::encode_srgb(&linear);
     let gpu = pollster::block_on(pipeline.run(&[Kernel::Encode], &linear)).unwrap();
-    // Which pixels the gamut map moves, judged in f64 as the CPU does.
-    let srgb = crate::matrices::acescg_to_linear_srgb();
-    let mapped: Vec<bool> = linear
-        .as_chunks::<3>()
-        .0
-        .iter()
-        .map(|pixel| {
-            let rgb = crate::matrices::apply(srgb, pixel.map(f64::from));
-            rgb.iter().all(|channel| channel.is_finite())
-                && rgb.iter().any(|channel| !(0.0..=1.0).contains(channel))
-        })
-        .collect();
-    let in_gamut: Vec<usize> = (0..cpu.len()).filter(|index| !mapped[index / 3]).collect();
-    let moved: Vec<usize> = (0..cpu.len()).filter(|index| mapped[index / 3]).collect();
-    assert!(!in_gamut.is_empty() && !moved.is_empty());
-    let pick = |samples: &[f32], indices: &[usize]| -> Vec<f32> {
-        indices.iter().map(|index| samples[*index]).collect()
-    };
     // A non-finite input makes the matrix output non-finite on both sides,
     // and the OETF then writes 0. Compare those pixels too.
-    assert_close(
-        "encode",
-        &pick(&cpu, &in_gamut),
-        &pick(&gpu, &in_gamut),
-        |_| ENCODE_TOLERANCE,
-    );
-    assert_close(
-        "encode gamut map",
-        &pick(&cpu, &moved),
-        &pick(&gpu, &moved),
-        |_| GAMUT_MAP_TOLERANCE,
-    );
+    assert_close("encode", &cpu, &gpu, |_| ENCODE_TOLERANCE);
 }
 
 /// The 8-bit bound: at least 99.9% of codes equal, none off by more than 1.

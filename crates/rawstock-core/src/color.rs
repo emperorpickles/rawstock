@@ -20,7 +20,6 @@ use thiserror::Error;
 use crate::camera_matrices::CameraMatrices;
 use crate::decode::{CfaKind, RawImage};
 use crate::defringe::Defringe;
-use crate::gamut::GamutMap;
 use crate::lateral_ca::LateralCa;
 use crate::matrices;
 use crate::white_balance::{WhiteBalance, WhiteBalanceSolver};
@@ -837,19 +836,18 @@ fn apply_transform(samples: &mut [f32], matrix: [[f32; 3]; 3]) {
 
 /// Encode scene-linear ACEScg as display-encoded sRGB.
 ///
-/// Each pixel goes through the ACEScg → linear sRGB matrix, then the
-/// [`GamutMap`], which brings out-of-gamut colors into `0..=1` by
-/// compressing chroma at constant luminance and hue rather than cutting
-/// channels, then through the IEC 61966-2-1 transfer function. Grays and
-/// colors well inside sRGB are unchanged. A trailing incomplete pixel is
+/// Each pixel goes through the ACEScg → linear sRGB matrix, is clipped to
+/// `0..=1`, then through the IEC 61966-2-1 transfer function. Clipping is the
+/// gamut map: a channel outside sRGB is cut. A trailing incomplete pixel is
 /// omitted.
 pub fn encode_srgb(linear_acescg: &[f32]) -> Vec<f32> {
     let matrix = crate::matrices::acescg_to_linear_srgb();
     let mut encoded = Vec::with_capacity(linear_acescg.len());
     for pixel in linear_acescg.as_chunks::<3>().0 {
         let linear = pixel.map(f64::from);
-        let mapped = GamutMap::apply(crate::matrices::apply(matrix, linear));
-        encoded.extend(mapped.map(|channel| srgb_oetf(channel as f32)));
+        encoded.extend(
+            crate::matrices::apply(matrix, linear).map(|channel| srgb_oetf(channel as f32)),
+        );
     }
     encoded
 }
