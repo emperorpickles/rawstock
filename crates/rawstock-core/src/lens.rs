@@ -27,8 +27,14 @@
 //! [`crate::color::CameraImage`], so a pixel brightened toward a corner is
 //! not clipped at the sensor white first.
 //!
-//! The chromatic aberration table (0xf00f) is not used here: lateral CA is
-//! measured from the image itself by [`crate::lateral_ca`].
+//! Lateral CA reads the same Fuji IFD. `ChromaticAberrationParams` (0xf00f)
+//! is not one percentage curve: a scale, then the knots, then a red radial
+//! scale and a blue one. On an X-S10 the tag is 29 rationals (9 knots, and
+//! the scale repeated at the end). On an X-T2 it is 31 (10 knots, the center
+//! knot left out). A value of 0.001 means that channel is sampled 0.1%
+//! further from the center than green. An empty or implausible table is
+//! dropped, and the develop then measures the shift from the image
+//! ([`crate::lateral_ca`]).
 
 use std::io::{Read, Seek, SeekFrom};
 
@@ -141,6 +147,9 @@ pub struct LensProfile {
     distortion: Option<RadialTable>,
     /// Fraction of the center's brightness reaching each sensor-side radius.
     vignetting: Option<RadialTable>,
+    /// Red and blue radial scale against green. Each value is
+    /// `source_radius / output_radius − 1` at the normalized radius.
+    chromatic_aberration: Option<(RadialTable, RadialTable)>,
 }
 
 impl LensProfile {
@@ -148,6 +157,8 @@ impl LensProfile {
     const FUJI_IFD: u16 = 0xf000;
     /// Fuji `GeometricDistortionParams`.
     const FUJI_DISTORTION: u16 = 0xf00b;
+    /// Fuji `ChromaticAberrationParams`.
+    const FUJI_CA: u16 = 0xf00f;
     /// Fuji `VignettingParams`.
     const FUJI_VIGNETTING: u16 = 0xf010;
     /// Byte offset of the RAF header's pointer to the Fuji IFD.
@@ -157,11 +168,15 @@ impl LensProfile {
     const MAX_DISTORTION: f64 = 0.25;
     /// Darkest corner a vignetting table may claim, as a fraction.
     const MIN_VIGNETTING: f64 = 0.1;
+    /// Largest |red| or |blue| scale kept. Measured X-T2 and X-S10 tables
+    /// stay under 0.001. Anything larger is not this layout.
+    const MAX_CA: f64 = 0.02;
 
     /// No correction recorded.
     pub const NONE: Self = Self {
         distortion: None,
         vignetting: None,
+        chromatic_aberration: None,
     };
 
     /// A profile from tables already in fractions: distortion as an offset
@@ -185,11 +200,13 @@ impl LensProfile {
         Self {
             distortion,
             vignetting,
+            chromatic_aberration: None,
         }
     }
 
     /// The tables a RAW file carries. Only Fujifilm RAF is read today. Any
-    /// other file, or a RAF without usable tables, gives [`Self::NONE`].
+    /// other file gives [`Self::NONE`]. A RAF keeps each table that is
+    /// usable and drops the rest.
     pub fn read(source: &RawSource) -> Self {
         Self::fuji(source).unwrap_or(Self::NONE)
     }
@@ -202,6 +219,90 @@ impl LensProfile {
     /// Vignetting table, when the file has one that changes the image.
     pub fn vignetting(&self) -> Option<&RadialTable> {
         self.vignetting.as_ref()
+    }
+
+    /// Red and blue radial scales, when the file has a usable CA table.
+    pub fn chromatic_aberration(&self) -> Option<(&RadialTable, &RadialTable)> {
+        self.chromatic_aberration
+            .as_ref()
+            .map(|(red, blue)| (red, blue))
+    }
+
+    /// Register red and blue onto green. The camera table wins when this
+    /// profile has one; otherwise the shift is measured from `samples`.
+    pub(crate) fn correct_lateral_ca(&self, width: usize, height: usize, samples: &mut [f32]) {
+        if self.apply_chromatic_aberration(width, height, samples) {
+            return;
+        }
+        let estimated = crate::lateral_ca::LateralCa::estimate(width, height, samples);
+        estimated.apply(width, height, samples);
+    }
+
+    /// Resample red and blue from the camera table. `false` when there is
+    /// nothing to apply, so the caller can measure the shift instead.
+    fn apply_chromatic_aberration(&self, width: usize, height: usize, samples: &mut [f32]) -> bool {
+        let Some((red, blue)) = &self.chromatic_aberration else {
+            return false;
+        };
+        if width == 0 || height == 0 || samples.len() != width * height * 3 {
+            return false;
+        }
+        for (channel, table) in [(0, red), (2, blue)] {
+            let corrected = Self::resample_channel(width, height, samples, channel, table);
+            for (pixel, value) in samples.as_chunks_mut::<3>().0.iter_mut().zip(corrected) {
+                pixel[channel] = value;
+            }
+        }
+        true
+    }
+
+    /// Red or blue resampled onto green. `samples` stays immutable so the
+    /// rows can be read in parallel; the caller writes `channel` back.
+    fn resample_channel(
+        width: usize,
+        height: usize,
+        samples: &[f32],
+        channel: usize,
+        table: &RadialTable,
+    ) -> Vec<f32> {
+        let frame = Frame::new(width, height);
+        let mut corrected = vec![0.0_f32; width * height];
+        corrected
+            .par_chunks_mut(width)
+            .enumerate()
+            .for_each(|(y, row)| {
+                let dy = y as f64 - frame.center_y;
+                for (x, out) in row.iter_mut().enumerate() {
+                    let dx = x as f64 - frame.center_x;
+                    let radius = dx.hypot(dy);
+                    let scale = if radius < 1e-9 {
+                        1.0
+                    } else {
+                        1.0 + table.at(radius / frame.half_diagonal)
+                    };
+                    *out = frame.cubic_channel(
+                        samples,
+                        frame.center_x + dx * scale,
+                        frame.center_y + dy * scale,
+                        channel,
+                    );
+                }
+            });
+        corrected
+    }
+
+    fn with_chromatic_aberration(mut self, ca: Option<(RadialTable, RadialTable)>) -> Self {
+        self.chromatic_aberration = ca.filter(|(red, blue)| Self::usable_ca(red, blue));
+        self
+    }
+
+    fn usable_ca(red: &RadialTable, blue: &RadialTable) -> bool {
+        !(red.is_constant(0.0) && blue.is_constant(0.0))
+            && red
+                .values
+                .iter()
+                .chain(&blue.values)
+                .all(|value| value.abs() < Self::MAX_CA)
     }
 
     fn fuji(source: &RawSource) -> Option<Self> {
@@ -219,15 +320,22 @@ impl LensProfile {
             IFD::new_root_with_correction(&mut reader, 0, base, 0, 10, &[Self::FUJI_IFD]).ok()?;
         let distortion = Self::fuji_table(&ifd, Self::FUJI_DISTORTION);
         let vignetting = Self::fuji_table(&ifd, Self::FUJI_VIGNETTING);
-        Some(Self::new(distortion, vignetting))
+        let chromatic_aberration = Self::fuji_ca(&ifd);
+        Some(Self::new(distortion, vignetting).with_chromatic_aberration(chromatic_aberration))
+    }
+
+    /// Floats of one Fuji tag. Distortion, vignetting, and CA are all
+    /// stored as signed rationals; `rawler` exposes them as `f32`.
+    fn fuji_numbers(ifd: &IFD, tag: u16) -> Option<Vec<f64>> {
+        let value = &ifd.get_entry_recursive(tag)?.value;
+        (0..value.count())
+            .map(|index| value.get_f32(index).ok().flatten().map(f64::from))
+            .collect()
     }
 
     /// One Fuji table: a scale, then the knots, then a percentage per knot.
     fn fuji_table(ifd: &IFD, tag: u16) -> Option<RadialTable> {
-        let value = &ifd.get_entry_recursive(tag)?.value;
-        let numbers: Vec<f64> = (0..value.count())
-            .map(|index| value.get_f32(index).ok().flatten().map(f64::from))
-            .collect::<Option<_>>()?;
+        let numbers = Self::fuji_numbers(ifd, tag)?;
         let pairs = numbers.len().checked_sub(1)?;
         if pairs < 4 || pairs % 2 != 0 {
             return None;
@@ -239,6 +347,59 @@ impl LensProfile {
             .map(|percent| percent / 100.0)
             .collect();
         RadialTable::new(knots, values)
+    }
+
+    /// Red and blue scales from `ChromaticAberrationParams`.
+    ///
+    /// Both layouts measured in RAF files start with the same scale word as
+    /// distortion. The newer one (29 values) repeats that scale at the end
+    /// and carries 9 knots. The older one (31 values) carries 10 knots and
+    /// omits the center. Values are already fractions of radius.
+    fn fuji_ca(ifd: &IFD) -> Option<(RadialTable, RadialTable)> {
+        Self::ca_tables(&Self::fuji_numbers(ifd, Self::FUJI_CA)?)
+    }
+
+    fn ca_tables(numbers: &[f64]) -> Option<(RadialTable, RadialTable)> {
+        let count = Self::ca_knot_count(numbers)?;
+        let end = 1 + 3 * count;
+        if count < 2 || numbers.len() < end {
+            return None;
+        }
+        let knots = numbers[1..1 + count].to_vec();
+        let red = numbers[1 + count..1 + 2 * count].to_vec();
+        let blue = numbers[1 + 2 * count..end].to_vec();
+        if knots.last().is_none_or(|knot| *knot < 0.5)
+            || knots.iter().any(|knot| !(0.0..=1.5).contains(knot))
+        {
+            return None;
+        }
+        let (knots, red, blue) = Self::with_center(knots, red, blue);
+        let red = RadialTable::new(knots.clone(), red)?;
+        let blue = RadialTable::new(knots, blue)?;
+        Self::usable_ca(&red, &blue).then_some((red, blue))
+    }
+
+    /// Knot count, after a trailing copy of the leading scale is set aside.
+    fn ca_knot_count(numbers: &[f64]) -> Option<usize> {
+        let n = numbers.len();
+        if n >= 5 && (n - 2).is_multiple_of(3) && (numbers[n - 1] - numbers[0]).abs() < 1e-3 {
+            return Some((n - 2) / 3);
+        }
+        (n >= 4 && (n - 1).is_multiple_of(3)).then_some((n - 1) / 3)
+    }
+
+    /// Lateral CA is zero at the center. Files that omit that knot get one.
+    fn with_center(
+        mut knots: Vec<f64>,
+        mut red: Vec<f64>,
+        mut blue: Vec<f64>,
+    ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        if knots.first().is_some_and(|knot| *knot > 0.0) {
+            knots.insert(0, 0.0);
+            red.insert(0, 0.0);
+            blue.insert(0, 0.0);
+        }
+        (knots, red, blue)
     }
 }
 
@@ -450,6 +611,13 @@ impl Frame {
     /// the four nearest pixels' range so hard edges do not ring. Edges are
     /// clamped.
     fn sample(&self, samples: &[f32], x: f64, y: f64, out: &mut [f32]) {
+        for (channel, value) in out.iter_mut().enumerate() {
+            *value = self.cubic_channel(samples, x, y, channel);
+        }
+    }
+
+    /// One channel of [`Self::sample`].
+    fn cubic_channel(&self, samples: &[f32], x: f64, y: f64, channel: usize) -> f32 {
         let x0 = x.floor();
         let y0 = y.floor();
         let wx = Self::catmull_rom(x - x0);
@@ -461,26 +629,24 @@ impl Frame {
             std::array::from_fn(|i| (x0 + i as i64).clamp(0, max_x) as usize * 3);
         let rows: [usize; 4] =
             std::array::from_fn(|j| (y0 + j as i64).clamp(0, max_y) as usize * self.width * 3);
-        for (channel, value) in out.iter_mut().enumerate() {
-            let mut sum = 0.0;
-            for (row, weight_y) in rows.iter().zip(wy) {
-                let line: f32 = columns
-                    .iter()
-                    .zip(wx)
-                    .map(|(column, weight_x)| weight_x * samples[row + column + channel])
-                    .sum();
-                sum += weight_y * line;
-            }
-            let near = [
-                samples[rows[1] + columns[1] + channel],
-                samples[rows[1] + columns[2] + channel],
-                samples[rows[2] + columns[1] + channel],
-                samples[rows[2] + columns[2] + channel],
-            ];
-            let low = near.iter().copied().fold(f32::INFINITY, f32::min);
-            let high = near.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            *value = sum.clamp(low, high);
+        let mut sum = 0.0;
+        for (row, weight_y) in rows.iter().zip(wy) {
+            let line: f32 = columns
+                .iter()
+                .zip(wx)
+                .map(|(column, weight_x)| weight_x * samples[row + column + channel])
+                .sum();
+            sum += weight_y * line;
         }
+        let near = [
+            samples[rows[1] + columns[1] + channel],
+            samples[rows[1] + columns[2] + channel],
+            samples[rows[2] + columns[1] + channel],
+            samples[rows[2] + columns[2] + channel],
+        ];
+        let low = near.iter().copied().fold(f32::INFINITY, f32::min);
+        let high = near.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        sum.clamp(low, high)
     }
 
     fn catmull_rom(t: f64) -> [f32; 4] {
@@ -654,5 +820,96 @@ mod tests {
         let warped = RadialGain::new(&vignetting, Some(&warp));
         assert!(warped.at(1.0) < gain.at(1.0));
         assert!(warped.at(1.0) > 1.1);
+    }
+
+    fn rationals(parts: &[(i32, i32)]) -> Vec<f64> {
+        parts
+            .iter()
+            .map(|(numerator, denominator)| f64::from(*numerator) / f64::from(*denominator))
+            .collect()
+    }
+
+    #[test]
+    fn measured_ca_tables_parse_and_empty_or_wild_ones_are_dropped() {
+        // X-S10, 29 rationals. The knot at radius 1 is −48/65536 red, 30/65536 blue.
+        let mut xs10 = vec![(3749, 9)];
+        for numerator in [502, 710, 870, 1004, 1123, 1230, 1328, 1420, 1506] {
+            xs10.push((numerator, 1420));
+        }
+        for numerator in [-30, -34, -38, -42, -44, -46, -46, -48, -48] {
+            xs10.push((numerator, 65536));
+        }
+        for numerator in [12, 16, 20, 24, 26, 28, 30, 30, 30] {
+            xs10.push((numerator, 65536));
+        }
+        xs10.push((3749, 9));
+        let (red, blue) = LensProfile::ca_tables(&rationals(&xs10)).unwrap();
+        assert!(red.at(0.0).abs() < 1e-12);
+        assert!((red.at(1.0) + 48.0 / 65536.0).abs() < 1e-12);
+        assert!((blue.at(1.0) - 30.0 / 65536.0).abs() < 1e-12);
+
+        // X-T2, 31 rationals. The center knot is omitted; red at 0.1 is 115e-6.
+        let mut xt2 = vec![(3605, 10)];
+        for numerator in 1..=10 {
+            xt2.push((numerator, 10));
+        }
+        for numerator in [115, 216, 285, 310, 305, 305, 305, 304, 310, 244] {
+            xt2.push((numerator, 1_000_000));
+        }
+        for numerator in [-36, -72, -105, -135, -152, -152, -153, -115, -43, 0] {
+            xt2.push((numerator, 1_000_000));
+        }
+        let (red, blue) = LensProfile::ca_tables(&rationals(&xt2)).unwrap();
+        assert!(red.at(0.0).abs() < 1e-12);
+        assert!((red.at(0.1) - 115.0 / 1_000_000.0).abs() < 1e-12);
+        assert!(blue.at(1.0).abs() < 1e-12);
+
+        let mut flat = vec![1.0, 0.25, 0.5, 0.75, 1.0];
+        flat.extend([0.0; 8]);
+        assert!(LensProfile::ca_tables(&flat).is_none());
+        let mut wild = vec![1.0, 0.0, 0.5, 1.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0];
+        assert!(LensProfile::ca_tables(&wild).is_none());
+        wild[5] = 0.001;
+        assert!(LensProfile::ca_tables(&wild).is_some());
+    }
+
+    #[test]
+    fn a_camera_table_is_applied_where_the_estimate_cannot_run() {
+        let profile = LensProfile::NONE.with_chromatic_aberration(Some((
+            RadialTable::new(vec![0.0, 1.0], vec![0.001, 0.001]).unwrap(),
+            RadialTable::new(vec![0.0, 1.0], vec![-0.001, -0.001]).unwrap(),
+        )));
+        let (width, height) = (32, 32);
+        let mut samples = vec![0.0_f32; width * height * 3];
+        for y in 0..height {
+            for x in 0..width {
+                let pixel = &mut samples[(y * width + x) * 3..][..3];
+                pixel[0] = x as f32;
+                pixel[1] = 0.4;
+                pixel[2] = y as f32;
+            }
+        }
+        assert_eq!(
+            crate::lateral_ca::LateralCa::estimate(width, height, &samples),
+            crate::lateral_ca::LateralCa::NONE,
+            "this frame is too small for the image estimate"
+        );
+        let original = samples.clone();
+        profile.correct_lateral_ca(width, height, &mut samples);
+        // (24, 16) sits 8.5 px right and 0.5 px below center. Red is read
+        // 0.1% further out, blue 0.1% closer in.
+        let index = (16 * width + 24) * 3;
+        assert!(
+            (samples[index] - 24.0085).abs() < 0.002,
+            "red {}",
+            samples[index]
+        );
+        assert!((samples[index + 1] - 0.4).abs() < 1e-6);
+        assert!(
+            (samples[index + 2] - 15.9995).abs() < 0.002,
+            "blue {}",
+            samples[index + 2]
+        );
+        assert_ne!(samples, original);
     }
 }

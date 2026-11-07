@@ -20,7 +20,6 @@ use thiserror::Error;
 
 use crate::decode::{CfaKind, RawImage};
 use crate::defringe::Defringe;
-use crate::lateral_ca::LateralCa;
 use crate::lens::{LensWarp, RadialGain};
 use crate::matrices;
 use crate::white_balance::{WhiteBalance, WhiteBalanceSolver};
@@ -275,8 +274,10 @@ impl RawImage {
     /// demosaic steps (Bayer via PPG, X-Trans via Markesteijn, linear DNG
     /// unchanged). Mosaic files then get chromatic aberration correction,
     /// unless [`Self::set_chromatic_aberration_correction`] turned it off:
-    /// red and blue are measured against green and resampled onto it
-    /// ([`LateralCa`]), as the camera does for its own JPEGs, and after the
+    /// red and blue are resampled onto green from the camera's CA table when
+    /// the file has one, and from an image estimate otherwise
+    /// ([`crate::lateral_ca::LateralCa`]), as the camera does for its own
+    /// JPEGs, and after the
     /// ACEScg conversion the blue/purple glow beside bright edges is
     /// desaturated ([`Defringe`]). Rescale does not clip above the white
     /// level. Highlight recovery white-balances with green at 1 and rebuilds
@@ -336,8 +337,8 @@ impl RawImage {
         let correct = self.corrects_chromatic_aberration() && self.cfa() != CfaKind::LinearDng;
         if correct {
             let (columns, rows) = (width as usize, height as usize);
-            let lateral_ca = LateralCa::estimate(columns, rows, &samples);
-            lateral_ca.apply(columns, rows, &mut samples);
+            self.lens_profile()
+                .correct_lateral_ca(columns, rows, &mut samples);
         }
         let (samples, vignetting) = self.correct_lens(width as usize, height as usize, samples);
         CameraImage::from_raw(self, width, height, samples, correct, vignetting)
@@ -387,10 +388,10 @@ impl RawImage {
     /// takes seconds. A preview downsampled from it is within about 0.5% of
     /// one downsampled from Markesteijn. The
     /// frame is the one [`Self::develop_linear`] returns, a third the size.
-    /// Chromatic aberration is corrected as in [`Self::develop_linear`],
-    /// measured on this frame: at a third the size it is a third of a pixel,
-    /// which a saturated stock still shows as pink and blue outlines on a
-    /// screen-sized preview. `None` for a sensor that is not X-Trans.
+    /// Chromatic aberration is corrected as in [`Self::develop_linear`].
+    /// The camera table is a fraction of radius, so it agrees at this size;
+    /// the image estimate is measured on this frame. `None` for a sensor
+    /// that is not X-Trans.
     pub fn develop_quick_linear(&self) -> Result<Option<QuickDevelop>, DevelopError> {
         let Some(quick) = self.develop_quick_camera()? else {
             return Ok(None);
@@ -454,10 +455,8 @@ impl RawImage {
         });
         let correct = self.corrects_chromatic_aberration();
         if correct {
-            Workers::install(|| {
-                let lateral_ca = LateralCa::estimate(width, height, &samples);
-                lateral_ca.apply(width, height, &mut samples);
-            });
+            let profile = self.lens_profile();
+            Workers::install(|| profile.correct_lateral_ca(width, height, &mut samples));
         }
         let (samples, vignetting) = Workers::install(|| self.correct_lens(width, height, samples));
         let image = CameraImage::from_raw(

@@ -85,3 +85,31 @@ fn lens_corrections_follow_the_rafs_own_tables_and_switch_off() {
     let has_table = profile.distortion().is_some() || profile.vignetting().is_some();
     assert_eq!(on.pixels() != off.pixels(), has_table, "{profile:?}");
 }
+
+#[test]
+fn the_raf_ca_table_is_used_and_the_switch_turns_correction_and_defringe_off() {
+    let Some(path) = X_S10.prepare() else {
+        return;
+    };
+    let mut raw = RawImage::open(&path).unwrap();
+    let (red, blue) = raw
+        .lens_profile()
+        .chromatic_aberration()
+        .expect("the X-S10 RAF embeds a CA table");
+    assert!((red.at(1.0) + 48.0 / 65536.0).abs() < 1e-6);
+    assert!((blue.at(1.0) - 30.0 / 65536.0).abs() < 1e-6);
+
+    let quick = |raw: &RawImage| {
+        let quick = raw.develop_quick_camera().unwrap().expect("X-Trans");
+        let defringe = format!("{:?}", quick.image).contains("defringe: true");
+        let image = quick.image.develop(WhiteBalance::AsShot).unwrap();
+        (defringe, image)
+    };
+    let (defringe_on, on) = quick(&raw);
+    assert!(defringe_on);
+    raw.set_chromatic_aberration_correction(false);
+    let (defringe_off, off) = quick(&raw);
+    assert!(!defringe_off);
+    assert_eq!((on.width(), on.height()), (off.width(), off.height()));
+    assert_ne!(on.pixels(), off.pixels());
+}

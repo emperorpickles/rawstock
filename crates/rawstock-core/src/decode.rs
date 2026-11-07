@@ -510,8 +510,9 @@ impl RawImage {
         self.correct_chromatic_aberration = enabled;
     }
 
-    /// Distortion and vignetting tables the file records. Fujifilm RAF
-    /// carries them. Other files, ProRAW included, have none here.
+    /// Distortion, vignetting, and chromatic-aberration tables the file
+    /// records. Fujifilm RAF carries them. Other files, ProRAW included,
+    /// have none here.
     pub fn lens_profile(&self) -> &LensProfile {
         &self.lens_profile
     }
