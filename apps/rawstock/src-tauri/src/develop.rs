@@ -406,7 +406,7 @@ impl Opened {
         let mut raw = RawImage::open(path).map_err(|error| error.to_string())?;
         lens.apply_to(&mut raw);
         let orientation = raw.orientation();
-        let as_shot = WhiteBalanceSolver::new(raw.camera_matrix(), raw.as_shot_wb())
+        let as_shot = WhiteBalanceSolver::new(raw.camera_matrices(), raw.as_shot_wb())
             .and_then(|solver| solver.as_shot());
         let quick = raw
             .develop_quick_camera()

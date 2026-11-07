@@ -18,7 +18,15 @@
 //! greener than a black body, so the developed image turns more magenta,
 //! as in common raw developers. A higher temperature means the light was
 //! bluer, so the image turns warmer.
+//!
+//! A file with two color matrices ([`CameraMatrices`]) has a different
+//! matrix for each light. A custom light uses the matrix at its own
+//! temperature. The as-shot light is found the way the DNG SDK finds it:
+//! guess a temperature, read the as-shot response through the matrix for
+//! that guess, and repeat with the temperature that comes out until it
+//! settles.
 
+use crate::camera_matrices::CameraMatrices;
 use crate::cie1931::{CIE_LAMBDA_MIN, CIE_X, CIE_Y, CIE_Z};
 use crate::matrices;
 
@@ -43,13 +51,14 @@ pub struct Temperature {
 }
 
 /// Turns temperature and tint into camera multipliers and back, for one
-/// camera matrix.
+/// camera's color matrices.
 #[derive(Debug, Clone, Copy)]
 pub struct WhiteBalanceSolver {
-    xyz_to_camera: [[f64; 3]; 3],
-    camera_to_xyz: [[f64; 3]; 3],
+    matrices: CameraMatrices,
     /// Green-normalized as-shot multipliers.
     as_shot: [f64; 3],
+    /// The as-shot light, when the camera recorded a real color.
+    as_shot_light: Option<Temperature>,
 }
 
 impl WhiteBalanceSolver {
@@ -63,25 +72,29 @@ impl WhiteBalanceSolver {
     const C2: f64 = 1.438_776_877e-2;
     /// Half-step, in mireds, of the locus tangent's central difference.
     const TANGENT_STEP_MIRED: f64 = 0.05;
+    /// Most rounds of the as-shot search between two matrices.
+    const AS_SHOT_ROUNDS: usize = 40;
+    /// The as-shot search stops when xy moves less than this.
+    const AS_SHOT_TOLERANCE: f64 = 1.0e-13;
 
-    /// `None` when the matrix cannot be inverted or the as-shot multipliers
+    /// `None` when a matrix cannot be inverted or the as-shot multipliers
     /// are missing.
     ///
-    /// `xyz_to_camera` is the file's matrix as decoded: rows are camera
-    /// red, green, blue (a fourth RGBE row is ignored). `as_shot_wb` is the
+    /// `camera` holds the file's matrices as decoded. `as_shot_wb` is the
     /// file's multipliers in RGBE order.
-    pub fn new(xyz_to_camera: [[f32; 3]; 4], as_shot_wb: [f32; 4]) -> Option<Self> {
-        let xyz_to_camera = [0, 1, 2].map(|row| xyz_to_camera[row].map(f64::from));
-        let camera_to_xyz = matrices::inverse(xyz_to_camera)?;
+    pub fn new(camera: CameraMatrices, as_shot_wb: [f32; 4]) -> Option<Self> {
+        for (_, xyz_to_camera) in camera.calibrations() {
+            matrices::inverse(xyz_to_camera.map(|row| row.map(f64::from)))?;
+        }
         let rgb = [as_shot_wb[0], as_shot_wb[1], as_shot_wb[2]].map(f64::from);
         if rgb.iter().any(|coeff| !coeff.is_finite() || *coeff <= 0.0) {
             return None;
         }
         let as_shot = [rgb[0] / rgb[1], 1.0, rgb[2] / rgb[1]];
         Some(Self {
-            xyz_to_camera,
-            camera_to_xyz,
+            matrices: camera,
             as_shot,
+            as_shot_light: Self::find_as_shot_light(camera, as_shot),
         })
     }
 
@@ -101,7 +114,8 @@ impl WhiteBalanceSolver {
             return None;
         }
         let xy = Locus::xy(temperature);
-        let response = matrices::apply(self.xyz_to_camera, matrices::xy_to_xyz(xy));
+        let xyz_to_camera = self.matrices.at_kelvin(temperature.kelvin);
+        let response = matrices::apply(xyz_to_camera, matrices::xy_to_xyz(xy));
         if response
             .iter()
             .any(|channel| !channel.is_finite() || *channel <= 1.0e-9)
@@ -117,13 +131,52 @@ impl WhiteBalanceSolver {
     /// temperature beyond [`Self::MIN_KELVIN`]..=[`Self::MAX_KELVIN`] is
     /// clamped, and then custom at that value is not exactly as shot.
     pub fn as_shot(&self) -> Option<Temperature> {
-        let response = self.as_shot.map(|multiplier| 1.0 / multiplier);
-        let xyz = matrices::apply(self.camera_to_xyz, response);
-        let sum = xyz[0] + xyz[1] + xyz[2];
-        if !sum.is_finite() || sum <= 0.0 || xyz[1] <= 0.0 {
-            return None;
+        self.as_shot_light
+    }
+
+    /// Camera RGB → ACEScg, applied after the multipliers for `balance`.
+    ///
+    /// It uses the matrix for the light `balance` names, and adapts that
+    /// light's white to the ACES white. `None` when that light is unknown
+    /// or the matrix fails; the caller then falls back to D65.
+    pub(crate) fn camera_to_acescg(&self, balance: WhiteBalance) -> Option<[[f64; 3]; 3]> {
+        let light = match balance {
+            WhiteBalance::AsShot => self.as_shot_light?,
+            WhiteBalance::Custom(temperature) => temperature,
+        };
+        self.matrices
+            .camera_to_acescg(light.kelvin, Locus::xy(light))
+    }
+
+    /// The light whose white the camera recorded as its as-shot balance.
+    ///
+    /// Start at D65, read the as-shot response back to xy through the
+    /// matrix for the current temperature, and repeat with the temperature
+    /// of that xy. One matrix settles in one round.
+    fn find_as_shot_light(camera: CameraMatrices, as_shot: [f64; 3]) -> Option<Temperature> {
+        let response = as_shot.map(|multiplier| 1.0 / multiplier);
+        let mut kelvin = CameraMatrices::D65_KELVIN;
+        let mut previous: Option<[f64; 2]> = None;
+        for _ in 0..Self::AS_SHOT_ROUNDS {
+            let camera_to_xyz = matrices::inverse(camera.at_kelvin(kelvin))?;
+            let xyz = matrices::apply(camera_to_xyz, response);
+            let sum = xyz[0] + xyz[1] + xyz[2];
+            if !sum.is_finite() || sum <= 0.0 || xyz[1] <= 0.0 {
+                return None;
+            }
+            let xy = [xyz[0] / sum, xyz[1] / sum];
+            let light = Locus::temperature(xy)?;
+            let settled = previous.is_some_and(|last| {
+                (last[0] - xy[0]).abs().max((last[1] - xy[1]).abs()) < Self::AS_SHOT_TOLERANCE
+            });
+            if settled || !camera.is_dual() {
+                return Some(light);
+            }
+            previous = Some(xy);
+            kelvin = light.kelvin;
         }
-        Locus::temperature([xyz[0] / sum, xyz[1] / sum])
+        // Still moving: the last estimate is as close as it gets.
+        previous.and_then(Locus::temperature)
     }
 }
 
@@ -248,8 +301,20 @@ mod tests {
         [0.0, 0.0, 0.0],
     ];
 
+    /// Fujifilm X-T3 ColorMatrix1 (illuminant A), as rawler reports it.
+    const XT3_A: [[f32; 3]; 4] = [
+        [1.6064, -0.9942, 0.1120],
+        [-0.3760, 1.2096, 0.1853],
+        [-0.0007, 0.0545, 0.6654],
+        [0.0, 0.0, 0.0],
+    ];
+
     fn solver(as_shot: [f32; 4]) -> WhiteBalanceSolver {
-        WhiteBalanceSolver::new(XT3, as_shot).unwrap()
+        WhiteBalanceSolver::new(CameraMatrices::single(XT3), as_shot).unwrap()
+    }
+
+    fn dual() -> CameraMatrices {
+        CameraMatrices::dual((2856.0, XT3_A), (CameraMatrices::D65_KELVIN, XT3))
     }
 
     #[test]
@@ -326,9 +391,11 @@ mod tests {
 
     #[test]
     fn missing_or_out_of_range_values_are_refused() {
-        assert!(WhiteBalanceSolver::new(XT3, [0.0, 1.0, 1.0, 0.0]).is_none());
+        let single = CameraMatrices::single(XT3);
+        assert!(WhiteBalanceSolver::new(single, [0.0, 1.0, 1.0, 0.0]).is_none());
         let mut singular = XT3;
         singular[2] = singular[1];
+        let singular = CameraMatrices::single(singular);
         assert!(WhiteBalanceSolver::new(singular, [2.0, 1.0, 1.5, 0.0]).is_none());
         let solver = solver([2.0, 1.0, 1.5, 0.0]);
         let custom =
@@ -336,5 +403,92 @@ mod tests {
         assert!(custom(500.0).is_none());
         assert!(custom(f64::NAN).is_none());
         assert!(custom(5_000.0).is_some());
+    }
+
+    /// Multipliers a camera with `camera`'s matrices records under `light`.
+    fn multipliers_under(camera: CameraMatrices, light: Temperature) -> [f32; 4] {
+        let response = matrices::apply(
+            camera.at_kelvin(light.kelvin),
+            matrices::xy_to_xyz(Locus::xy(light)),
+        );
+        [
+            (response[1] / response[0]) as f32,
+            1.0,
+            (response[1] / response[2]) as f32,
+            0.0,
+        ]
+    }
+
+    #[test]
+    fn dual_matrices_find_the_as_shot_light() {
+        for kelvin in [2_400.0, 2_856.0, 3_800.0, 5_000.0, 6_504.0, 9_000.0] {
+            let light = Temperature { kelvin, tint: 6.0 };
+            let solver = WhiteBalanceSolver::new(dual(), multipliers_under(dual(), light)).unwrap();
+            let found = solver.as_shot().unwrap();
+            // The multipliers are rounded to f32, which moves the light a
+            // little.
+            assert!(
+                (found.kelvin / kelvin - 1.0).abs() < 1.0e-4,
+                "{kelvin} {found:?}"
+            );
+            assert!((found.tint - light.tint).abs() < 0.05, "{found:?}");
+        }
+    }
+
+    #[test]
+    fn dual_matrices_keep_custom_at_as_shot_equal_to_as_shot() {
+        let light = Temperature {
+            kelvin: 3_400.0,
+            tint: -4.0,
+        };
+        let solver = WhiteBalanceSolver::new(dual(), multipliers_under(dual(), light)).unwrap();
+        let as_shot = solver.as_shot().unwrap();
+        let custom = solver.multipliers(WhiteBalance::Custom(as_shot)).unwrap();
+        let expected = solver.multipliers(WhiteBalance::AsShot).unwrap();
+        for channel in 0..3 {
+            assert!(
+                (custom[channel] / expected[channel] - 1.0).abs() < 1.0e-7,
+                "{custom:?} {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tungsten_light_uses_the_tungsten_matrix() {
+        // Under illuminant A the dual solver reads the A matrix; the D65
+        // matrix alone reads the same multipliers as another light.
+        let light = Temperature {
+            kelvin: 2_856.0,
+            tint: 0.0,
+        };
+        let recorded = multipliers_under(dual(), light);
+        let dual_light = WhiteBalanceSolver::new(dual(), recorded)
+            .unwrap()
+            .as_shot()
+            .unwrap();
+        let single_light = WhiteBalanceSolver::new(CameraMatrices::single(XT3), recorded)
+            .unwrap()
+            .as_shot()
+            .unwrap();
+        assert!((dual_light.kelvin - 2_856.0).abs() < 1.0, "{dual_light:?}");
+        assert!(
+            (single_light.kelvin - 2_856.0).abs() > 20.0,
+            "{single_light:?}"
+        );
+    }
+
+    #[test]
+    fn as_shot_conversion_keeps_neutrals_neutral() {
+        for kelvin in [2_856.0, 4_200.0, 6_504.0] {
+            let light = Temperature { kelvin, tint: 0.0 };
+            let recorded = multipliers_under(dual(), light);
+            let solver = WhiteBalanceSolver::new(dual(), recorded).unwrap();
+            let transform = solver.camera_to_acescg(WhiteBalance::AsShot).unwrap();
+            // A balanced neutral is camera (1, 1, 1).
+            let white = matrices::apply(transform, [1.0, 1.0, 1.0]);
+            for channel in white {
+                assert!((channel - 1.0).abs() < 1.0e-9, "{kelvin} {white:?}");
+            }
+        }
     }
 }

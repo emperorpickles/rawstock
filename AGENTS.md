@@ -40,7 +40,9 @@ Implemented order:
 2. **White balance, then ACEScg.** As-shot white balance is in camera RGB,
    baked into the camera → ACEScg matrix. A custom temperature and tint
    (`white_balance.rs`) replace those multipliers through the camera
-   matrix, and agree with them at the as-shot reading. `CameraImage` keeps
+   matrix, and agree with them at the as-shot reading. A file with two
+   color matrices (Fuji's A and D65, DNG `ColorMatrix1`/`2`) interpolates
+   them for the scene's light (`camera_matrices.rs`). `CameraImage` keeps
    the demosaiced camera RGB so the balance can change without a demosaic.
    ACEScg (scene-linear AP1) is the
    working space. **Exposure (`exposure_ev`) is a stop scale after that
@@ -60,7 +62,9 @@ Implemented order:
    The print curve gives print density; with `[print_dye_density]` the
    paper's own dyes are viewed under D65, otherwise ideal ACEScg dyes.
 7. **Output.** ACEScg to encoded sRGB. The code clips out-of-gamut
-   channels. There is no separate gamut-compression stage.
+   channels, as Lightroom's sRGB export does. There is no separate
+   gamut-compression stage: a stock's print/scan keeps its colors near
+   sRGB, the way a camera profile does.
 
 Stocks are parametric or spectral models, never LUTs. A 3D LUT is only an
 optional `.cube` export bake or preview cache. **ACEScct is the shaper for

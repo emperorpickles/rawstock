@@ -78,6 +78,15 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   developed with its own edit (`strip.rs`, one thread, nearest first).
   The thread never holds the queue lock while drawing: `render_strip`
   runs on the main thread, and a held lock froze the app (#119).
+- Camera color matching (#126): files with two color matrices (rawler's
+  Fuji A and D65 pair, DNG `ColorMatrix1`/`2`) interpolate them in mireds
+  for the scene's light, and the as-shot light is found by iterating, as
+  the DNG SDK does (`camera_matrices.rs`, `white_balance.rs`). Camera RGB
+  is read back to XYZ under the scene white, then Bradford-adapted to the
+  ACES white. An Oklab hue-preserving gamut map was tried and dropped: on
+  DSCF7392 it moved Velvia's sign red and blue away from the camera JPEG.
+  Output keeps the per-channel clip, as Lightroom's sRGB export does;
+  saturation belongs in each stock's print/scan.
 - **#124** — Fuji-style lens distortion and vignetting correction
   (`agent: claude`, `stage: ready`, look approved by Caleb).
   `rawstock_core::lens` reads the RAF's own `GeometricDistortionParams`

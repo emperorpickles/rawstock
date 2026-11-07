@@ -11,6 +11,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod camera_matrices;
 mod cie1931;
 pub mod color;
 pub mod decode;
