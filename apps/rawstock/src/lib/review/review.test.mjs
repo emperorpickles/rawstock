@@ -577,6 +577,41 @@ test("a failed develop is reported once and not retried", async () => {
   assert.equal(host.count("develop_full"), 1);
 });
 
+test("turning chromatic aberration correction develops preview and full again, on and off", async () => {
+  const { host, review } = harness();
+  const opened = settings(0);
+  assert.equal(opened.lens.caCorrection, true);
+  review.open("img", opened);
+  review.setZoom(1);
+  await flush();
+
+  const off = { ...opened, lens: { caCorrection: false } };
+  assert.notEqual(ReviewController.developKey(off), ReviewController.developKey(opened));
+  const beforeOff = host.calls.length;
+  review.update(off);
+  await flush();
+  const offCalls = host.calls.slice(beforeOff);
+  const offPreview = offCalls.find((call) => call.command === "develop_preview");
+  const offFull = offCalls.find((call) => call.command === "develop_full");
+  assert.equal(offPreview?.settings.lens.caCorrection, false);
+  assert.equal(offFull?.settings.lens.caCorrection, false);
+
+  const on = { ...off, lens: { caCorrection: true } };
+  assert.notEqual(ReviewController.developKey(on), ReviewController.developKey(off));
+  const beforeOn = host.calls.length;
+  review.update(on);
+  await flush();
+  const onCalls = host.calls.slice(beforeOn);
+  assert.equal(
+    onCalls.find((call) => call.command === "develop_preview")?.settings.lens.caCorrection,
+    true,
+  );
+  assert.equal(
+    onCalls.find((call) => call.command === "develop_full")?.settings.lens.caCorrection,
+    true,
+  );
+});
+
 test("a crop, straighten or turn at 100% sends no develop: the viewer frames the cached frame", async () => {
   for (const zoom of [1, 2]) {
     const { host, review, view } = harness();

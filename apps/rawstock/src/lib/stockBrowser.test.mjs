@@ -51,7 +51,14 @@ test("only settings a thumbnail shows change its key", () => {
     StockBrowser.thumbnailKey({ ...base, geometry: { quarterTurns: 1, straightenDeg: 0 } }),
     key,
   );
-  assert.notEqual(StockBrowser.thumbnailKey({ ...base, lens: { caCorrection: false } }), key);
+  assert.notEqual(StockBrowser.thumbnailKey({ ...base, lens: { ...base.lens, caCorrection: false } }), key);
+  assert.notEqual(
+    StockBrowser.thumbnailKey({
+      ...base,
+      lens: { ...base.lens, distortionCorrection: false },
+    }),
+    key,
+  );
 });
 
 test("arrow keys move across and between rows and groups", () => {

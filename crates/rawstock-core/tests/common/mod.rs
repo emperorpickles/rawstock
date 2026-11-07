@@ -1,10 +1,37 @@
 //! Shared CC0 fixture download for integration tests.
 
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 use rawstock_core::decode::{CfaKind, Orientation, RawImage};
 use sha2::{Digest, Sha256};
+
+/// One shared download at a time in this test process. Other test binaries
+/// still race, which is why the bytes land in a partial file first.
+fn prepare_lock() -> MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn partial_path(path: &Path) -> PathBuf {
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("fixture");
+    path.with_file_name(format!(".{name}.{}.{n}.partial", std::process::id()))
+}
+
+enum FetchError {
+    /// curl could not be run, or it exited without a file.
+    Unavailable(io::Error),
+    /// The downloaded bytes are not the published fixture.
+    Checksum,
+}
 
 #[allow(dead_code)]
 pub struct Fixture {
@@ -25,27 +52,44 @@ pub struct Fixture {
 
 #[allow(dead_code)]
 impl Fixture {
+    /// The fixture on disk, downloading it when the checksum is not already there.
+    ///
+    /// Several tests call this at once, in this process and in others. The
+    /// download is a private partial file in the same directory, and only a
+    /// file whose checksum matches is renamed onto the shared path. A bad
+    /// checksum is fetched again before this panics.
     pub fn prepare(&self) -> Option<PathBuf> {
+        let _guard = prepare_lock();
         let path = std::env::temp_dir()
             .join("rawstock-fixtures")
             .join(self.filename);
-        if self.checksum_matches(&path) {
-            return Some(path);
+        // The first fetch, then two retries. CI runs these tests in parallel,
+        // and a torn download must not be the copy the next test opens.
+        let mut unavailable: Option<io::Error> = None;
+        for _attempt in 0..3 {
+            if self.checksum_matches(&path) {
+                return Some(path);
+            }
+            match self.fetch(&path) {
+                Ok(()) if self.checksum_matches(&path) => return Some(path),
+                Ok(()) => {}
+                Err(FetchError::Checksum) => unavailable = None,
+                Err(FetchError::Unavailable(err)) => unavailable = Some(err),
+            }
         }
-        if let Err(err) = self.fetch(&path) {
+        if let Some(err) = unavailable {
             return self.missing(&err);
         }
-        if self.checksum_matches(&path) {
-            Some(path)
-        } else {
-            panic!("{} checksum does not match {}", path.display(), self.sha256);
-        }
+        panic!("{} checksum does not match {}", path.display(), self.sha256);
     }
 
-    fn fetch(&self, path: &Path) -> std::io::Result<()> {
+    /// Download to a partial file, and rename it onto `path` only when the
+    /// checksum matches. `path` is never written in pieces.
+    fn fetch(&self, path: &Path) -> Result<(), FetchError> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent).map_err(FetchError::Unavailable)?;
         }
+        let partial = partial_path(path);
         let status = Command::new("curl")
             .args([
                 "--fail",
@@ -54,16 +98,26 @@ impl Fixture {
                 "--show-error",
                 "--output",
             ])
-            .arg(path)
+            .arg(&partial)
             .arg(self.url)
             .status()
-            .map_err(|err| std::io::Error::other(format!("curl is unavailable: {err}")))?;
-        if status.success() {
-            Ok(())
-        } else {
-            let _ = std::fs::remove_file(path);
-            Err(std::io::Error::other(format!("curl exited {status}")))
+            .map_err(|err| {
+                FetchError::Unavailable(io::Error::other(format!("curl is unavailable: {err}")))
+            })?;
+        if !status.success() {
+            let _ = std::fs::remove_file(&partial);
+            return Err(FetchError::Unavailable(io::Error::other(format!(
+                "curl exited {status}"
+            ))));
         }
+        if !self.checksum_matches(&partial) {
+            let _ = std::fs::remove_file(&partial);
+            return Err(FetchError::Checksum);
+        }
+        std::fs::rename(&partial, path).map_err(|err| {
+            let _ = std::fs::remove_file(&partial);
+            FetchError::Unavailable(err)
+        })
     }
 
     fn checksum_matches(&self, path: &Path) -> bool {

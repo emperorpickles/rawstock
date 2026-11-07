@@ -208,6 +208,27 @@ export class Adjustments {
     return { ...settings, whiteBalance: { mode: "asShot" } };
   }
 
+  /**
+   * Lateral CA correction and the blue/purple defringe. On matches the
+   * sidecar default and today's develop. Off reopens the decoded session.
+   */
+  static caCorrection(settings: EditSettings, enabled: boolean): EditSettings {
+    return { ...settings, lens: { ...settings.lens, caCorrection: enabled } };
+  }
+
+  /**
+   * Distortion undone from the file's own lens table and the frame filled,
+   * as the camera's JPEG is. Off reopens the decoded session.
+   */
+  static distortionCorrection(settings: EditSettings, enabled: boolean): EditSettings {
+    return { ...settings, lens: { ...settings.lens, distortionCorrection: enabled } };
+  }
+
+  /** Corner falloff lifted by the file's own vignetting table. */
+  static vignettingCorrection(settings: EditSettings, enabled: boolean): EditSettings {
+    return { ...settings, lens: { ...settings.lens, vignettingCorrection: enabled } };
+  }
+
   static exposure(settings: EditSettings, exposureEv: number): EditSettings {
     return { ...settings, exposureEv };
   }

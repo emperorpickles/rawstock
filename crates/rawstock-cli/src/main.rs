@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 use rawstock_core::color::LinearImage;
 use rawstock_core::decode::{Orientation, RawImage};
 use rawstock_core::gpu::{Gpu, GpuPipeline};
+use rawstock_core::lens::LensCorrections;
 use rawstock_core::render::{Parameters, Pipeline, SrgbImage};
 use rawstock_core::stock::Stock;
 
@@ -31,10 +32,8 @@ enum Command {
         /// Develop on the GPU. Fails if no adapter is found.
         #[arg(long)]
         gpu: bool,
-        /// Skip chromatic aberration correction (red/blue registration and
-        /// the blue/purple defringe). It is on by default.
-        #[arg(long)]
-        no_ca_correction: bool,
+        #[command(flatten)]
+        lens: LensFlags,
     },
     /// Print decode metadata for a RAW file.
     Inspect {
@@ -52,10 +51,8 @@ enum Command {
         /// The dump stays in sensor orientation. The film stock is not applied.
         #[arg(long)]
         long_edge: Option<u32>,
-        /// Skip chromatic aberration correction (red/blue registration and
-        /// the blue/purple defringe). It is on by default.
-        #[arg(long)]
-        no_ca_correction: bool,
+        #[command(flatten)]
+        lens: LensFlags,
     },
     /// Develop a scene-linear ACEScg OpenEXR through a stock.
     ///
@@ -77,6 +74,34 @@ enum Command {
     },
 }
 
+/// Lens corrections, each on by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::Args)]
+struct LensFlags {
+    /// Skip chromatic aberration correction (red/blue registration and
+    /// the blue/purple defringe). It is on by default.
+    #[arg(long)]
+    no_ca_correction: bool,
+    /// Skip the lens distortion correction from the file's own table
+    /// (Fujifilm RAF). It is on by default.
+    #[arg(long)]
+    no_distortion_correction: bool,
+    /// Skip the lens vignetting correction from the file's own table
+    /// (Fujifilm RAF). It is on by default.
+    #[arg(long)]
+    no_vignetting_correction: bool,
+}
+
+impl LensFlags {
+    /// Set these corrections on `raw` for its later develops.
+    fn apply(self, raw: &mut RawImage) {
+        raw.set_chromatic_aberration_correction(!self.no_ca_correction);
+        raw.set_lens_corrections(LensCorrections {
+            distortion: !self.no_distortion_correction,
+            vignetting: !self.no_vignetting_correction,
+        });
+    }
+}
+
 fn main() -> Result<()> {
     run(Cli::parse())
 }
@@ -88,8 +113,8 @@ fn run(cli: Cli) -> Result<()> {
             stock,
             output,
             gpu,
-            no_ca_correction,
-        } => develop(&input, &stock, &output, gpu, !no_ca_correction),
+            lens,
+        } => develop(&input, &stock, &output, gpu, lens),
         Command::Inspect { file } => {
             let image = RawImage::open(&file)?;
             println!("{image}");
@@ -99,13 +124,13 @@ fn run(cli: Cli) -> Result<()> {
             input,
             output,
             long_edge,
-            no_ca_correction,
+            lens,
         } => {
             if !is_exr(&output) {
                 bail!("output must be an .exr file");
             }
             let mut image = RawImage::open(&input)?;
-            image.set_chromatic_aberration_correction(!no_ca_correction);
+            lens.apply(&mut image);
             let mut linear = image.develop_linear()?;
             if let Some(long_edge) = long_edge {
                 linear = linear.area_downsample(long_edge)?;
@@ -136,19 +161,13 @@ fn develop_linear(input: &Path, stock: &Path, output: &Path, gpu: bool) -> Resul
     Ok(())
 }
 
-fn develop(
-    input: &Path,
-    stock: &Path,
-    output: &Path,
-    gpu: bool,
-    correct_chromatic_aberration: bool,
-) -> Result<()> {
+fn develop(input: &Path, stock: &Path, output: &Path, gpu: bool, lens: LensFlags) -> Result<()> {
     if !SrgbImage::is_supported_output(output) {
         bail!("output must be a .jpg, .jpeg, .tif, or .tiff file");
     }
     let parameters = Stock::load(stock)?.into_parameters();
     let mut raw = RawImage::open(input)?;
-    raw.set_chromatic_aberration_correction(correct_chromatic_aberration);
+    lens.apply(&mut raw);
     let linear = raw.develop_linear()?;
     let developed = render(parameters, &linear, gpu)?;
     developed.write(output, raw.orientation())?;
@@ -270,7 +289,11 @@ mod tests {
         assert!(matches!(
             cli.command,
             Command::Develop {
-                no_ca_correction: false,
+                lens: LensFlags {
+                    no_ca_correction: false,
+                    no_distortion_correction: false,
+                    no_vignetting_correction: false,
+                },
                 ..
             }
         ));
@@ -278,7 +301,27 @@ mod tests {
         assert!(matches!(
             cli.command,
             Command::Develop {
-                no_ca_correction: true,
+                lens: LensFlags {
+                    no_ca_correction: true,
+                    no_distortion_correction: false,
+                    no_vignetting_correction: false,
+                },
+                ..
+            }
+        ));
+        let cli = Cli::try_parse_from(
+            base.into_iter()
+                .chain(["--no-distortion-correction", "--no-vignetting-correction"]),
+        )
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Develop {
+                lens: LensFlags {
+                    no_ca_correction: false,
+                    no_distortion_correction: true,
+                    no_vignetting_correction: true,
+                },
                 ..
             }
         ));
@@ -293,7 +336,10 @@ mod tests {
         assert!(matches!(
             cli.command,
             Command::DumpLinear {
-                no_ca_correction: true,
+                lens: LensFlags {
+                    no_ca_correction: true,
+                    ..
+                },
                 ..
             }
         ));

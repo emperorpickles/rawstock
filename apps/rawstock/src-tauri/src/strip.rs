@@ -258,7 +258,7 @@ impl StripRender {
 
     /// The photo developed with its own stock and edit, grain and halation off.
     pub fn developed(item: &StripItem) -> Result<Vec<u8>, String> {
-        let source = Source::decode(&item.path, item.settings.lens.ca_correction)?;
+        let source = Source::decode(&item.path, item.settings.lens)?;
         let base = source.framed(&item.settings, STRIP_EDGE)?;
         ThumbnailRender::stock(
             &crate::stocks::directory(),

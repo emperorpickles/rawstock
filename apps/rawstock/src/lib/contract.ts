@@ -96,6 +96,13 @@ export interface GeometryEdit {
 export interface LensEdit {
   /** Red/blue registration plus the blue/purple defringe. On by default. */
   caCorrection: boolean;
+  /**
+   * Distortion undone from the file's own lens table, framed as the camera
+   * frames its JPEG. On by default.
+   */
+  distortionCorrection: boolean;
+  /** Corner falloff lifted by the file's own vignetting table. On by default. */
+  vignettingCorrection: boolean;
 }
 
 export interface EditSettings {
@@ -257,7 +264,7 @@ export function defaultSettings(): EditSettings {
     halation: { enabled: false },
     scan: { look: "default" },
     geometry: { quarterTurns: 0, straightenDeg: 0 },
-    lens: { caCorrection: true },
+    lens: { caCorrection: true, distortionCorrection: true, vignettingCorrection: true },
   };
 }
 

@@ -23,7 +23,7 @@ use rawstock_core::stock::Stock;
 use rawstock_core::white_balance::WhiteBalance;
 use tauri::{AppHandle, Manager};
 
-use crate::contract::{AppError, EditSettings};
+use crate::contract::{AppError, EditSettings, LensEdit};
 use crate::develop::Opened;
 use crate::frame;
 use crate::state::{self, AppState, lock};
@@ -81,13 +81,13 @@ impl Thumbnailer {
         if !Self::live(app, request.job_id) {
             return;
         }
-        let ca = request.settings.lens.ca_correction;
+        let lens = request.settings.lens;
         let reuse = source
             .as_ref()
-            .is_some_and(|kept| kept.path == request.path && kept.ca_correction == ca);
+            .is_some_and(|kept| kept.path == request.path && kept.lens == lens);
         if !reuse {
             *source = None;
-            match Source::decode(&request.path, ca) {
+            match Source::decode(&request.path, lens) {
                 Ok(decoded) => *source = Some(decoded),
                 Err(detail) => {
                     Self::fail(app, request.job_id, &request.path, &detail);
@@ -163,7 +163,7 @@ impl Thumbnailer {
 /// request, so neither needs a decode.
 pub(crate) struct Source {
     path: PathBuf,
-    ca_correction: bool,
+    lens: LensEdit,
     camera: Orientation,
     rgb: CameraImage,
 }
@@ -171,9 +171,9 @@ pub(crate) struct Source {
 impl Source {
     /// X-Trans uses the third-size quick develop, which is plenty for a
     /// thumbnail. Bayer and linear DNG develop in full, once per photo.
-    pub(crate) fn decode(path: &Path, ca_correction: bool) -> Result<Self, String> {
+    pub(crate) fn decode(path: &Path, lens: LensEdit) -> Result<Self, String> {
         let mut raw = RawImage::open(path).map_err(|error| error.to_string())?;
-        raw.set_chromatic_aberration_correction(ca_correction);
+        lens.apply_to(&mut raw);
         let camera = raw.orientation();
         let rgb = match raw
             .develop_quick_camera()
@@ -187,7 +187,7 @@ impl Source {
             .map_err(|error| error.to_string())?;
         Ok(Self {
             path: path.to_path_buf(),
-            ca_correction,
+            lens,
             camera,
             rgb,
         })

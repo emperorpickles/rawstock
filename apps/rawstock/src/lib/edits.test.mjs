@@ -85,6 +85,50 @@ test("an unreadable sidecar explains that the file was left alone", () => {
   );
 });
 
+test("a loaded sidecar keeps chromatic aberration correction, and a new photo starts with it on", () => {
+  const saved = {
+    ...defaultSettings(),
+    lens: { caCorrection: false },
+    stock: { id: "velvia", revision: 1 },
+  };
+  const loaded = baselineSettings(
+    image("a.RAF", { sidecar: { status: "loaded", settings: saved } }),
+    { id: "portra400", revision: 3 },
+  );
+  assert.equal(loaded.lens.caCorrection, false);
+  assert.equal(loaded.stock.id, "velvia");
+  const fresh = baselineSettings(image("b.RAF"), null);
+  assert.equal(fresh.lens.caCorrection, true);
+});
+
+test("turning chromatic aberration correction off is one undo step and autosaves both values", async () => {
+  const history = new EditHistory();
+  const base = defaultSettings();
+  assert.equal(base.lens.caCorrection, true);
+  history.open("a", base);
+  const off = { ...base, lens: { caCorrection: false } };
+  assert.equal(history.commit("a", off), true);
+  assert.equal(history.commit("a", off), false);
+  assert.equal(history.current("a")?.lens.caCorrection, false);
+  assert.equal(history.undo("a")?.lens.caCorrection, true);
+  assert.equal(history.redo("a")?.lens.caCorrection, false);
+  assert.equal(history.undo("a")?.lens.caCorrection, true);
+
+  const writes = [];
+  const autosave = new Autosave(500, async (imageId, settings) => {
+    writes.push([imageId, settings.lens.caCorrection]);
+  });
+  autosave.remember("a", base);
+  autosave.schedule("a", off);
+  await autosave.flush();
+  autosave.schedule("a", { ...off, lens: { caCorrection: true } });
+  await autosave.flush();
+  assert.deepEqual(writes, [
+    ["a", false],
+    ["a", true],
+  ]);
+});
+
 test("a loaded sidecar is the baseline and a bad one is not", () => {
   const saved = { ...defaultSettings(), exposureEv: 0.5, stock: { id: "velvia", revision: 1 } };
   const loaded = baselineSettings(

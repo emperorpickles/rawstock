@@ -8,6 +8,7 @@
 //! after the film pipeline.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use rawler::imgop::develop::{Intermediate, ProcessingStep, RawDevelop};
 use rawler::imgop::sensor::Demosaic;
@@ -21,6 +22,7 @@ use crate::camera_matrices::CameraMatrices;
 use crate::decode::{CfaKind, RawImage};
 use crate::defringe::Defringe;
 use crate::lateral_ca::LateralCa;
+use crate::lens::{LensWarp, RadialGain};
 use crate::matrices;
 use crate::white_balance::{WhiteBalance, WhiteBalanceSolver};
 use crate::workers::Workers;
@@ -277,12 +279,11 @@ impl RawImage {
     /// red and blue are measured against green and resampled onto it
     /// ([`LateralCa`]), as the camera does for its own JPEGs, and after the
     /// ACEScg conversion the blue/purple glow beside bright edges is
-    /// desaturated ([`Defringe`]). Rescale
-    /// does not clip above the white level, so highlights
-    /// are cut to that level in camera RGB, white-balanced with green at 1,
-    /// then cut again at the smallest multiplier. That second cut is what
-    /// keeps a clipped neutral from turning magenta: the short channel would
-    /// otherwise be the only one still at the sensor white. The D65 camera
+    /// desaturated ([`Defringe`]). Rescale does not clip above the white
+    /// level. Highlight recovery white-balances with green at 1 and rebuilds
+    /// a channel that sat on that level from the channels that still hold
+    /// signal, so exposure and the film model keep the highlight, and a
+    /// clipped neutral stays neutral instead of turning magenta. The D65 camera
     /// matrix is row-scaled so D65 maps to camera white, inverted, then a
     /// Bradford adaptation takes D65 to the ACES white and AP1 takes that XYZ
     /// into ACEScg. White balance is already in the samples, so the matrix
@@ -298,9 +299,10 @@ impl RawImage {
         self.develop_camera_here()?.convert(WhiteBalance::AsShot)
     }
 
-    /// Demosaic and correct chromatic aberration, but stop in camera RGB,
-    /// before white balance. [`CameraImage::develop`] finishes it with any
-    /// white balance, as often as needed, without demosaicing again.
+    /// Demosaic, correct chromatic aberration and lens distortion, but stop
+    /// in camera RGB, before white balance. [`CameraImage::develop`]
+    /// finishes it with any white balance, as often as needed, without
+    /// demosaicing again.
     /// `develop_camera()?.develop(WhiteBalance::AsShot)` is
     /// [`Self::develop_linear`].
     pub fn develop_camera(&self) -> Result<CameraImage, DevelopError> {
@@ -338,7 +340,35 @@ impl RawImage {
             let lateral_ca = LateralCa::estimate(columns, rows, &samples);
             lateral_ca.apply(columns, rows, &mut samples);
         }
-        CameraImage::from_raw(self, width, height, samples, correct)
+        let (samples, vignetting) = self.correct_lens(width as usize, height as usize, samples);
+        CameraImage::from_raw(self, width, height, samples, correct, vignetting)
+    }
+
+    /// Undistort `samples` as [`Self::lens_corrections`] asks, and the
+    /// vignetting gain [`CameraImage`] applies after highlight recovery.
+    fn correct_lens(
+        &self,
+        width: usize,
+        height: usize,
+        samples: Vec<f32>,
+    ) -> (Vec<f32>, Option<Arc<RadialGain>>) {
+        let corrections = self.lens_corrections();
+        let profile = self.lens_profile();
+        let half_width = (width as f64 - 1.0) / 2.0;
+        let half_height = (height as f64 - 1.0) / 2.0;
+        let warp = profile
+            .distortion()
+            .filter(|_| corrections.distortion)
+            .and_then(|table| LensWarp::new(table, half_width, half_height));
+        let vignetting = profile
+            .vignetting()
+            .filter(|_| corrections.vignetting)
+            .map(|table| Arc::new(RadialGain::new(table, warp.as_ref())));
+        let samples = match &warp {
+            Some(warp) => warp.apply(width, height, &samples),
+            None => samples,
+        };
+        (samples, vignetting)
     }
 
     /// [`Self::develop_linear`] on a pool of its own, `threads` wide.
@@ -430,12 +460,14 @@ impl RawImage {
                 lateral_ca.apply(width, height, &mut samples);
             });
         }
+        let (samples, vignetting) = Workers::install(|| self.correct_lens(width, height, samples));
         let image = CameraImage::from_raw(
             self,
             u32::try_from(width).map_err(|_| DevelopError::Dimension { value: width })?,
             u32::try_from(height).map_err(|_| DevelopError::Dimension { value: height })?,
             samples,
             correct,
+            vignetting,
         )?;
         Ok(Some(QuickDevelop {
             image,
@@ -478,7 +510,8 @@ pub struct QuickDevelop<Image = LinearImage> {
 }
 
 /// Demosaiced camera RGB before white balance: black and white levels
-/// normalized, chromatic aberration registered, nothing else.
+/// normalized, chromatic aberration registered, lens distortion undone,
+/// nothing else. Vignetting is applied by [`Self::develop`].
 ///
 /// [`Self::develop`] finishes it to ACEScg for a [`WhiteBalance`]. Keeping
 /// this buffer is what lets a white balance change skip the decode and the
@@ -494,6 +527,9 @@ pub struct CameraImage {
     /// full-size, CA-corrected develop sets it: the defringe radius is in
     /// sensor pixels.
     defringe: bool,
+    /// Lens vignetting gain by normalized radius, applied after highlight
+    /// recovery. It is resolution independent, so a downsample keeps it.
+    vignetting: Option<Arc<RadialGain>>,
 }
 
 impl std::fmt::Debug for CameraImage {
@@ -503,6 +539,7 @@ impl std::fmt::Debug for CameraImage {
             .field("height", &self.height)
             .field("pixels", &self.pixels.len())
             .field("defringe", &self.defringe)
+            .field("vignetting", &self.vignetting.is_some())
             .finish()
     }
 }
@@ -532,6 +569,7 @@ impl CameraImage {
             camera_matrices,
             as_shot_wb,
             defringe: false,
+            vignetting: None,
         })
     }
 
@@ -541,6 +579,7 @@ impl CameraImage {
         height: u32,
         pixels: Vec<f32>,
         defringe: bool,
+        vignetting: Option<Arc<RadialGain>>,
     ) -> Result<Self, DevelopError> {
         let mut image = Self::new(
             width,
@@ -550,6 +589,7 @@ impl CameraImage {
             raw.as_shot_wb(),
         )?;
         image.defringe = defringe;
+        image.vignetting = vignetting;
         Ok(image)
     }
 
@@ -607,6 +647,7 @@ impl CameraImage {
             camera_matrices: self.camera_matrices,
             as_shot_wb: self.as_shot_wb,
             defringe: false,
+            vignetting: self.vignetting.clone(),
         })
     }
 
@@ -626,12 +667,20 @@ impl CameraImage {
             Some(matrix) => matrix.map(|row| row.map(|value| value as f32)),
             None => acescg_transform(self.camera_matrices.at_d65(), [1.0, 1.0, 1.0, 0.0])?,
         };
-        let cap = white_balance[0].min(white_balance[1]).min(white_balance[2]) as f32;
         let wb = white_balance.map(|channel| channel as f32);
-        self.pixels.par_chunks_mut(3 * 4096).for_each(|chunk| {
-            recover_highlights(chunk, wb, cap);
-            apply_transform(chunk, transform);
-        });
+        const CHUNK: usize = 4096;
+        let (width, height) = (self.width as usize, self.height as usize);
+        let vignetting = self.vignetting.as_deref();
+        self.pixels
+            .par_chunks_mut(3 * CHUNK)
+            .enumerate()
+            .for_each(|(index, chunk)| {
+                HighlightRecovery::apply(chunk, wb);
+                if let Some(gain) = vignetting {
+                    gain.apply(width, height, index * CHUNK, chunk);
+                }
+                apply_transform(chunk, transform);
+            });
         let mut linear = LinearImage::new(self.width, self.height, self.pixels)?;
         if self.defringe {
             Defringe::apply(
@@ -799,27 +848,102 @@ fn normalized_white_balance(as_shot_wb: [f32; 4]) -> Result<[f64; 3], DevelopErr
     Ok([f64::from(rgb[0]) / green, 1.0, f64::from(rgb[2]) / green])
 }
 
-/// Clip photosites to the white level, apply white balance, then clip to the
-/// first channel that would have clipped on a neutral.
+/// White balance and highlight recovery in camera RGB, before the ACEScg matrix.
 ///
-/// `wb` is green-normalized and `cap` is its smallest multiplier. A fully
-/// exposed neutral is `(1, 1, 1)`
-/// on the sensor. Multiplying by a balance whose red or blue coefficient is
-/// above 1, then by the color matrix, leaves green short and the highlight
-/// encodes magenta. Cutting every balanced channel at `min(white_balance)`
-/// pulls that neutral back to camera white. A colorful pixel that only clips
-/// one channel stays colorful: only the channels past the cap move.
-fn recover_highlights(samples: &mut [f32], wb: [f32; 3], cap: f32) {
-    for pixel in samples.as_chunks_mut::<3>().0 {
-        for channel in 0..3 {
-            let sensor = pixel[channel];
-            let sensor = if sensor.is_finite() {
-                sensor.clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-            pixel[channel] = (sensor * wb[channel]).min(cap);
+/// `rawler`'s rescale maps the white level to 1 and does not clip above it.
+/// A photosite below the rail is a measurement: it is multiplied by the
+/// green-normalized balance and kept, even when that product sits above
+/// diffuse white, so a later exposure can still pull the highlight back.
+///
+/// A photosite on the rail (the white level, or the fraction of a code rawler
+/// leaves above it) has no further scene data. Where the pixel still has a
+/// channel well below white, that channel is the color: a clipped channel
+/// that fell short of it is raised to it, and a clipped channel that is
+/// already brighter stays, so a blue sky stays blue. Where nothing is well
+/// below white, the ratios are the clip. Balancing them paints magenta under
+/// a Fuji-style balance, whose red or blue coefficient is above 1, so the
+/// pixel is rebuilt as a neutral at the level the surviving photosites
+/// measured, or at [`Self::peak`] when every channel is on the rail. `peak`
+/// is where the last channel of a neutral hits the rail, which meets the
+/// partially recovered pixels around it instead of dropping to diffuse white.
+///
+/// A neutral recorded entirely above the white level is not on the rail. Its
+/// channels already agree, and that exposure is kept.
+struct HighlightRecovery;
+
+impl HighlightRecovery {
+    /// Sensor value `rawler` calls white. The rail is a narrow band around
+    /// it: just under white, and the fraction of a code rescale leaves above.
+    const SENSOR_WHITE: f32 = 1.0;
+    /// Darkest photosite at or above this, with any channel on the rail, has
+    /// no trustworthy chroma. A saturated color still has a channel below it.
+    const NEAR_WHITE: f32 = 0.75;
+
+    /// Recover interleaved camera RGB in place. `wb` is green-normalized.
+    fn apply(samples: &mut [f32], wb: [f32; 3]) {
+        let peak = Self::peak(wb);
+        for pixel in samples.as_chunks_mut::<3>().0 {
+            let recovered = Self::recover([pixel[0], pixel[1], pixel[2]], wb, peak);
+            pixel.copy_from_slice(&recovered);
         }
+    }
+
+    /// Scene level at which the last channel of a neutral hits the rail.
+    fn peak(wb: [f32; 3]) -> f32 {
+        wb[0].max(wb[1]).max(wb[2])
+    }
+
+    fn on_rail(value: f32) -> bool {
+        let white = Self::SENSOR_WHITE;
+        ((white - 0.02)..=(white + 0.02)).contains(&value)
+    }
+
+    fn recover(sensor: [f32; 3], wb: [f32; 3], peak: f32) -> [f32; 3] {
+        let mut sample = [0.0_f32; 3];
+        let mut balanced = [0.0_f32; 3];
+        let mut rail = [false; 3];
+        let mut any_rail = false;
+        for channel in 0..3 {
+            let raw = sensor[channel];
+            let value = if raw.is_finite() { raw.max(0.0) } else { 0.0 };
+            sample[channel] = value;
+            balanced[channel] = value * wb[channel];
+            rail[channel] = Self::on_rail(value);
+            any_rail |= rail[channel];
+        }
+
+        let darkest = sample[0].min(sample[1]).min(sample[2]);
+        if any_rail && darkest >= Self::NEAR_WHITE {
+            let mut level = 0.0_f32;
+            let mut trusted = false;
+            for channel in 0..3 {
+                if !rail[channel] {
+                    level = level.max(balanced[channel]);
+                    trusted = true;
+                }
+            }
+            return if trusted {
+                [level, level, level]
+            } else {
+                [peak, peak, peak]
+            };
+        }
+        if !any_rail {
+            return balanced;
+        }
+
+        let mut level = 0.0_f32;
+        for channel in 0..3 {
+            if !rail[channel] {
+                level = level.max(balanced[channel]);
+            }
+        }
+        for channel in 0..3 {
+            if rail[channel] && balanced[channel] < level {
+                balanced[channel] = level;
+            }
+        }
+        balanced
     }
 }
 
@@ -952,8 +1076,7 @@ mod tests {
         assert_white(apply_pixel(matrix, [1.0, 1.0, 1.0]));
     }
 
-    #[test]
-    fn clipped_highlight_stays_neutral_under_fuji_balance() {
+    fn fuji_balance() -> ([f32; 3], [[f32; 3]; 3]) {
         // X-S10 matrix and an as-shot balance in the same shape as the CC0
         // fixture (green already 1, blue the largest coefficient).
         let xyz_to_camera = [
@@ -964,34 +1087,222 @@ mod tests {
         ];
         let balance = normalized_white_balance([1.6953642, 1.0, 2.3509934, f32::NAN]).unwrap();
         let matrix = acescg_transform(xyz_to_camera, [1.0, 1.0, 1.0, 0.0]).unwrap();
-        let wb = balance.map(|channel| channel as f32);
-        let cap = wb[0].min(wb[1]).min(wb[2]);
+        (balance.map(|channel| channel as f32), matrix)
+    }
 
-        let mut white = vec![1.4, 1.2, 1.8];
-        recover_highlights(&mut white, wb, cap);
-        apply_transform(&mut white, matrix);
-        assert_white([white[0], white[1], white[2]]);
-        let encoded = encode_srgb(&white);
-        for channel in &encoded {
-            assert!((channel - 1.0).abs() < 1.0e-4, "{encoded:?}");
+    #[test]
+    fn clipped_highlight_stays_neutral_under_fuji_balance() {
+        let (wb, matrix) = fuji_balance();
+        let peak = HighlightRecovery::peak(wb);
+
+        // On the rail, and the fraction of a code rawler leaves above white.
+        // Both are a neutral at the last channel's clip, not magenta, and
+        // the display encode is still white.
+        for sensor in [[1.0_f32, 1.0, 1.0], [1.004, 1.0, 1.008]] {
+            let mut white = sensor.to_vec();
+            HighlightRecovery::apply(&mut white, wb);
+            for channel in &white {
+                assert!((channel - peak).abs() < 1.0e-5, "{sensor:?} -> {white:?}");
+            }
+            apply_transform(&mut white, matrix);
+            for channel in &white {
+                assert!(
+                    (channel - peak).abs() < 2.0e-3,
+                    "{sensor:?} left neutrality: {white:?}"
+                );
+            }
+            let encoded = encode_srgb(&white);
+            for channel in &encoded {
+                assert!((channel - 1.0).abs() < 1.0e-4, "{encoded:?}");
+            }
         }
 
         // A red that only just clips stays red. Baking the balance into the
         // matrix and clipping after it paints this pixel magenta.
         let mut red = vec![1.0, 0.25, 0.20];
-        recover_highlights(&mut red, wb, cap);
+        HighlightRecovery::apply(&mut red, wb);
+        assert!(
+            (red[0] - wb[0]).abs() < 1.0e-5,
+            "clipped red was crushed: {red:?}"
+        );
         apply_transform(&mut red, matrix);
         assert!(
             red[0] > red[1] + 0.15 && red[0] > red[2] + 0.05,
             "clipped red went magenta: {red:?}"
         );
 
-        // A gray below the cap is only white-balanced, not crushed.
+        // A gray below the rail is only white-balanced, not crushed.
         let level = 0.4_f32;
-        let mut gray = vec![level / balance[0] as f32, level, level / balance[2] as f32];
-        recover_highlights(&mut gray, wb, cap);
+        let mut gray = vec![level / wb[0], level, level / wb[2]];
+        HighlightRecovery::apply(&mut gray, wb);
         for channel in &gray {
             assert!((channel - level).abs() < 1.0e-5, "{gray:?}");
+        }
+    }
+
+    #[test]
+    fn partial_clip_neutral_keeps_the_measured_level() {
+        let (wb, matrix) = fuji_balance();
+        // One stop over the first clip. Green is on the rail; red and blue
+        // still measure the neutral, and green is rebuilt up to them.
+        let level = 1.5_f32;
+        let mut neutral = vec![level / wb[0], level, level / wb[2]];
+        assert!(neutral[1] > 1.0 && neutral[0] < 1.0 && neutral[2] < 1.0);
+        HighlightRecovery::apply(&mut neutral, wb);
+        for channel in &neutral {
+            assert!((channel - level).abs() < 1.0e-5, "{neutral:?}");
+        }
+        apply_transform(&mut neutral, matrix);
+        for channel in &neutral {
+            assert!(
+                (channel - level).abs() < 2.0e-3,
+                "recovered neutral was crushed: {neutral:?}"
+            );
+        }
+
+        // Hotter: red has joined green on the rail, blue still measures it.
+        let level = 2.0_f32;
+        let mut hotter = vec![1.0, 1.0, level / wb[2]];
+        HighlightRecovery::apply(&mut hotter, wb);
+        for channel in &hotter {
+            assert!((channel - level).abs() < 1.0e-4, "{hotter:?}");
+        }
+    }
+
+    #[test]
+    fn partial_clip_keeps_a_saturated_color() {
+        let (wb, _matrix) = fuji_balance();
+        // Blue sky: blue is on the rail, red and green are not. Blue stays
+        // at the recorded balance instead of being cut to the smallest
+        // multiplier, and the other two are untouched.
+        let mut sky = vec![0.30_f32, 0.45, 1.0];
+        HighlightRecovery::apply(&mut sky, wb);
+        assert!((sky[0] - 0.30 * wb[0]).abs() < 1.0e-5, "{sky:?}");
+        assert!((sky[1] - 0.45).abs() < 1.0e-5, "{sky:?}");
+        assert!(
+            (sky[2] - wb[2]).abs() < 1.0e-5 && sky[2] > sky[0] && sky[2] > sky[1],
+            "clipped blue was flattened: {sky:?}"
+        );
+
+        // An unclipped red whose balance exceeds diffuse white is kept.
+        // The old cap cut that channel to `min(wb)`.
+        let mut warm = vec![0.80_f32, 0.20, 0.15];
+        HighlightRecovery::apply(&mut warm, wb);
+        assert!((warm[0] - 0.80 * wb[0]).abs() < 1.0e-5, "{warm:?}");
+        assert!(
+            warm[0] > 1.0,
+            "headroom above white was discarded: {warm:?}"
+        );
+    }
+
+    #[test]
+    fn neutral_headroom_above_the_rail_is_kept() {
+        let (wb, _matrix) = fuji_balance();
+        let peak = HighlightRecovery::peak(wb);
+        let level = peak + 0.75;
+        let mut sensor = vec![level / wb[0], level / wb[1], level / wb[2]];
+        assert!(sensor.iter().all(|channel| *channel > 1.0));
+        HighlightRecovery::apply(&mut sensor, wb);
+        for channel in &sensor {
+            assert!((channel - level).abs() < 1.0e-4, "{sensor:?}");
+        }
+    }
+
+    #[test]
+    fn recovered_neutral_ramps_without_a_hole() {
+        let (wb, _matrix) = fuji_balance();
+        let peak = HighlightRecovery::peak(wb);
+        let mut previous = 0.0_f32;
+        for step in 0..48 {
+            let level = 0.4 + step as f32 * 0.1;
+            let mut sensor: Vec<f32> = wb
+                .into_iter()
+                .map(|channel| (level / channel).min(HighlightRecovery::SENSOR_WHITE))
+                .collect();
+            HighlightRecovery::apply(&mut sensor, wb);
+            let recovered = sensor[0];
+            for channel in &sensor {
+                assert!((channel - recovered).abs() < 1.0e-4, "{sensor:?}");
+            }
+            assert!(
+                recovered + 1.0e-4 >= previous,
+                "highlight ramp fell from {previous} to {recovered} at {level}"
+            );
+            assert!(recovered <= peak + 1.0e-4, "{recovered} overshot {peak}");
+            previous = recovered;
+        }
+        assert!((previous - peak).abs() < 1.0e-4, "{previous}");
+    }
+
+    #[test]
+    fn non_finite_sensor_codes_become_black() {
+        let (wb, _matrix) = fuji_balance();
+        let mut pixel = vec![f32::NAN, 0.25, f32::INFINITY];
+        HighlightRecovery::apply(&mut pixel, wb);
+        assert_eq!(pixel[0], 0.0);
+        assert!((pixel[1] - 0.25).abs() < 1.0e-6, "{pixel:?}");
+        assert_eq!(pixel[2], 0.0);
+    }
+
+    #[test]
+    fn near_blown_specular_does_not_keep_the_rail_gain() {
+        // Measured on a clipped X-T30 specular. Red is a hair over white,
+        // green just under it, blue still recording. Keeping red times its
+        // balance (above 1) leaves green short and the highlight goes magenta.
+        let wb = [1.8841059_f32, 1.0, 1.7417219];
+        let blue = 0.77526486_f32;
+        let mut pixel = vec![1.0081387, 0.9974481, blue];
+        HighlightRecovery::apply(&mut pixel, wb);
+        let level = blue * wb[2];
+        for channel in &pixel {
+            assert!(
+                (channel - level).abs() < 1.0e-4,
+                "near-blown specular went magenta: {pixel:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn near_white_codes_do_not_balance_to_magenta() {
+        let (wb, matrix) = fuji_balance();
+        let peak = HighlightRecovery::peak(wb);
+        // Every channel is on the rail, a hair under white. Balancing the raw
+        // codes would leave green short. Recovery treats the pixel as blown.
+        let mut pixel = vec![0.995_f32, 0.996, 0.997];
+        HighlightRecovery::apply(&mut pixel, wb);
+        for channel in &pixel {
+            assert!((channel - peak).abs() < 1.0e-5, "{pixel:?}");
+        }
+        apply_transform(&mut pixel, matrix);
+        let green_short = pixel[1] + 0.05 < pixel[0] && pixel[1] + 0.05 < pixel[2];
+        assert!(!green_short, "near-white highlight went magenta: {pixel:?}");
+    }
+
+    #[test]
+    fn develop_keeps_a_partial_clip_above_acescg_white() {
+        let level = 1.5_f32;
+        let as_shot = [1.6953642_f32, 1.0, 2.3509934, f32::NAN];
+        let (wb, _matrix) = fuji_balance();
+        let image = CameraImage::new(
+            1,
+            1,
+            vec![level / wb[0], level, level / wb[2]],
+            CameraMatrices::single([
+                [1.3426, -0.6334, -0.1177],
+                [-0.4244, 1.2136, 0.2371],
+                [-0.058, 0.1303, 0.598],
+                [0.0, 0.0, 0.0],
+            ]),
+            as_shot,
+        )
+        .unwrap();
+        let linear = image.develop(WhiteBalance::AsShot).unwrap();
+        let pixel = linear.pixels();
+        for channel in pixel {
+            assert!(
+                (channel - level).abs() < 2.0e-3,
+                "develop crushed the recovered highlight: {pixel:?}"
+            );
         }
     }
 
