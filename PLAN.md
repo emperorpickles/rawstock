@@ -78,9 +78,26 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   developed with its own edit (`strip.rs`, one thread, nearest first).
   The thread never holds the queue lock while drawing: `render_strip`
   runs on the main thread, and a held lock froze the app (#119).
+- **#124** — Fuji-style lens distortion and vignetting correction
+  (`agent: claude`, `stage: ready`, look approved by Caleb).
+  `rawstock_core::lens` reads the RAF's own `GeometricDistortionParams`
+  and `VignettingParams` (rawler names them but does not apply them),
+  undistorts after the lateral CA correction and scales to fill the frame
+  as the camera does (matches the X-T2's JPEG within 0.05% of the radius
+  out to 0.8 of the half-diagonal), and lifts vignetting after highlight
+  recovery. Both on by default: `lens.distortionCorrection` and
+  `lens.vignettingCorrection` in the sidecar, CLI
+  `--no-distortion-correction` / `--no-vignetting-correction`, and two
+  checkboxes beside the CA one in Adjust (#127). The RAF's CA table is
+  not used; lateral CA stays image-estimated.
 
 ## In flight
 
+- **#125** — Highlight recovery (`agent: grok`, `stage: working`).
+  Clipped channels are rebuilt in camera RGB before the ACEScg matrix, so
+  exposure and the film model keep the highlight and a blown neutral stays
+  neutral. Same convert path for preview, full develop, and export.
+  Vignetting (#124) still lifts corners after this recovery.
 - **#123** — 1.0 app chromatic aberration correction toggle (`agent: grok`,
   `stage: ready`). PR #127. Adjust checkbox, default on, writes
   `lens.caCorrection`. Preview, full develop, and export already apply it;
@@ -147,18 +164,6 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   Enter or `R` keeps the crop and Esc puts back the geometry crop mode
   opened with. Outside it the viewer shows only the cropped photo, and
   Fit, 100% and 200% frame the crop.
-- **#124** — Fuji-style lens distortion and vignetting correction
-  (`agent: claude`, `stage: ready`, look approved by Caleb).
-  `rawstock_core::lens` reads the RAF's own `GeometricDistortionParams`
-  and `VignettingParams` (rawler names them but does not apply them),
-  undistorts after the lateral CA correction and scales to fill the frame
-  as the camera does (matches the X-T2's JPEG within 0.05% of the radius
-  out to 0.8 of the half-diagonal), and lifts vignetting after highlight
-  recovery. Both on by default: `lens.distortionCorrection` and
-  `lens.vignettingCorrection` in the sidecar, CLI
-  `--no-distortion-correction` / `--no-vignetting-correction`, and two
-  checkboxes beside the CA one in Adjust (#127). The RAF's CA table is
-  not used; lateral CA stays image-estimated.
 - **#52, #53** — 1.0 app presets and export queue (`agent: claude`,
   `stage: holding`) until #39 and #41 land.
 - **#63** — Lavapipe apt timeout and retry in CI (`agent: grok`). GPU
