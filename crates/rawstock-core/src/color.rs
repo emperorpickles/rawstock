@@ -17,8 +17,10 @@ use rawler::rawimage::RawPhotometricInterpretation;
 use rayon::prelude::*;
 use thiserror::Error;
 
+use crate::camera_matrices::CameraMatrices;
 use crate::decode::{CfaKind, RawImage};
 use crate::defringe::Defringe;
+use crate::gamut::GamutMap;
 use crate::lateral_ca::LateralCa;
 use crate::matrices;
 use crate::white_balance::{WhiteBalance, WhiteBalanceSolver};
@@ -487,7 +489,7 @@ pub struct CameraImage {
     width: u32,
     height: u32,
     pixels: Vec<f32>,
-    camera_matrix: [[f32; 3]; 4],
+    camera_matrices: CameraMatrices,
     as_shot_wb: [f32; 4],
     /// Desaturate blue/purple fringes after the ACEScg conversion. Only a
     /// full-size, CA-corrected develop sets it: the defringe radius is in
@@ -508,13 +510,13 @@ impl std::fmt::Debug for CameraImage {
 
 impl CameraImage {
     /// Camera RGB from interleaved samples, with the file's XYZ → camera
-    /// matrix and as-shot multipliers (RGBE order), as [`RawImage`] reports
-    /// them. No defringe runs on it.
+    /// matrices and as-shot multipliers (RGBE order), as [`RawImage`]
+    /// reports them. No defringe runs on it.
     pub fn new(
         width: u32,
         height: u32,
         pixels: Vec<f32>,
-        camera_matrix: [[f32; 3]; 4],
+        camera_matrices: CameraMatrices,
         as_shot_wb: [f32; 4],
     ) -> Result<Self, DevelopError> {
         let expected = width as usize * height as usize * 3;
@@ -528,7 +530,7 @@ impl CameraImage {
             width,
             height,
             pixels,
-            camera_matrix,
+            camera_matrices,
             as_shot_wb,
             defringe: false,
         })
@@ -541,7 +543,13 @@ impl CameraImage {
         pixels: Vec<f32>,
         defringe: bool,
     ) -> Result<Self, DevelopError> {
-        let mut image = Self::new(width, height, pixels, raw.camera_matrix(), raw.as_shot_wb())?;
+        let mut image = Self::new(
+            width,
+            height,
+            pixels,
+            raw.camera_matrices(),
+            raw.as_shot_wb(),
+        )?;
         image.defringe = defringe;
         Ok(image)
     }
@@ -560,7 +568,7 @@ impl CameraImage {
     /// the file cannot take a custom white balance: its color matrix does
     /// not invert, or it recorded no as-shot balance.
     pub fn white_balance_solver(&self) -> Option<WhiteBalanceSolver> {
-        WhiteBalanceSolver::new(self.camera_matrix, self.as_shot_wb)
+        WhiteBalanceSolver::new(self.camera_matrices, self.as_shot_wb)
     }
 
     /// White balance, highlight recovery, the ACEScg matrix, and the
@@ -597,7 +605,7 @@ impl CameraImage {
             width,
             height,
             pixels: area_box(&self.pixels, self.width, self.height, width, height),
-            camera_matrix: self.camera_matrix,
+            camera_matrices: self.camera_matrices,
             as_shot_wb: self.as_shot_wb,
             defringe: false,
         })
@@ -606,14 +614,19 @@ impl CameraImage {
     /// [`Self::develop`] on whatever pool the caller is on, consuming the
     /// buffer.
     fn convert(mut self, balance: WhiteBalance) -> Result<LinearImage, DevelopError> {
+        let solver = self.white_balance_solver();
         let white_balance = match balance {
             WhiteBalance::AsShot => normalized_white_balance(self.as_shot_wb)?,
-            WhiteBalance::Custom(_) => self
-                .white_balance_solver()
+            WhiteBalance::Custom(_) => solver
                 .and_then(|solver| solver.multipliers(balance))
                 .ok_or(DevelopError::CustomWhiteBalance)?,
         };
-        let transform = acescg_transform(self.camera_matrix, [1.0, 1.0, 1.0, 0.0])?;
+        // The matrix for the light being balanced for, adapted from that
+        // light's white. Without a known light, the D65 matrix and white.
+        let transform = match solver.and_then(|solver| solver.camera_to_acescg(balance)) {
+            Some(matrix) => matrix.map(|row| row.map(|value| value as f32)),
+            None => acescg_transform(self.camera_matrices.at_d65(), [1.0, 1.0, 1.0, 0.0])?,
+        };
         let cap = white_balance[0].min(white_balance[1]).min(white_balance[2]) as f32;
         let wb = white_balance.map(|channel| channel as f32);
         self.pixels.par_chunks_mut(3 * 4096).for_each(|chunk| {
@@ -743,7 +756,7 @@ fn take_rgb(pixels: rawler::pixarray::RgbF32) -> Result<(u32, u32, Vec<f32>), De
     Ok((width, height, samples))
 }
 
-/// Bake as-shot white balance into the camera → ACEScg matrix.
+/// Bake as-shot white balance into the D65 camera → ACEScg matrix.
 fn acescg_transform(
     xyz_to_camera: [[f32; 3]; 4],
     as_shot_wb: [f32; 4],
@@ -754,8 +767,8 @@ fn acescg_transform(
         row(xyz_to_camera[2]),
     ];
     let white_balance = normalized_white_balance(as_shot_wb)?;
-    let to_aces =
-        matrices::camera_to_acescg(xyz_to_camera).ok_or(DevelopError::SingularCameraMatrix)?;
+    let to_aces = matrices::camera_to_acescg(xyz_to_camera, matrices::D65_XY)
+        .ok_or(DevelopError::SingularCameraMatrix)?;
     let mut baked = [[0.0f32; 3]; 3];
     for row_index in 0..3 {
         for col in 0..3 {
@@ -824,18 +837,19 @@ fn apply_transform(samples: &mut [f32], matrix: [[f32; 3]; 3]) {
 
 /// Encode scene-linear ACEScg as display-encoded sRGB.
 ///
-/// Each pixel goes through the ACEScg → linear sRGB matrix, is clipped to
-/// `0..=1`, then through the IEC 61966-2-1 transfer function. Clipping is the
-/// gamut map: a channel outside sRGB is cut. A trailing incomplete pixel is
+/// Each pixel goes through the ACEScg → linear sRGB matrix, then the
+/// [`GamutMap`], which brings out-of-gamut colors into `0..=1` by
+/// compressing chroma at constant luminance and hue rather than cutting
+/// channels, then through the IEC 61966-2-1 transfer function. Grays and
+/// colors well inside sRGB are unchanged. A trailing incomplete pixel is
 /// omitted.
 pub fn encode_srgb(linear_acescg: &[f32]) -> Vec<f32> {
     let matrix = crate::matrices::acescg_to_linear_srgb();
     let mut encoded = Vec::with_capacity(linear_acescg.len());
     for pixel in linear_acescg.as_chunks::<3>().0 {
         let linear = pixel.map(f64::from);
-        encoded.extend(
-            crate::matrices::apply(matrix, linear).map(|channel| srgb_oetf(channel as f32)),
-        );
+        let mapped = GamutMap::apply(crate::matrices::apply(matrix, linear));
+        encoded.extend(mapped.map(|channel| srgb_oetf(channel as f32)));
     }
     encoded
 }

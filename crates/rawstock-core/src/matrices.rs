@@ -1,11 +1,13 @@
 //! Constants for the scene-linear camera → ACEScg conversion.
 //!
-//! A developed camera RGB value (black/white normalized, as-shot white
-//! balance applied) becomes ACEScg by:
+//! A developed camera RGB value (black/white normalized, white balance
+//! applied) becomes ACEScg by:
 //!
-//! 1. camera RGB → CIE XYZ, inverting the file's XYZ→camera matrix after
-//!    row-scaling it so D65 lands on camera white;
-//! 2. Bradford chromatic adaptation from D65 to the ACES white;
+//! 1. camera RGB → CIE XYZ, inverting the XYZ→camera matrix for the scene's
+//!    light after row-scaling it so that light's white lands on camera
+//!    white;
+//! 2. Bradford chromatic adaptation from the scene white to the ACES white
+//!    (D65 when the light is unknown);
 //! 3. CIE XYZ (ACES white) → ACEScg (AP1).
 //!
 //! The numbers below are the cited inputs. The 3×3 transforms are derived
@@ -191,23 +193,35 @@ pub(crate) fn srgb_colorants_d50() -> [[f64; 3]; 3] {
     ]
 }
 
-/// Camera RGB → ACEScg for a D65 XYZ→camera matrix, before white balance.
+/// Camera RGB → ACEScg for an XYZ→camera matrix, before white balance,
+/// when the scene was lit by `white_xy`.
 ///
-/// The matrix is row-scaled first so that D65 XYZ lands on camera
-/// `(1, 1, 1)`. As-shot white balance is defined the same way: it makes the
-/// scene neutral equal camera RGB, not the unscaled `ColorMatrix * D65`
+/// The matrix is row-scaled first so that the scene white lands on camera
+/// `(1, 1, 1)`. White balance is defined the same way: it makes the scene
+/// neutral equal camera RGB, not the unscaled `ColorMatrix * white`
 /// response. dcraw normalizes `xyz_to_cam` before inverting it (see rawler's
-/// `cam_to_xyz_normalized`, which targets equal-energy white). The scale
-/// here targets D65, which is the source white of [`bradford_d65_to_aces`].
-pub(crate) fn camera_to_acescg(xyz_to_camera: [[f64; 3]; 3]) -> Option<[[f64; 3]; 3]> {
-    let normalized = normalize_xyz_to_camera(xyz_to_camera)?;
+/// `cam_to_xyz_normalized`, which targets equal-energy white). The inverse
+/// gives XYZ under the scene white, which a Bradford adaptation then takes
+/// to the ACES white, as the DNG specification's camera → XYZ (D50) path
+/// does with its own white. With `white_xy` at D65 this is the plain D65
+/// conversion through [`xyz_d65_to_acescg`].
+pub(crate) fn camera_to_acescg(
+    xyz_to_camera: [[f64; 3]; 3],
+    white_xy: [f64; 2],
+) -> Option<[[f64; 3]; 3]> {
+    if !white_xy.iter().all(|value| value.is_finite()) || white_xy[1] <= 1.0e-8 {
+        return None;
+    }
+    let white = xy_to_xyz(white_xy);
+    let normalized = normalize_xyz_to_camera(xyz_to_camera, white)?;
     let camera_to_xyz = inverse(normalized)?;
-    Some(multiply(xyz_d65_to_acescg(), camera_to_xyz))
+    let xyz_to_acescg = multiply(xyz_d60_to_ap1(), bradford(white, aces_white_xyz()));
+    Some(multiply(xyz_to_acescg, camera_to_xyz))
 }
 
-/// Scale each row so `matrix * D65 = (1, 1, 1)`.
-fn normalize_xyz_to_camera(xyz_to_camera: [[f64; 3]; 3]) -> Option<[[f64; 3]; 3]> {
-    let camera_white = apply(xyz_to_camera, d65_xyz());
+/// Scale each row so `matrix * white = (1, 1, 1)`.
+fn normalize_xyz_to_camera(xyz_to_camera: [[f64; 3]; 3], white: [f64; 3]) -> Option<[[f64; 3]; 3]> {
+    let camera_white = apply(xyz_to_camera, white);
     if camera_white
         .iter()
         .any(|channel| !channel.is_finite() || *channel <= 1.0e-8)
@@ -366,7 +380,7 @@ mod tests {
     #[test]
     fn singular_camera_matrix_is_rejected() {
         let singular = [[1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [3.0, 0.0, 0.0]];
-        assert!(camera_to_acescg(singular).is_none());
+        assert!(camera_to_acescg(singular, D65_XY).is_none());
     }
 
     #[test]

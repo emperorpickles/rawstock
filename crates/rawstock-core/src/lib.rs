@@ -11,10 +11,12 @@
 
 #![forbid(unsafe_code)]
 
+pub mod camera_matrices;
 mod cie1931;
 pub mod color;
 pub mod decode;
 mod defringe;
+mod gamut;
 pub mod geometry;
 #[cfg(feature = "gpu")]
 pub mod gpu;

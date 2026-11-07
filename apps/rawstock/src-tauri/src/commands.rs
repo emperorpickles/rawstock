@@ -211,7 +211,7 @@ async fn as_shot_white_balance(
     let read = path.clone();
     let as_shot = tauri::async_runtime::spawn_blocking(move || {
         RawImage::open(&read).ok().and_then(|raw| {
-            WhiteBalanceSolver::new(raw.camera_matrix(), raw.as_shot_wb())
+            WhiteBalanceSolver::new(raw.camera_matrices(), raw.as_shot_wb())
                 .and_then(|solver| solver.as_shot())
                 .map(AsShotWhiteBalance::from)
         })

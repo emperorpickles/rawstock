@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use rawstock_core::camera_matrices::CameraMatrices;
 use rawstock_core::color::{CameraImage, LinearImage, QuickDevelop};
 use rawstock_core::decode::Orientation;
 use rawstock_core::render::{DevelopControl, Fidelity, NopControl, Parameters, Pipeline, Stage};
@@ -729,7 +730,7 @@ fn camera_frame(width: u32, height: u32) -> CameraImage {
         let level = 0.02 + (index % 23) as f32 * 0.04;
         pixels.extend([level / 1.9, level, level / 1.8]);
     }
-    CameraImage::new(width, height, pixels, XT3, AS_SHOT).unwrap()
+    CameraImage::new(width, height, pixels, CameraMatrices::single(XT3), AS_SHOT).unwrap()
 }
 
 #[test]

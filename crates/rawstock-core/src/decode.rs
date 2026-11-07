@@ -13,6 +13,8 @@ use rawler::rawimage::RawImageData;
 use rawler::rawimage::RawPhotometricInterpretation;
 use thiserror::Error;
 
+use crate::camera_matrices::CameraMatrices;
+
 /// How the sensor samples are arranged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CfaKind {
@@ -425,8 +427,8 @@ pub struct RawImage {
     white_levels: Vec<f32>,
     /// As-shot white balance in RGBE order, as encoded by the file.
     as_shot_wb: [f32; 4],
-    /// XYZ → camera RGBE matrix.
-    camera_matrix: [[f32; 3]; 4],
+    /// XYZ → camera matrices, one or two calibrations.
+    camera_matrices: CameraMatrices,
     /// Correct chromatic aberration when developing. On by default.
     correct_chromatic_aberration: bool,
     /// Sensor samples and CFA layout. Not part of [`Debug`] output.
@@ -478,9 +480,16 @@ impl RawImage {
         self.as_shot_wb
     }
 
-    /// Camera color matrix, XYZ → camera RGBE, row-major.
+    /// Camera color matrix at D65, XYZ → camera RGBE, row-major. With two
+    /// calibrations it is interpolated; see [`Self::camera_matrices`].
     pub fn camera_matrix(&self) -> [[f32; 3]; 4] {
-        self.camera_matrix
+        self.camera_matrices.at_d65()
+    }
+
+    /// The file's color matrices: one, or two measured under different
+    /// lights, which a develop interpolates for the scene's light.
+    pub fn camera_matrices(&self) -> CameraMatrices {
+        self.camera_matrices
     }
 
     /// Whether [`Self::develop_linear`] corrects chromatic aberration:
@@ -534,10 +543,11 @@ impl RawImage {
             });
         }
 
-        let camera_matrix =
-            Self::camera_matrix_from(&decoded).ok_or_else(|| DecodeError::MissingCameraMatrix {
+        let camera_matrices = Self::camera_matrices_from(&decoded).ok_or_else(|| {
+            DecodeError::MissingCameraMatrix {
                 path: path.to_owned(),
-            })?;
+            }
+        })?;
 
         Ok(Self {
             width,
@@ -549,7 +559,7 @@ impl RawImage {
             black_levels,
             white_levels,
             as_shot_wb: decoded.wb_coeffs,
-            camera_matrix,
+            camera_matrices,
             correct_chromatic_aberration: true,
             decoded,
         })
@@ -566,10 +576,29 @@ impl RawImage {
         }
     }
 
-    /// `xyz_to_cam` when `rawler` filled it, otherwise the preferred DNG matrix.
-    fn camera_matrix_from(decoded: &rawler::rawimage::RawImage) -> Option<[[f32; 3]; 4]> {
+    /// `xyz_to_cam` when `rawler` filled it. Otherwise the file's (or
+    /// rawler's) color matrices: the warmest and coolest calibrations with a
+    /// known illuminant, or one matrix, preferring D65, when no two qualify.
+    fn camera_matrices_from(decoded: &rawler::rawimage::RawImage) -> Option<CameraMatrices> {
         if Self::matrix_has_value(&decoded.xyz_to_cam) {
-            return Some(decoded.xyz_to_cam);
+            return Some(CameraMatrices::single(decoded.xyz_to_cam));
+        }
+
+        let mut calibrated: Vec<(f64, [[f32; 3]; 4])> = decoded
+            .color_matrix
+            .iter()
+            .filter_map(|(illuminant, flat)| {
+                Some((
+                    CameraMatrices::illuminant_kelvin(*illuminant)?,
+                    Self::matrix_from_flat(flat)?,
+                ))
+            })
+            .collect();
+        calibrated.sort_by(|a, b| a.0.total_cmp(&b.0));
+        if let (Some(warm), Some(cool)) = (calibrated.first(), calibrated.last())
+            && warm.0 < cool.0
+        {
+            return Some(CameraMatrices::dual(*warm, *cool));
         }
 
         let preferred = [
@@ -578,8 +607,14 @@ impl RawImage {
             Illuminant::D55,
             Illuminant::A,
         ];
-        let (_, flat) = decoded.color_matrix_find_first(preferred)?;
-        Self::matrix_from_flat(&flat)
+        let (_, flat) = decoded.color_matrix_find_first(preferred).or_else(|| {
+            decoded
+                .color_matrix
+                .iter()
+                .next()
+                .map(|(illuminant, flat)| (*illuminant, flat.clone()))
+        })?;
+        Some(CameraMatrices::single(Self::matrix_from_flat(&flat)?))
     }
 
     fn matrix_from_flat(flat: &[f32]) -> Option<[[f32; 3]; 4]> {
@@ -670,7 +705,7 @@ impl fmt::Debug for RawImage {
             .field("black_levels", &self.black_levels)
             .field("white_levels", &self.white_levels)
             .field("as_shot_wb", &self.as_shot_wb)
-            .field("camera_matrix", &self.camera_matrix)
+            .field("camera_matrices", &self.camera_matrices)
             .field(
                 "correct_chromatic_aberration",
                 &self.correct_chromatic_aberration,
@@ -689,7 +724,15 @@ impl fmt::Display for RawImage {
         writeln!(f, "white: {}", Self::format_levels(self.white_levels()))?;
         let [red, green, blue, extra] = self.as_shot_wb();
         writeln!(f, "as_shot_wb (RGBE): {red} {green} {blue} {extra}")?;
-        writeln!(f, "camera_matrix:")?;
+        let calibrations = self
+            .camera_matrices()
+            .calibrations()
+            .iter()
+            .map(|(kelvin, _)| format!("{kelvin} K"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(f, "matrix calibrations: {calibrations}")?;
+        writeln!(f, "camera_matrix (D65):")?;
         for (index, row) in self.camera_matrix().into_iter().enumerate() {
             let line = format!("  {} {} {}", row[0], row[1], row[2]);
             if index + 1 == 4 {

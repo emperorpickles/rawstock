@@ -205,6 +205,81 @@ fn srgb_oetf(value: f32) -> f32 {
     return 1.055 * pow(linear, 1.0 / 2.4) - 0.055;
 }
 
+// `GamutMap` in `gamut.rs`: Oklab matrices (Ottosson), each row a vec3 so
+// `dot` reads it as the Rust `mul` does.
+const OKLAB_RGB_TO_LMS = mat3x3<f32>(
+    vec3<f32>(0.4122214708, 0.5363325363, 0.0514459929),
+    vec3<f32>(0.2119034982, 0.6806995451, 0.1073969566),
+    vec3<f32>(0.0883024619, 0.2817188376, 0.6299787005),
+);
+const OKLAB_LMS_TO_LAB = mat3x3<f32>(
+    vec3<f32>(0.2104542553, 0.7936177850, -0.0040720468),
+    vec3<f32>(1.9779984951, -2.4285922050, 0.4505937099),
+    vec3<f32>(0.0259040371, 0.7827717662, -0.8086757660),
+);
+const OKLAB_LAB_TO_LMS = mat3x3<f32>(
+    vec3<f32>(1.0, 0.3963377774, 0.2158037573),
+    vec3<f32>(1.0, -0.1055613458, -0.0638541728),
+    vec3<f32>(1.0, -0.0894841775, -1.2914855480),
+);
+const OKLAB_LMS_TO_RGB = mat3x3<f32>(
+    vec3<f32>(4.0767416621, -3.3077115913, 0.2309699292),
+    vec3<f32>(-1.2684380046, 2.6097574011, -0.3413193965),
+    vec3<f32>(-0.0041960863, -0.7034186147, 1.7076147010),
+);
+// `GamutMap::STEPS`.
+const GAMUT_STEPS = 24u;
+
+// The matrices above hold rows, so a row-vector product applies them.
+fn gamut_mul(rows: mat3x3<f32>, value: vec3<f32>) -> vec3<f32> {
+    return value * rows;
+}
+
+fn gamut_inside(rgb: vec3<f32>) -> bool {
+    return all(rgb >= vec3<f32>(0.0)) && all(rgb <= vec3<f32>(1.0));
+}
+
+fn oklab_from_rgb(rgb: vec3<f32>) -> vec3<f32> {
+    let lms = gamut_mul(OKLAB_RGB_TO_LMS, rgb);
+    // `pow` is only approximate on some GPUs: one Newton step brings the
+    // cube root to f32 precision, as `f64::cbrt` is on the CPU.
+    var root = sign(lms) * pow(abs(lms), vec3<f32>(1.0 / 3.0));
+    let square = root * root;
+    root = select(root, root - (root * square - lms) / (3.0 * square), square > vec3<f32>(0.0));
+    return gamut_mul(OKLAB_LMS_TO_LAB, root);
+}
+
+fn rgb_from_oklab(lab: vec3<f32>) -> vec3<f32> {
+    let root = gamut_mul(OKLAB_LAB_TO_LMS, lab);
+    return gamut_mul(OKLAB_LMS_TO_RGB, root * root * root);
+}
+
+// `GamutMap::apply`: keep Oklab lightness and hue, cut chroma to the edge.
+fn gamut_map(rgb: vec3<f32>) -> vec3<f32> {
+    if !(is_finite(rgb.x) && is_finite(rgb.y) && is_finite(rgb.z)) || gamut_inside(rgb) {
+        return rgb;
+    }
+    let lab = oklab_from_rgb(rgb);
+    if lab.x >= 1.0 {
+        return vec3<f32>(1.0);
+    }
+    if lab.x <= 0.0 {
+        return vec3<f32>(0.0);
+    }
+    var inside = 0.0;
+    var outside = 1.0;
+    for (var step = 0u; step < GAMUT_STEPS; step += 1u) {
+        let middle = 0.5 * (inside + outside);
+        if gamut_inside(rgb_from_oklab(vec3<f32>(lab.x, lab.yz * middle))) {
+            inside = middle;
+        } else {
+            outside = middle;
+        }
+    }
+    let scale = 0.5 * (inside + outside);
+    return clamp(rgb_from_oklab(vec3<f32>(lab.x, lab.yz * scale)), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
 // `color::encode_srgb`.
 @compute @workgroup_size(256)
 fn encode(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
@@ -213,11 +288,12 @@ fn encode(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups)
         return;
     }
     let linear = load(pixel);
-    store(pixel, vec3<f32>(
-        srgb_oetf(dot(params.srgb[0].xyz, linear)),
-        srgb_oetf(dot(params.srgb[1].xyz, linear)),
-        srgb_oetf(dot(params.srgb[2].xyz, linear)),
+    let mapped = gamut_map(vec3<f32>(
+        dot(params.srgb[0].xyz, linear),
+        dot(params.srgb[1].xyz, linear),
+        dot(params.srgb[2].xyz, linear),
     ));
+    store(pixel, vec3<f32>(srgb_oetf(mapped.x), srgb_oetf(mapped.y), srgb_oetf(mapped.z)));
 }
 
 // Jakob-Hanika upsampling, from `spectrum.rs`.
