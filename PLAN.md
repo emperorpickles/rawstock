@@ -81,6 +81,10 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
 
 ## In flight
 
+- **#123** — 1.0 app chromatic aberration correction toggle (`agent: grok`,
+  `stage: ready`). Adjust checkbox, default on, writes `lens.caCorrection`.
+  Preview, full develop, and export already apply it; turning it off or on
+  reopens the decode session.
 - **#17** — Provia simulation fit (`agent: grok`, `stage: holding`).
   Waiting on more Provia RAF+JPEG pairs from Caleb. Pairs already in hand
   are held out. Do not commit them.

@@ -134,6 +134,17 @@
     {/if}
   </div>
 
+  <label class="check">
+    <input
+      type="checkbox"
+      checked={settings.lens.caCorrection}
+      {disabled}
+      onchange={(event) =>
+        send(Adjustments.caCorrection(settings, event.currentTarget.checked), true)}
+    />
+    <span>Chromatic aberration correction</span>
+  </label>
+
   <Slider
     label="Print exposure"
     value={settings.printExposure}
@@ -343,6 +354,20 @@
     gap: 0.45rem;
     margin: 0.35rem 0 0.55rem;
     font-size: 0.85rem;
+  }
+
+  .check {
+    align-items: flex-start;
+  }
+
+  .check input {
+    flex: none;
+    margin-top: 0.18rem;
+    accent-color: var(--accent);
+  }
+
+  .check span {
+    min-width: 0;
   }
 
   .field {

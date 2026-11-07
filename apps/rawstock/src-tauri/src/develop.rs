@@ -32,7 +32,9 @@
 //! custom temperature and tint re-convert instead of decoding again: the
 //! fit proxy at once, the full frame when a full develop or export next
 //! needs it. That buffer is freed with the session when another photo
-//! opens.
+//! opens. Chromatic aberration correction is applied while the file is
+//! decoded, so preview, full develop, and export reuse the session only
+//! while that switch stays the same. Turning it off or on opens it again.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -166,6 +168,12 @@ impl GpuStart {
     }
 }
 
+/// The decoded session can develop `path` only at the same chromatic
+/// aberration setting. The correction is baked in at decode.
+fn same_decode(open_path: &Path, open_ca: bool, path: &Path, ca_correction: bool) -> bool {
+    open_path == path && open_ca == ca_correction
+}
+
 /// The photo the session was built from.
 pub(crate) struct Opened {
     image_id: String,
@@ -276,7 +284,12 @@ impl Service {
     fn develop(&mut self, request: &DevelopRequest) -> Result<Option<SrgbImage>, String> {
         let settings = &request.settings;
         let reuse = self.open.as_ref().is_some_and(|open| {
-            open.path == request.path && open.ca_correction == settings.lens.ca_correction
+            same_decode(
+                &open.path,
+                open.ca_correction,
+                &request.path,
+                settings.lens.ca_correction,
+            )
         });
         if !reuse {
             self.open = None;
@@ -688,6 +701,18 @@ mod tests {
         live.set(false);
         assert!(session.render_proxy(&mut control).is_err());
         assert!(session.render_full(&mut control).is_err());
+    }
+
+    #[test]
+    fn turning_ca_correction_opens_the_decoded_session_again() {
+        let path = Path::new("/photos/a.RAF");
+        let other = Path::new("/photos/b.RAF");
+        assert!(same_decode(path, true, path, true));
+        assert!(same_decode(path, false, path, false));
+        assert!(!same_decode(path, true, path, false));
+        assert!(!same_decode(path, false, path, true));
+        assert!(!same_decode(path, true, other, true));
+        assert!(!same_decode(path, false, other, false));
     }
 
     #[test]

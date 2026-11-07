@@ -433,6 +433,39 @@ tint = 1.5
     }
 
     #[test]
+    fn ca_correction_round_trips_on_and_off_beside_the_raw() {
+        let dir = TempDir::new();
+        let raw = write_raw(
+            dir.0.as_path(),
+            "frame.RAF",
+            b"RAWSTOCK-FIXTURE\nsupport: decodes\n",
+        );
+        let revisions = revision_map();
+        let installed = *revisions.get("velvia").expect("velvia stock");
+        let mut settings = sample_settings(installed);
+        assert!(settings.lens.ca_correction);
+
+        settings.lens.ca_correction = false;
+        write(&raw, &settings).unwrap();
+        let off_text = std::fs::read_to_string(sidecar_path(&raw)).unwrap();
+        assert!(off_text.contains("caCorrection = false"), "{off_text}");
+        let (off, detail) = load(&raw, &revisions);
+        assert!(detail.is_none(), "{detail:?}");
+        assert!(!off.settings.expect("settings").lens.ca_correction);
+
+        settings.lens.ca_correction = true;
+        write(&raw, &settings).unwrap();
+        let on_text = std::fs::read_to_string(sidecar_path(&raw)).unwrap();
+        assert!(on_text.contains("caCorrection = true"), "{on_text}");
+        let (on, _) = load(&raw, &revisions);
+        assert!(on.settings.expect("settings").lens.ca_correction);
+        assert_eq!(
+            fingerprint(&raw).1,
+            sha256(b"RAWSTOCK-FIXTURE\nsupport: decodes\n")
+        );
+    }
+
+    #[test]
     fn a_malformed_sidecar_is_never_overwritten_until_reset() {
         let dir = TempDir::new();
         let raw_bytes = b"RAWSTOCK-FIXTURE\nsupport: decodes\nmake: Fujifilm\nmodel: X-T2\n";
