@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { CropMath, Framing } from "./geometry.ts";
+import { CropMath, CropMode, Framing } from "./geometry.ts";
 
 const close = (actual, expected, tolerance = 1e-6) =>
   assert.ok(Math.abs(actual - expected) <= tolerance, `${actual} is not ${expected}`);
@@ -75,4 +75,51 @@ test("a horizon drawn on a straightened photo adds to its angle", () => {
   assert.equal(CropMath.levelled(2, -1.5), 0.5);
   assert.equal(CropMath.levelled(40, 10), 45);
   assert.equal(CropMath.levelled(-1, 1), 0);
+});
+
+test("the cropped view rounds the crop outward like rawstock-core", () => {
+  // The same cases as crop_rounds_outward_in_the_turned_frame.
+  assert.deepEqual(Framing.cropPixels({ x: 0.5, y: 0.5, w: 0.5, h: 0.5 }, 4, 2), { x: 2, y: 1, width: 2, height: 1 });
+  assert.deepEqual(Framing.cropPixels({ x: 0, y: 0, w: 0.5, h: 0.5 }, 6, 8), { x: 0, y: 0, width: 3, height: 4 });
+  assert.deepEqual(Framing.cropPixels(undefined, 6, 8), { x: 0, y: 0, width: 6, height: 8 });
+  assert.deepEqual(Framing.cropPixels({ x: 0.999, y: 0, w: 0.001, h: 1 }, 10, 10), { x: 9, y: 0, width: 1, height: 10 });
+});
+
+test("the cropped map puts the crop's corner at the origin", () => {
+  const map = Framing.imageToFrame(600, 400, 1, 4);
+  const crop = Framing.cropPixels({ x: 0.25, y: 0.1, w: 0.5, h: 0.5 }, 400, 600);
+  const inner = Framing.cropped(map, crop);
+  const source = Framing.apply(Framing.invert(map), { x: crop.x, y: crop.y });
+  const corner = Framing.apply(inner, source);
+  close(corner.x, 0);
+  close(corner.y, 0);
+});
+
+test("recentering keeps the same point of the photo in the middle", () => {
+  const full = { x: 0, y: 0, width: 600, height: 400 };
+  const crop = { x: 150, y: 100, width: 300, height: 200 };
+  const inCrop = Framing.recenter({ x: 0.5, y: 0.5 }, full, crop);
+  close(inCrop.x, 0.5);
+  close(inCrop.y, 0.5);
+  const back = Framing.recenter({ x: 0, y: 1 }, crop, full);
+  close(back.x, 0.25);
+  close(back.y, 0.75);
+});
+
+test("crop mode closes on Enter and Esc, but not from fields or buttons", () => {
+  const key = (name, extra = {}) => ({ key: name, metaKey: false, ctrlKey: false, altKey: false, ...extra });
+  assert.equal(CropMode.isExitKey(key("Enter"), "BODY"), true);
+  assert.equal(CropMode.isExitKey(key("Escape"), "SPAN"), true);
+  assert.equal(CropMode.isExitKey(key("Enter"), "BUTTON"), false);
+  assert.equal(CropMode.isExitKey(key("Escape"), "BUTTON"), true);
+  assert.equal(CropMode.isExitKey(key("Escape"), "INPUT"), false);
+  assert.equal(CropMode.isExitKey(key("Enter", { metaKey: true }), "BODY"), false);
+  assert.equal(CropMode.isExitKey(key("r"), "BODY"), false);
+});
+
+test("crop mode compares geometry by value", () => {
+  const a = { quarterTurns: 1, straightenDeg: 2, crop: { x: 0.1, y: 0.2, w: 0.5, h: 0.5 } };
+  assert.equal(CropMode.sameGeometry(a, { ...a, crop: { ...a.crop } }), true);
+  assert.equal(CropMode.sameGeometry(a, { ...a, crop: undefined }), false);
+  assert.equal(CropMode.sameGeometry(a, { ...a, straightenDeg: 0 }), false);
 });

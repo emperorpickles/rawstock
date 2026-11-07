@@ -43,6 +43,7 @@ test("the cheat sheet shows Cmd on macOS and Ctrl on Windows", () => {
   assert.equal(row(windows, "redo"), "Ctrl+Shift+Z or Ctrl+Y");
   assert.equal(row(mac, "clipping"), "J");
   assert.equal(row(windows, "split"), "Y");
+  assert.equal(row(mac, "crop"), "R");
   assert.equal(row(mac, "cheat-sheet"), "?");
   assert.equal(row(windows, "filmstrip-next"), "Right Arrow");
   const actions = new Set(SHORTCUTS.map((spec) => spec.action));

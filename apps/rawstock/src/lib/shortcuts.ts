@@ -51,6 +51,7 @@ export const SHORTCUTS: readonly ShortcutSpec[] = [
   { action: "split", label: "Split before and after", key: "y", mod: false },
   { action: "before-after", label: "Before and after", key: "\\", mod: false },
   { action: "clipping", label: "Clipping overlay", key: "j", mod: false },
+  { action: "crop", label: "Crop", key: "r", mod: false },
   { action: "filmstrip-prev", label: "Previous photo", key: "ArrowLeft", mod: false },
   { action: "filmstrip-next", label: "Next photo", key: "ArrowRight", mod: false },
   { action: "filmstrip-first", label: "First photo", key: "Home", mod: false },
@@ -91,7 +92,7 @@ export class Shortcuts {
 
   /**
    * Modifier shortcuts use Command on macOS and Control elsewhere.
-   * `\` , `Y`, `J`, `?`, and the arrow keys have no modifier. `Ctrl+Y` is redo on
+   * `\` , `Y`, `J`, `R`, `?`, and the arrow keys have no modifier. `Ctrl+Y` is redo on
    * Windows. Returns null while a text field is focused so those keys type
    * instead.
    */

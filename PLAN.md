@@ -137,6 +137,12 @@ On `main`, through the Markesteijn merge (#14, `06d863d`):
   Neutral ships under a Reference group and new photos open on it. In
   Split and Before/After the badges pick stock A and stock B (the edit),
   with a swap; A develops the current edit through another stock.
+- **#121** — 1.0 app crop mode, like Lightroom (`agent: claude`, `stage:
+  ready`, waiting on Caleb's look review). The Crop tool (toolbar, View
+  menu, `R`) shows the whole frame with the handles and a thirds grid;
+  Enter or `R` keeps the crop and Esc puts back the geometry crop mode
+  opened with. Outside it the viewer shows only the cropped photo, and
+  Fit, 100% and 200% frame the crop.
 - **#52, #53** — 1.0 app presets and export queue (`agent: claude`,
   `stage: holding`) until #39 and #41 land.
 - **#63** — Lavapipe apt timeout and retry in CI (`agent: grok`). GPU

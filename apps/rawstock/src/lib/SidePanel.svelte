@@ -13,11 +13,13 @@
     frameWidth = 0,
     frameHeight = 0,
     horizon = false,
+    cropping = false,
     asShot = undefined,
     onstock,
     onpreview,
     oncommit,
     onhorizon,
+    oncropping,
   }: {
     stocks: StockSummary[];
     stockId?: string;
@@ -27,11 +29,13 @@
     frameWidth?: number;
     frameHeight?: number;
     horizon?: boolean;
+    cropping?: boolean;
     asShot?: AsShotWhiteBalance | null;
     onstock: (stock: StockSummary) => void;
     onpreview: (settings: EditSettings) => void;
     oncommit: (settings: EditSettings) => void;
     onhorizon: (on: boolean) => void;
+    oncropping: (on: boolean) => void;
   } = $props();
 
 </script>
@@ -53,10 +57,12 @@
     {frameWidth}
     {frameHeight}
     {horizon}
+    {cropping}
     {asShot}
     {onpreview}
     {oncommit}
     {onhorizon}
+    {oncropping}
   />
 </aside>
 

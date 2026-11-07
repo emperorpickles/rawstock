@@ -46,6 +46,7 @@
   import Preferences from "./lib/preferences/Preferences.svelte";
   import { Preferences as Prefs } from "./lib/preferences/settings";
   import type { AppSettings } from "./lib/preferences/settings";
+  import { CropMode } from "./lib/geometry";
   import { Shortcuts } from "./lib/shortcuts";
   import SidePanel from "./lib/SidePanel.svelte";
   import { StockBrowser, ThumbnailRequests } from "./lib/stockBrowser";
@@ -135,6 +136,10 @@
   let committed = $state<EditSettings | null>(null);
   let resetting = $state(false);
   let horizon = $state(false);
+  /** Crop mode: the viewer shows the whole frame with the crop handles. */
+  let cropping = $state(false);
+  /** The geometry when crop mode opened, which Esc puts back. */
+  let cropEntry: EditSettings["geometry"] | null = null;
   /** The straighten slider is moving: the viewer shows its level grid. */
   let straightening = $state(false);
   /**
@@ -265,6 +270,11 @@
     const cleanups: Array<() => void> = [];
     const onKey = (event: KeyboardEvent) => {
       if (document.querySelector("dialog[open]")) {
+        return;
+      }
+      if (cropping && CropMode.isExitKey(event, (event.target as HTMLElement | null)?.tagName ?? "")) {
+        event.preventDefault();
+        setCropping(false, event.key === "Escape");
         return;
       }
       const action = Shortcuts.actionFor(event);
@@ -578,6 +588,8 @@
       }
       notice = info.fileName;
       horizon = false;
+      cropping = false;
+      cropEntry = null;
       straightening = false;
       previewKeys = { requested: "", settled: "" };
       if (!info.error) {
@@ -712,6 +724,31 @@
     }
   }
 
+  /**
+   * Opens or closes crop mode. Closing with `cancel` puts back the geometry
+   * crop mode opened with, as one undoable step.
+   */
+  function setCropping(on: boolean, cancel: boolean) {
+    if (on === cropping) {
+      return;
+    }
+    if (on) {
+      if (!selected || selectedImage?.error) {
+        return;
+      }
+      cropEntry = $state.snapshot(settings.geometry);
+      cropping = true;
+      return;
+    }
+    const entry = cropEntry;
+    cropping = false;
+    cropEntry = null;
+    horizon = false;
+    if (cancel && entry && !CropMode.sameGeometry(entry, settings.geometry)) {
+      applyCommit({ ...settings, geometry: entry });
+    }
+  }
+
   function editStraighten(degrees: number, commit: boolean) {
     const next = Adjustments.straighten(settings, degrees);
     if (commit) {
@@ -808,6 +845,8 @@
           errors = [appError(error).message];
         }
         selected = "";
+        cropping = false;
+        cropEntry = null;
         reviewer?.close();
         committed = null;
         thumbnails = {};
@@ -841,6 +880,9 @@
         break;
       case "clipping":
         clipping = !clipping;
+        break;
+      case "crop":
+        setCropping(!cropping, false);
         break;
       case "preferences":
         preferencesOpen = true;
@@ -1087,6 +1129,15 @@
     <button type="button" aria-pressed={split} aria-keyshortcuts="Y" onclick={() => (split = !split)}>Split</button>
     <button type="button" aria-pressed={compare} aria-keyshortcuts={"\\"} onclick={() => (compare = !compare)}>Before/After</button>
     <button type="button" aria-pressed={clipping} aria-keyshortcuts="J" onclick={() => (clipping = !clipping)}>Clipping</button>
+    <button
+      type="button"
+      aria-pressed={cropping}
+      aria-keyshortcuts="R"
+      disabled={!selected || !!openProblem}
+      onclick={() => setCropping(!cropping, false)}
+    >
+      Crop
+    </button>
   </header>
 
   {#if errors.length}
@@ -1129,6 +1180,7 @@
         onopen={() => void perform("open")}
         edit={settings.geometry}
         {horizon}
+        {cropping}
         guides={straightening}
         onzoom={(next) => (zoom = next)}
         onregion={viewChanged}
@@ -1185,11 +1237,13 @@
       frameWidth={review?.width || selectedImage?.width || 0}
       frameHeight={review?.height || selectedImage?.height || 0}
       {horizon}
+      {cropping}
       asShot={selectedAsShot}
       onstock={chooseStock}
       onpreview={applyPreview}
       oncommit={applyCommit}
       onhorizon={(on) => (horizon = on)}
+      oncropping={(on) => setCropping(on, false)}
     />
   </div>
 
@@ -1213,6 +1267,7 @@
     <span>{progress || notice}</span>
     {#if compare}<span>Before</span>{:else if split}<span>Split</span>{/if}
     {#if clipping}<span>Clipping</span>{/if}
+    {#if cropping}<span>Crop</span>{/if}
   </footer>
 </div>
 

@@ -4,7 +4,7 @@
   import type { CropRect, GeometryEdit } from "./contract";
   import type { PackedFrame } from "./frame";
   import { CropMath, Framing, GeometryView } from "./geometry";
-  import type { Affine } from "./geometry";
+  import type { Affine, FrameRect } from "./geometry";
   import { Clipping, Divider, Viewport } from "./review/review";
   import type { Layer, Rect, ReviewView, Side, Zoom } from "./review/review";
 
@@ -21,6 +21,7 @@
     edit = null,
     horizon = false,
     guides = false,
+    cropping = false,
     onopen,
     onzoom,
     onregion,
@@ -44,6 +45,11 @@
     horizon?: boolean;
     /** Show the straighten grid, while the straighten slider moves. */
     guides?: boolean;
+    /**
+     * Crop mode: the whole turned, straightened frame with the crop handles.
+     * Otherwise the viewer shows only the cropped photo, as it exports.
+     */
+    cropping?: boolean;
     onopen: () => void;
     onzoom: (zoom: Zoom) => void;
     /** Visible image rectangle at 100% or 200%, in image pixels. */
@@ -73,6 +79,8 @@
   let frameRequest = 0;
   let reported = "";
   let shownImage = "";
+  /** The part of the frame `center` was last measured in. */
+  let centerIn: FrameRect | null = null;
 
   // Pan is a normalised image centre, so it survives the proxy giving way
   // to the full frame. It is not reactive: the canvas redraws on demand.
@@ -99,6 +107,10 @@
     view && view.width > 0 ? Framing.imageToFrame(view.width, view.height, turns, straighten) : null,
   );
   const shownCrop = $derived(edit?.crop ?? { x: 0, y: 0, w: 1, h: 1 });
+  /** The frame pixels on screen: the export's own crop, or all of it in crop mode. */
+  const viewed = $derived<FrameRect>(
+    Framing.cropPixels(cropping ? undefined : edit?.crop, oriented.width, oriented.height),
+  );
   const lockRatio = $derived(
     CropMath.pixelRatio(CropMath.infer(edit?.crop, oriented.width, oriented.height), oriented.width, oriented.height),
   );
@@ -133,10 +145,11 @@
 
   $effect(() => {
     // Redraw whenever anything drawn changes.
-    void [view, zoom, split, showBefore, clipping, divider, viewWidth, viewHeight, canvas, edit, toFrame];
+    void [view, zoom, split, showBefore, clipping, divider, viewWidth, viewHeight, canvas, edit, toFrame, viewed];
     if (view?.imageId !== shownImage) {
       shownImage = view?.imageId ?? "";
       center = { x: 0.5, y: 0.5 };
+      centerIn = null;
       shown = { after: null, before: null };
       reported = "";
     }
@@ -231,14 +244,15 @@
 
   /**
    * Zoom and pan work in the framed photo, so 100% is one export pixel per
-   * device pixel and the pan follows the turned, straightened frame.
+   * device pixel and the pan follows the turned, straightened frame. Outside
+   * crop mode that frame is the crop.
    */
   function geometry() {
     const ratio = window.devicePixelRatio || 1;
     const width = Math.max(1, Math.floor(viewWidth * ratio));
     const height = Math.max(1, Math.floor(viewHeight * ratio));
-    const frameWidth = oriented.width;
-    const frameHeight = oriented.height;
+    const frameWidth = viewed.width;
+    const frameHeight = viewed.height;
     const gutter = GUTTER * ratio;
     const scale = Viewport.scale(zoom, frameWidth, frameHeight, width, height, gutter);
     return { ratio, width, height, frameWidth, frameHeight, gutter, scale };
@@ -264,11 +278,17 @@
       placeFrame(null);
       return;
     }
+    if (centerIn && (centerIn.x !== viewed.x || centerIn.y !== viewed.y || centerIn.width !== frameWidth || centerIn.height !== frameHeight)) {
+      // Entering or leaving crop mode keeps the same spot in the middle.
+      center = Framing.recenter(center, centerIn, viewed);
+    }
+    centerIn = viewed;
     center = Viewport.clampCenter(center, frameWidth, frameHeight, width, height, scale, gutter);
     const origin = Viewport.origin(center, frameWidth, frameHeight, width, height, scale);
     const shownFrame = Viewport.visibleRect(center, frameWidth, frameHeight, width, height, scale);
+    const toViewed = Framing.cropped(toFrame, viewed);
     // The camera-frame pixels under the visible part of the frame.
-    const visible = Framing.imageBounds(toFrame, shownFrame, view.width, view.height);
+    const visible = Framing.imageBounds(toViewed, shownFrame, view.width, view.height);
     if (zoom !== "fit") {
       const key = `${view.imageId}:${visible.x}:${visible.y}:${visible.width}:${visible.height}`;
       if (key !== reported) {
@@ -293,7 +313,7 @@
           ]
         : [{ side: "after", from: 0, to: width }];
 
-    const toCanvas = Framing.then(toFrame, { a: scale, b: 0, c: 0, d: scale, e: origin.x, f: origin.y });
+    const toCanvas = Framing.then(toViewed, { a: scale, b: 0, c: 0, d: scale, e: origin.x, f: origin.y });
     // Whole pixels stay sharp only when the straighten angle is level.
     const level = Math.abs(straighten) < 1e-6;
     for (const pane of panes) {
@@ -309,7 +329,7 @@
       context.save();
       context.beginPath();
       // The frame's edge is the export's edge; a straightened photo's
-      // overhang is not drawn.
+      // overhang and, outside crop mode, the cropped-off edges are not drawn.
       context.rect(left, origin.y, right - left, frameHeight * scale);
       context.clip();
       context.setTransform(toCanvas.a, toCanvas.b, toCanvas.c, toCanvas.d, toCanvas.e, toCanvas.f);
@@ -534,7 +554,7 @@
         style:height="{frameBox.height}px"
       ></div>
     {/if}
-    {#if frameBox && hasLayer && oncrop && !horizon}
+    {#if frameBox && hasLayer && oncrop && cropping && !horizon}
       <div
         class="edit-frame"
         style:left="{frameBox.left}px"
@@ -576,6 +596,12 @@
         {#if statusLabel}<span class="badge" role="status">{statusLabel}</span>{/if}
         {#if beforeNote}<span class="badge">{beforeNote}</span>{/if}
       </div>
+      {#if cropping}
+        <div class="badges bottom-center" role="status">
+          <span class="badge strong">Crop</span>
+          <span class="badge">Drag the handles. Enter or R keeps it, Esc puts it back.</span>
+        </div>
+      {/if}
       {#if split && !showBefore}
         <div class="badges top-right">
           {#if afterTag}{@render afterTag()}{:else}<span class="badge strong">After</span>{/if}
@@ -715,6 +741,14 @@
     top: 0.75rem;
     right: 0.75rem;
     justify-content: flex-end;
+  }
+
+  .bottom-center {
+    bottom: 0.75rem;
+    left: 50%;
+    transform: translateX(-50%);
+    justify-content: center;
+    max-width: calc(100% - 1.5rem);
   }
 
   .bottom-left {
